@@ -102,7 +102,6 @@ fn gen_method(method: &Method) -> TokenStream {
     let method_ident = quote::format_ident!("{}", method.name);
     let def_ident = quote::format_ident!("{}Def", method.proto_name);
     let input_type = quote::format_ident!("{}", method.input_type);
-    let output_type = quote::format_ident!("{}", method.output_type);
     let comments = &method.comments.leading;
 
     quote! {

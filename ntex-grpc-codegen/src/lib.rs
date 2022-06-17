@@ -1,6 +1,5 @@
 //! Thrift service code generator
-// #![deny(rust_2018_idioms, warnings)]
-#![allow(dead_code, unused_variables)]
+#![deny(rust_2018_idioms, warnings)]
 
 mod config;
 mod generator;

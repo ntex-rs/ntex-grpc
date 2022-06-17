@@ -119,9 +119,7 @@ impl Inner {
 
         if let Some(inflight) = inner.get_mut(&id) {
             match msg.kind().take() {
-                h2::MessageKind::Headers {
-                    pseudo, headers, ..
-                } => {
+                h2::MessageKind::Headers { .. } => {
                     // println!("Got response: {:#?}\nheaders: {:#?}", pseudo, headers);
                 }
                 h2::MessageKind::Data(data) => {

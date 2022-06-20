@@ -25,6 +25,7 @@ openssl = "0.10"
 env_logger = { version = "0.9", default-features = false }
 ntex = { version = "0.5", features = ["openssl", "tokio"] }
 ntex-tls = { version = "0.1", features = ["openssl"] }
+ntex-connect = { version = "0.1", features = ["openssl", "tokio"] }
 
 [build-dependencies]
 ntex-grpc-codegen = "*"

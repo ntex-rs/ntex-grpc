@@ -65,6 +65,7 @@ fn main() {
                         .await
                         .unwrap();
                     counters.register_request();
+                    break;
                 }
             });
         });

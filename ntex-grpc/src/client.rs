@@ -2,14 +2,14 @@ use std::{cell::RefCell, future::Future, mem, rc::Rc};
 
 use async_trait::async_trait;
 use ntex::channel::oneshot;
-use ntex::connect::{Address, Connect, ConnectError, Connector as DefaultConnector};
-use ntex::http::{header, HeaderMap, Method};
 use ntex::io::IoBoxed;
 use ntex::service::{fn_service, IntoService, Service};
 use ntex::util::{Buf, BufMut, Bytes, BytesMut, HashMap, Ready};
+use ntex_connect::{Address, Connect, ConnectError, Connector as DefaultConnector};
 use ntex_h2 as h2;
 use ntex_h2::client::{Client, Connector};
 use ntex_h2::{frame::StreamId, Stream};
+use ntex_http::{header, HeaderMap, Method};
 use prost::Message;
 
 use crate::{consts, service::MethodDef, service::Transport, ServiceError};
@@ -84,8 +84,12 @@ impl Transport for ClientTransport {
         hdrs.append(header::USER_AGENT, consts::HDRV_USER_AGENT);
         hdrs.insert(header::TE, consts::HDRV_TRAILERS);
 
-        let stream = self.0.client.send_request(Method::POST, T::PATH, hdrs);
-        stream.send_data(buf.freeze(), true);
+        let stream = self
+            .0
+            .client
+            .send_request(Method::POST, T::PATH, hdrs)
+            .await?;
+        stream.send_payload(buf.freeze(), true).await?;
 
         let (tx, rx) = oneshot::channel();
         self.0.inflight.borrow_mut().insert(
@@ -122,7 +126,7 @@ impl Inner {
                 h2::MessageKind::Headers { .. } => {
                     // println!("Got response: {:#?}\nheaders: {:#?}", pseudo, headers);
                 }
-                h2::MessageKind::Data(data) => {
+                h2::MessageKind::Data(data, _cap) => {
                     inflight.data.push(data);
                 }
                 h2::MessageKind::Eof(data) => {

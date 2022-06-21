@@ -4,11 +4,12 @@ version = "0.1.0"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 edition = "2018"
 
-[lib]
-name = "ntex_grpc_codegen"
-path = "src/lib.rs"
+[[bin]]
+name = "ntex-grpc"
+path = "src/main.rs"
 
 [dependencies]
+clap = { version = "3.2", features = ["derive"] }
 prost-build = "0.10"
 proc-macro2 = "1.0"
 quote = "1.0"

@@ -11,8 +11,8 @@ pub use crate::service::{Client, MethodDef, Transport};
 
 #[doc(hidden)]
 pub mod codegen {
-    pub use ntex::service::Service;
-    pub use ntex::util::ByteString;
+    pub use ntex_bytes::ByteString;
+    pub use ntex_service::Service;
 
     pub use crate::request::{Request, Response};
     pub use crate::service::{Client, MethodDef, Transport};

@@ -1,3 +1,5 @@
+/// DO NOT MODIFY. Auto-generated file
+
 /// The request message containing the user's name.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct HelloRequest {
@@ -10,7 +12,8 @@ pub struct HelloReply {
     #[prost(string, tag = "1")]
     pub message: ::prost::alloc::string::String,
 }
-#[doc = r" Service client definition"]
+
+/// `Greeter` Service client definition
 pub mod greeter_client {
     use super::*;
     use ntex_grpc::codegen as __ng;

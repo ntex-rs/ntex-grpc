@@ -1,15 +1,16 @@
 use std::{cell::RefCell, future::Future, mem, rc::Rc};
 
 use async_trait::async_trait;
-use ntex::channel::oneshot;
-use ntex::io::IoBoxed;
-use ntex::service::{fn_service, IntoService, Service};
-use ntex::util::{Buf, BufMut, Bytes, BytesMut, HashMap, Ready};
+use ntex_bytes::{Buf, BufMut, Bytes, BytesMut};
 use ntex_connect::{Address, Connect, ConnectError, Connector as DefaultConnector};
 use ntex_h2 as h2;
 use ntex_h2::client::{Client, Connector};
 use ntex_h2::{frame::StreamId, Stream};
 use ntex_http::{header, HeaderMap, Method};
+use ntex_io::IoBoxed;
+use ntex_service::{fn_service, IntoService, Service};
+use ntex_util::channel::oneshot;
+use ntex_util::{future::Ready, HashMap};
 use prost::Message;
 
 use crate::{consts, service::MethodDef, service::Transport, ServiceError};
@@ -50,18 +51,20 @@ impl Data {
     }
 
     fn push(&mut self, data: Bytes) {
-        *self = match mem::replace(self, Data::Empty) {
-            Data::Data(d) => {
-                let mut d = BytesMut::from(d);
-                d.extend_from_slice(&data);
-                Data::MutData(d)
-            }
-            Data::MutData(mut d) => {
-                d.extend_from_slice(&data);
-                Data::MutData(d)
-            }
-            Data::Empty => Data::Data(data),
-        };
+        if !data.is_empty() {
+            *self = match mem::replace(self, Data::Empty) {
+                Data::Data(d) => {
+                    let mut d = BytesMut::from(d);
+                    d.extend_from_slice(&data);
+                    Data::MutData(d)
+                }
+                Data::MutData(mut d) => {
+                    d.extend_from_slice(&data);
+                    Data::MutData(d)
+                }
+                Data::Empty => Data::Data(data),
+            };
+        }
     }
 }
 
@@ -198,7 +201,7 @@ where
             });
 
             let tr = inner.clone();
-            ntex::rt::spawn(async move {
+            ntex_rt::spawn(async move {
                 let _ = con
                     .start(fn_service(move |msg: h2::Message| {
                         Ready::from(tr.handle_message(msg))

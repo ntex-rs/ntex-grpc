@@ -2,14 +2,43 @@ use proc_macro2::TokenStream;
 use prost_build::{Method, Service, ServiceGenerator};
 use quote::quote;
 
-use crate::snake_case;
+fn snake_case(s: &str) -> String {
+    let mut ident = String::new();
+    for ch in s.chars() {
+        if ch.is_uppercase() {
+            if !ident.is_empty() {
+                ident.push('_');
+            }
+            for ch in ch.to_lowercase() {
+                ident.push(ch);
+            }
+        } else {
+            ident.push(ch);
+        }
+    }
+    ident
+}
 
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct GrpcServiceGenerator;
 
 impl ServiceGenerator for GrpcServiceGenerator {
     fn generate(&mut self, service: Service, buf: &mut String) {
+        log::trace!(
+            "Generate client for service: {:?}\n{:#?}",
+            service.name,
+            service
+        );
+
+        buf.push_str(&format!(
+            "\n/// `{}` service client definition\n",
+            service.name
+        ));
         generate_client(&service, buf);
+    }
+
+    fn finalize(&mut self, buf: &mut String) {
+        buf.insert_str(0, "/// DO NOT MODIFY. Auto-generated file\n\n\n")
     }
 }
 
@@ -25,7 +54,6 @@ fn generate_client(service: &Service, buf: &mut String) {
     let comments = &service.comments.leading;
 
     let stream = quote! {
-        /// Service client definition
         pub mod #mod_ident {
             use super::*;
             use ntex_grpc::codegen as __ng;
@@ -71,8 +99,6 @@ fn generate_client(service: &Service, buf: &mut String) {
         }
     };
     buf.push_str(&format!("{}", stream));
-
-    println!("\nSERVICE: {:#?}", service);
 }
 
 fn gen_method_def(method: &Method, service: &Service) -> TokenStream {

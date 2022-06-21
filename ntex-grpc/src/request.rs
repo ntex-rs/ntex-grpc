@@ -1,7 +1,7 @@
 use std::{future::Future, pin::Pin, task::Context, task::Poll};
 
-use ntex::util::ready;
 use ntex_http::HeaderMap;
+use ntex_util::ready;
 
 use crate::service::{MethodDef, Transport};
 

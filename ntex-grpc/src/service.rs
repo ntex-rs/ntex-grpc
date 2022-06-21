@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ntex::util::ByteString;
+use ntex_bytes::ByteString;
 use ntex_http::HeaderMap;
 
 /// Trait for service method definition

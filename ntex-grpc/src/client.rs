@@ -139,7 +139,7 @@ impl Inner {
                             Ok((inflight.data.get(), HeaderMap::default()))
                         }
                         h2::StreamEof::Trailers(hdrs) => Ok((inflight.data.get(), hdrs)),
-                        h2::StreamEof::Reset(reason) => Err(ServiceError::H2Reset(reason)),
+                        h2::StreamEof::Error(err) => Err(ServiceError::Stream(err.into())),
                     };
                     let _ = inner.remove(&id).unwrap().tx.send(result);
                 }

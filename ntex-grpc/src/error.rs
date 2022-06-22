@@ -1,4 +1,4 @@
-use ntex_h2::{frame::Reason, OperationError};
+use ntex_h2::{OperationError, StreamError};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ServiceError {
@@ -6,8 +6,8 @@ pub enum ServiceError {
     Canceled,
     #[error("{0}")]
     ProstEncoder(#[from] prost::EncodeError),
-    #[error("Http2 stream has been reset: {0}")]
-    H2Reset(Reason),
     #[error("Http2 operation error: {0}")]
     Operation(#[from] OperationError),
+    #[error("Http2 stream error: {0}")]
+    Stream(#[from] StreamError),
 }

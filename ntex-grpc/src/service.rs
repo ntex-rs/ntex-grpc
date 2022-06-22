@@ -25,7 +25,7 @@ pub trait Transport {
 }
 
 /// Client utils methods
-pub trait Client<T> {
+pub trait ClientInformation<T> {
     fn transport(&self) -> &T;
 
     /// Get mut referece to underlying transport

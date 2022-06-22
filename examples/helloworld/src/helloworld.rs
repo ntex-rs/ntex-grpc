@@ -13,7 +13,7 @@ pub struct HelloReply {
     pub message: ::prost::alloc::string::String,
 }
 
-/// `Greeter` Service client definition
+/// `Greeter` service client definition
 pub mod greeter_client {
     use super::*;
     use ntex_grpc::codegen as __ng;
@@ -27,7 +27,7 @@ pub mod greeter_client {
             Greeter(transport)
         }
     }
-    impl<T> __ng::Client<T> for Greeter<T> {
+    impl<T> __ng::ClientInformation<T> for Greeter<T> {
         #[inline]
         #[doc = r" Get referece to underlying transport"]
         fn transport(&self) -> &T {

@@ -1,7 +1,7 @@
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, thread, time::Duration};
 
 use ntex::{rt::spawn, rt::System};
-use ntex_grpc::client::ClientConnector;
+use ntex_grpc::client::Connector;
 
 mod helloworld;
 use self::helloworld::{greeter_client::Greeter, HelloRequest};
@@ -37,7 +37,7 @@ fn main() {
             let sys = System::new("client");
 
             let _ = sys.block_on(async move {
-                let connector = ClientConnector::new();
+                let connector = Connector::new();
                 let transport = connector.connect(addr.clone()).await.unwrap();
                 let client = Greeter::new(transport);
 

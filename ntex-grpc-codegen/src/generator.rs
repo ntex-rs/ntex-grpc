@@ -70,7 +70,7 @@ fn generate_client(service: &Service, buf: &mut String) {
                 }
             }
 
-            impl<T> __ng::Client<T> for #service_ident<T> {
+            impl<T> __ng::ClientInformation<T> for #service_ident<T> {
                 #[inline]
                 /// Get referece to underlying transport
                 fn transport(&self) -> &T {

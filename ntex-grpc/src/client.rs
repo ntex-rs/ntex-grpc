@@ -3,14 +3,11 @@ use std::{cell::RefCell, future::Future, mem, rc::Rc};
 use async_trait::async_trait;
 use ntex_bytes::{Buf, BufMut, Bytes, BytesMut};
 use ntex_connect::{Address, Connect, ConnectError, Connector as DefaultConnector};
-use ntex_h2 as h2;
-use ntex_h2::client::{Client, Connector};
-use ntex_h2::{frame::StreamId, Stream};
+use ntex_h2::{self as h2, client, frame::StreamId, Stream};
 use ntex_http::{header, HeaderMap, Method};
 use ntex_io::IoBoxed;
 use ntex_service::{fn_service, IntoService, Service};
-use ntex_util::channel::oneshot;
-use ntex_util::{future::Ready, HashMap};
+use ntex_util::{channel::oneshot, future::Ready, HashMap};
 use prost::Message;
 
 use crate::{consts, service::MethodDef, service::Transport, ServiceError};
@@ -22,10 +19,10 @@ pub enum ClientError {
 }
 
 #[derive(Clone)]
-pub struct ClientTransport(Rc<Inner>);
+pub struct Client(Rc<Inner>);
 
 struct Inner {
-    client: Client,
+    client: client::Client,
     inflight: RefCell<HashMap<StreamId, Inflight>>,
 }
 
@@ -36,16 +33,16 @@ struct Inflight {
 }
 
 enum Data {
-    Data(Bytes),
-    MutData(BytesMut),
+    Chunk(Bytes),
+    MutChunk(BytesMut),
     Empty,
 }
 
 impl Data {
     fn get(&mut self) -> Bytes {
         match mem::replace(self, Data::Empty) {
-            Data::Data(data) => data,
-            Data::MutData(data) => data.freeze(),
+            Data::Chunk(data) => data,
+            Data::MutChunk(data) => data.freeze(),
             Data::Empty => Bytes::new(),
         }
     }
@@ -53,23 +50,23 @@ impl Data {
     fn push(&mut self, data: Bytes) {
         if !data.is_empty() {
             *self = match mem::replace(self, Data::Empty) {
-                Data::Data(d) => {
+                Data::Chunk(d) => {
                     let mut d = BytesMut::from(d);
                     d.extend_from_slice(&data);
-                    Data::MutData(d)
+                    Data::MutChunk(d)
                 }
-                Data::MutData(mut d) => {
+                Data::MutChunk(mut d) => {
                     d.extend_from_slice(&data);
-                    Data::MutData(d)
+                    Data::MutChunk(d)
                 }
-                Data::Empty => Data::Data(data),
+                Data::Empty => Data::Chunk(data),
             };
         }
     }
 }
 
 #[async_trait(?Send)]
-impl Transport for ClientTransport {
+impl Transport for Client {
     type Error = ServiceError;
 
     async fn request<T: MethodDef>(
@@ -139,7 +136,7 @@ impl Inner {
                             Ok((inflight.data.get(), HeaderMap::default()))
                         }
                         h2::StreamEof::Trailers(hdrs) => Ok((inflight.data.get(), hdrs)),
-                        h2::StreamEof::Error(err) => Err(ServiceError::Stream(err.into())),
+                        h2::StreamEof::Error(err) => Err(ServiceError::Stream(err)),
                     };
                     let _ = inner.remove(&id).unwrap().tx.send(result);
                 }
@@ -152,48 +149,45 @@ impl Inner {
     }
 }
 
-pub struct ClientConnector<A, T>(Connector<A, T>);
+pub struct Connector<A, T>(Rc<client::Connector<A, T>>);
 
-impl<A> ClientConnector<A, ()>
+impl<A> Connector<A, ()>
 where
     A: Address,
 {
     #[allow(clippy::new_ret_no_self)]
     /// Create new h2 connector
-    pub fn new() -> ClientConnector<A, DefaultConnector<A>> {
-        ClientConnector(Connector::new())
+    pub fn new() -> Connector<A, DefaultConnector<A>> {
+        Connector(Rc::new(client::Connector::new()))
     }
 }
 
-impl<A, T> ClientConnector<A, T>
+impl<A, T> Connector<A, T>
 where
     A: Address,
 {
     /// Use custom connector
-    pub fn connector<U, F>(self, connector: F) -> ClientConnector<A, U>
+    pub fn connector<U, F>(self, connector: F) -> Connector<A, U>
     where
         F: IntoService<U, Connect<A>>,
         U: Service<Connect<A>, Error = ConnectError>,
         IoBoxed: From<U::Response>,
     {
-        ClientConnector(self.0.connector(connector))
+        Connector(Rc::new(self.0.connector(connector)))
     }
 }
 
-impl<A, T> ClientConnector<A, T>
+impl<A, T> Connector<A, T>
 where
     A: Address,
     T: Service<Connect<A>, Error = ConnectError>,
     IoBoxed: From<T::Response>,
 {
     /// Connect to http2 server
-    pub fn connect(
-        &self,
-        address: A,
-    ) -> impl Future<Output = Result<ClientTransport, ClientError>> {
-        let fut = self.0.connect(address);
+    pub fn connect(&self, address: A) -> impl Future<Output = Result<Client, ClientError>> {
+        let slf = self.0.clone();
         async move {
-            let con = fut.await?;
+            let con = slf.connect(address).await?;
             let client = con.client();
             let inner = Rc::new(Inner {
                 client,
@@ -208,7 +202,7 @@ where
                     }))
                     .await;
             });
-            Ok(ClientTransport(inner))
+            Ok(Client(inner))
         }
     }
 }

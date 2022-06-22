@@ -14,10 +14,9 @@ impl NGrpcGenerator {
         let mut cfg = Config::default();
         cfg.service_generator(Box::new(GrpcServiceGenerator));
 
-        let current = env::current_dir().unwrap();
-        let mut src = current.clone();
-        src.push("src");
-        cfg.out_dir(src);
+        let mut current = env::current_dir().unwrap();
+        current.push("src");
+        cfg.out_dir(current);
 
         Self { pconfig: cfg }
     }

@@ -47,7 +47,7 @@ fn main() {
                     spawn(async move {
                         loop {
                             client
-                                .say_hello(HelloRequest {
+                                .say_hello(&HelloRequest {
                                     name: "world".into(),
                                 })
                                 .await
@@ -59,7 +59,7 @@ fn main() {
 
                 loop {
                     client
-                        .say_hello(HelloRequest {
+                        .say_hello(&HelloRequest {
                             name: "world".into(),
                         })
                         .await

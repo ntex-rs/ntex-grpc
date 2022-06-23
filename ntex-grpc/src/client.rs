@@ -92,7 +92,7 @@ impl Transport for Client {
 
     async fn request<T: MethodDef>(
         &self,
-        val: T::Input,
+        val: &T::Input,
     ) -> Result<(T::Output, HeaderMap), Self::Error> {
         let len = val.encoded_len();
         let mut buf = BytesMut::with_capacity(len + 5);

@@ -53,7 +53,10 @@ pub mod greeter_client {
     }
     impl<T: __ng::Transport> Greeter<T> {
         #[doc = " Sends a greeting"]
-        pub fn say_hello(&self, req: HelloRequest) -> __ng::Request<'_, T, SayHelloDef> {
+        pub fn say_hello<'a>(
+            &'a self,
+            req: &'a HelloRequest,
+        ) -> __ng::Request<'a, T, SayHelloDef> {
             __ng::Request::new(&self.0, req)
         }
     }

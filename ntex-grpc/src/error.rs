@@ -1,6 +1,6 @@
 use ntex_h2::{OperationError, StreamError};
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Clone, Debug)]
 pub enum ServiceError {
     #[error("Canceled")]
     Canceled,

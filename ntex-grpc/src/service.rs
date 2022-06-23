@@ -20,7 +20,7 @@ pub trait Transport {
 
     async fn request<T: MethodDef>(
         &self,
-        args: T::Input,
+        args: &T::Input,
     ) -> Result<(T::Output, HeaderMap), Self::Error>;
 }
 

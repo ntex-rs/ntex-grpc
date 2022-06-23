@@ -11,7 +11,7 @@ pub struct Request<'a, T: Transport, M: MethodDef> {
 }
 
 enum State<'a, M: MethodDef, E> {
-    Request(M::Input),
+    Request(&'a M::Input),
     #[allow(clippy::type_complexity)]
     Call(Pin<Box<dyn Future<Output = Result<(M::Output, HeaderMap), E>> + 'a>>),
     Done,
@@ -24,7 +24,7 @@ where
     T: Transport,
     M: MethodDef,
 {
-    pub fn new(transport: &'a T, input: M::Input) -> Self {
+    pub fn new(transport: &'a T, input: &'a M::Input) -> Self {
         Self {
             transport,
             state: State::Request(input),

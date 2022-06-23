@@ -130,7 +130,7 @@ fn gen_method(method: &Method) -> TokenStream {
 
     quote! {
         #[doc = #(#comments)*]
-        pub fn #method_ident(&self, req: #input_type) -> __ng::Request<'_, T, #def_ident> {
+        pub fn #method_ident<'a>(&'a self, req: &'a #input_type) -> __ng::Request<'a, T, #def_ident> {
             __ng::Request::new(&self.0, req)
         }
     }

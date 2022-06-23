@@ -45,6 +45,14 @@ fn generate_client(service: &Service, buf: &mut String) {
         #[derive(Clone)]
         pub struct #service_ident<T>(T);
 
+        impl<T> #service_ident<T> {
+            #[inline]
+            /// Create new client instance
+            pub fn new(transport: T) -> Self {
+                Self(transport)
+            }
+        }
+
         impl<T> ngrpc::ClientInformation<T> for #service_ident<T> {
             #[inline]
             /// Create new client instance

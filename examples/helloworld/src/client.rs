@@ -5,7 +5,7 @@ use ntex::{rt::spawn, rt::System};
 use ntex_grpc::client::Connector;
 
 mod helloworld;
-use self::helloworld::{greeter_client::Greeter, HelloRequest};
+use self::helloworld::{GreeterClient, HelloRequest};
 
 fn main() {
     std::env::set_var("RUST_LOG", "trace");
@@ -39,7 +39,7 @@ fn main() {
 
             let _ = sys.block_on(async move {
                 let connector = Connector::default();
-                let client: Greeter<_> = connector.create(addr.clone()).await.unwrap();
+                let client: GreeterClient<_> = connector.create(addr.clone()).await.unwrap();
 
                 for _ in 0..concurrency - 1 {
                     let cnt = counters.clone();

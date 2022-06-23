@@ -87,13 +87,10 @@ impl Client {
 }
 
 #[async_trait(?Send)]
-impl Transport for Client {
+impl<T: MethodDef> Transport<T> for Client {
     type Error = ServiceError;
 
-    async fn request<T: MethodDef>(
-        &self,
-        val: &T::Input,
-    ) -> Result<(T::Output, HeaderMap), Self::Error> {
+    async fn request(&self, val: &T::Input) -> Result<(T::Output, HeaderMap), Self::Error> {
         let len = val.encoded_len();
         let mut buf = BytesMut::with_capacity(len + 5);
         buf.put_u8(0); // compression

@@ -14,14 +14,11 @@ pub trait MethodDef {
 }
 
 #[async_trait(?Send)]
-pub trait Transport {
+pub trait Transport<T: MethodDef> {
     /// Errors produced by the service.
     type Error;
 
-    async fn request<T: MethodDef>(
-        &self,
-        args: &T::Input,
-    ) -> Result<(T::Output, HeaderMap), Self::Error>;
+    async fn request(&self, args: &T::Input) -> Result<(T::Output, HeaderMap), Self::Error>;
 }
 
 /// Client utils methods

@@ -5,7 +5,7 @@ use ntex_util::ready;
 
 use crate::service::{MethodDef, Transport};
 
-pub struct Request<'a, T: Transport, M: MethodDef> {
+pub struct Request<'a, T: Transport<M>, M: MethodDef> {
     transport: &'a T,
     state: State<'a, M, T::Error>,
 }
@@ -21,7 +21,7 @@ impl<'a, M: MethodDef, E> Unpin for State<'a, M, E> {}
 
 impl<'a, T, M> Request<'a, T, M>
 where
-    T: Transport,
+    T: Transport<M>,
     M: MethodDef,
 {
     pub fn new(transport: &'a T, input: &'a M::Input) -> Self {
@@ -34,7 +34,7 @@ where
 
 impl<'a, T, M: 'a> Future for Request<'a, T, M>
 where
-    T: Transport,
+    T: Transport<M>,
     M: MethodDef,
 {
     type Output = Result<Response<M::Output>, T::Error>;
@@ -51,7 +51,7 @@ where
         }
         match std::mem::replace(&mut slf.state, State::Done) {
             State::Request(input) => {
-                slf.state = State::Call(slf.transport.request::<M>(input));
+                slf.state = State::Call(slf.transport.request(input));
                 self.poll(cx)
             }
             _ => panic!("Future cannot be polled after completion"),

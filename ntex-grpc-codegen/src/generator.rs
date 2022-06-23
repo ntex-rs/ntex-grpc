@@ -45,13 +45,15 @@ impl ServiceGenerator for GrpcServiceGenerator {
 fn generate_client(service: &Service, buf: &mut String) {
     let mod_ident = quote::format_ident!("{}_client", snake_case(&service.name));
     let service_ident = quote::format_ident!("{}", service.name);
-    let methods: Vec<_> = service.methods.iter().map(gen_method).collect();
-    let m_defs: Vec<_> = service
+    let methods: Vec<_> = service
         .methods
         .iter()
-        .map(|m| gen_method_def(m, service))
+        .map(|m| gen_method(m, service))
         .collect();
-    let comments = &service.comments.leading;
+    let mut comments = service.comments.leading.clone();
+    if comments.is_empty() {
+        comments.push("".to_string());
+    }
 
     let stream = quote! {
         pub mod #mod_ident {
@@ -88,26 +90,28 @@ fn generate_client(service: &Service, buf: &mut String) {
                 }
             }
 
-            #(#m_defs)*
-
-            impl<T: __ng::Transport> #service_ident<T>
-            {
-                #(#methods)*
-            }
+            #(#methods)*
         }
     };
     buf.push_str(&format!("{}", stream));
 }
 
-fn gen_method_def(method: &Method, service: &Service) -> TokenStream {
-    let def_ident = quote::format_ident!("{}Def", method.proto_name);
+fn gen_method(method: &Method, service: &Service) -> TokenStream {
     let proto_name = &method.proto_name;
     let path = format!(
         "/{}.{}/{}",
         service.package, service.proto_name, method.proto_name
     );
+
+    let service_ident = quote::format_ident!("{}", service.name);
+    let method_ident = quote::format_ident!("{}", method.name);
+    let def_ident = quote::format_ident!("{}Def", method.proto_name);
     let input_type = quote::format_ident!("{}", method.input_type);
     let output_type = quote::format_ident!("{}", method.output_type);
+    let mut comments = method.comments.leading.clone();
+    if comments.is_empty() {
+        comments.push("".to_string());
+    }
 
     quote! {
         #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -119,19 +123,12 @@ fn gen_method_def(method: &Method, service: &Service) -> TokenStream {
             type Input = #input_type;
             type Output = #output_type;
         }
-    }
-}
 
-fn gen_method(method: &Method) -> TokenStream {
-    let method_ident = quote::format_ident!("{}", method.name);
-    let def_ident = quote::format_ident!("{}Def", method.proto_name);
-    let input_type = quote::format_ident!("{}", method.input_type);
-    let comments = &method.comments.leading;
-
-    quote! {
-        #[doc = #(#comments)*]
-        pub fn #method_ident<'a>(&'a self, req: &'a #input_type) -> __ng::Request<'a, T, #def_ident> {
-            __ng::Request::new(&self.0, req)
+        impl<T: __ng::Transport<#def_ident>> #service_ident<T> {
+            #[doc = #(#comments)*]
+            pub fn #method_ident<'a>(&'a self, req: &'a #input_type) -> __ng::Request<'a, T, #def_ident> {
+                __ng::Request::new(&self.0, req)
+            }
         }
     }
 }

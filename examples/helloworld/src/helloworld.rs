@@ -51,7 +51,7 @@ pub mod greeter_client {
         type Input = HelloRequest;
         type Output = HelloReply;
     }
-    impl<T: __ng::Transport> Greeter<T> {
+    impl<T: __ng::Transport<SayHelloDef>> Greeter<T> {
         #[doc = " Sends a greeting"]
         pub fn say_hello<'a>(
             &'a self,

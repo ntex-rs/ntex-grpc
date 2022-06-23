@@ -38,7 +38,7 @@ fn main() {
             let sys = System::new("client");
 
             let _ = sys.block_on(async move {
-                let connector = Connector::new();
+                let connector = Connector::default();
                 let client: Greeter<_> = connector.create(addr.clone()).await.unwrap();
 
                 for _ in 0..concurrency - 1 {

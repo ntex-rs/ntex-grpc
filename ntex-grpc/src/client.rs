@@ -6,7 +6,7 @@ use ntex_connect::{Address, Connect, ConnectError, Connector as DefaultConnector
 use ntex_h2::{self as h2, client, frame::StreamId, Stream};
 use ntex_http::{header, HeaderMap, Method};
 use ntex_io::{IoBoxed, OnDisconnect};
-use ntex_service::{fn_service, IntoService, Service};
+use ntex_service::{fn_service, Service};
 use ntex_util::{channel::oneshot, future::Ready, HashMap};
 use prost::Message;
 
@@ -172,29 +172,42 @@ impl Inner {
 
 pub struct Connector<A, T>(Rc<client::Connector<A, T>>);
 
-impl<A> Connector<A, ()>
-where
-    A: Address,
-{
-    #[allow(clippy::new_ret_no_self)]
-    /// Create new h2 connector
-    pub fn new() -> Connector<A, DefaultConnector<A>> {
-        Connector(Rc::new(client::Connector::new()))
-    }
-}
-
 impl<A, T> Connector<A, T>
 where
     A: Address,
 {
-    /// Use custom connector
-    pub fn connector<U, F>(self, connector: F) -> Connector<A, U>
-    where
-        F: IntoService<U, Connect<A>>,
-        U: Service<Connect<A>, Error = ConnectError>,
-        IoBoxed: From<U::Response>,
-    {
-        Connector(Rc::new(self.0.connector(connector)))
+    /// Create new grpc connector
+    pub fn new(connector: client::Connector<A, T>) -> Connector<A, T> {
+        Connector(Rc::new(connector))
+    }
+}
+
+impl<A, T> Clone for Connector<A, T>
+where
+    A: Address,
+{
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<A> Default for Connector<A, DefaultConnector<A>>
+where
+    A: Address,
+{
+    fn default() -> Self {
+        Connector::new(client::Connector::default())
+    }
+}
+
+impl<A, T> From<client::Connector<A, T>> for Connector<A, T>
+where
+    A: Address,
+    T: Service<Connect<A>, Error = ConnectError>,
+    IoBoxed: From<T::Response>,
+{
+    fn from(connector: client::Connector<A, T>) -> Self {
+        Self(Rc::new(connector))
     }
 }
 

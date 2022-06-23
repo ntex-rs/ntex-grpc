@@ -1,3 +1,4 @@
+#![allow(deprecated, clippy::never_loop, clippy::expect_fun_call)]
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, thread, time::Duration};
 
 use ntex::{rt::spawn, rt::System};
@@ -26,7 +27,7 @@ fn main() {
     let threads = parse_u64_default(matches.value_of("threads"), num_cpus::get() as u64);
     let concurrency = parse_u64_default(matches.value_of("concurrency"), 1);
     let report_rate = parse_u64_default(matches.value_of("report-rate"), 1) as usize;
-    let perf_counters = Arc::new(PerfCounters::new());
+    let perf_counters = Arc::new(PerfCounters::default());
 
     for t in 0..threads {
         let addr = ip.clone();
@@ -38,8 +39,7 @@ fn main() {
 
             let _ = sys.block_on(async move {
                 let connector = Connector::new();
-                let transport = connector.connect(addr.clone()).await.unwrap();
-                let client = Greeter::new(transport);
+                let client: Greeter<_> = connector.create(addr.clone()).await.unwrap();
 
                 for _ in 0..concurrency - 1 {
                     let cnt = counters.clone();
@@ -116,8 +116,8 @@ pub struct PerfCounters {
     lat_max: AtomicUsize,
 }
 
-impl PerfCounters {
-    pub fn new() -> PerfCounters {
+impl Default for PerfCounters {
+    fn default() -> PerfCounters {
         PerfCounters {
             req: AtomicUsize::new(0),
             conn: AtomicUsize::new(0),
@@ -125,7 +125,9 @@ impl PerfCounters {
             lat_max: AtomicUsize::new(0),
         }
     }
+}
 
+impl PerfCounters {
     pub fn pull_request_count(&self) -> usize {
         self.req.swap(0, Ordering::SeqCst)
     }

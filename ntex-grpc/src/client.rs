@@ -5,12 +5,13 @@ use ntex_bytes::{Buf, BufMut, Bytes, BytesMut};
 use ntex_connect::{Address, Connect, ConnectError, Connector as DefaultConnector};
 use ntex_h2::{self as h2, client, frame::StreamId, Stream};
 use ntex_http::{header, HeaderMap, Method};
-use ntex_io::IoBoxed;
+use ntex_io::{IoBoxed, OnDisconnect};
 use ntex_service::{fn_service, IntoService, Service};
 use ntex_util::{channel::oneshot, future::Ready, HashMap};
 use prost::Message;
 
-use crate::{consts, service::MethodDef, service::Transport, ServiceError};
+use crate::service::{ClientInformation, MethodDef, Transport};
+use crate::{consts, ServiceError};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ClientError {
@@ -62,6 +63,26 @@ impl Data {
                 Data::Empty => Data::Chunk(data),
             };
         }
+    }
+}
+
+impl Client {
+    #[inline]
+    /// Gracefully close connection
+    pub fn close(&self) {
+        self.0.client.close()
+    }
+
+    #[inline]
+    /// Check if connection is closed
+    pub fn is_closed(&self) -> bool {
+        self.0.client.is_closed()
+    }
+
+    #[inline]
+    /// Notify when connection get closed
+    pub fn on_disconnect(&self) -> OnDisconnect {
+        self.0.client.on_disconnect()
     }
 }
 
@@ -183,6 +204,16 @@ where
     T: Service<Connect<A>, Error = ConnectError>,
     IoBoxed: From<T::Response>,
 {
+    /// Connect and create client instance
+    pub fn create<C: ClientInformation<Client>>(
+        &self,
+        address: A,
+    ) -> impl Future<Output = Result<C, ClientError>> {
+        let fut = self.connect(address);
+
+        async move { Ok(C::create(fut.await?)) }
+    }
+
     /// Connect to http2 server
     pub fn connect(&self, address: A) -> impl Future<Output = Result<Client, ClientError>> {
         let slf = self.0.clone();

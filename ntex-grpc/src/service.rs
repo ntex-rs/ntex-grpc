@@ -26,6 +26,10 @@ pub trait Transport {
 
 /// Client utils methods
 pub trait ClientInformation<T> {
+    /// Create new client instance
+    fn create(transport: T) -> Self;
+
+    /// Get reference to underlying transport
     fn transport(&self) -> &T;
 
     /// Get mut referece to underlying transport

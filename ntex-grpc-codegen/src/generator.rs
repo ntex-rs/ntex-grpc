@@ -62,15 +62,13 @@ fn generate_client(service: &Service, buf: &mut String) {
             #[derive(Clone)]
             pub struct #service_ident<T>(T);
 
-            impl<T> #service_ident<T> {
-                #[inline]
-                /// Create a new service client
-                pub fn new(transport: T) -> Self {
-                    #service_ident(transport)
-                }
-            }
-
             impl<T> __ng::ClientInformation<T> for #service_ident<T> {
+                #[inline]
+                /// Create new client instance
+                fn create(transport: T) -> Self {
+                    Self(transport)
+                }
+
                 #[inline]
                 /// Get referece to underlying transport
                 fn transport(&self) -> &T {

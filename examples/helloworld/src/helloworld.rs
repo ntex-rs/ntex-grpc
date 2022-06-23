@@ -20,14 +20,12 @@ pub mod greeter_client {
     #[doc = " The greeting service definition."]
     #[derive(Clone)]
     pub struct Greeter<T>(T);
-    impl<T> Greeter<T> {
-        #[inline]
-        #[doc = r" Create a new service client"]
-        pub fn new(transport: T) -> Self {
-            Greeter(transport)
-        }
-    }
     impl<T> __ng::ClientInformation<T> for Greeter<T> {
+        #[inline]
+        #[doc = r" Create new client instance"]
+        fn create(transport: T) -> Self {
+            Self(transport)
+        }
         #[inline]
         #[doc = r" Get referece to underlying transport"]
         fn transport(&self) -> &T {

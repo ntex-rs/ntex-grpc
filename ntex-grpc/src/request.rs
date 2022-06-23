@@ -12,6 +12,7 @@ pub struct Request<'a, T: Transport, M: MethodDef> {
 
 enum State<'a, M: MethodDef, E> {
     Request(M::Input),
+    #[allow(clippy::type_complexity)]
     Call(Pin<Box<dyn Future<Output = Result<(M::Output, HeaderMap), E>> + 'a>>),
     Done,
 }

@@ -58,12 +58,13 @@ fn main() {
                 }
 
                 loop {
-                    client
+                    let res = client
                         .say_hello(&HelloRequest {
                             name: "world".into(),
                         })
                         .await
                         .unwrap();
+                    println!("RES: {:?}", res);
                     counters.register_request();
                     break;
                 }

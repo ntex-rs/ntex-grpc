@@ -1,4 +1,5 @@
 use ntex_h2::{OperationError, StreamError};
+pub use prost::DecodeError;
 
 #[derive(thiserror::Error, Clone, Debug)]
 pub enum ServiceError {

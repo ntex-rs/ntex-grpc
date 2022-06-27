@@ -1,5 +1,5 @@
+use ntex_prost_build::{Method, Service, ServiceGenerator};
 use proc_macro2::TokenStream;
-use prost_build::{Method, Service, ServiceGenerator};
 use quote::quote;
 
 #[derive(Debug, Copy, Clone)]
@@ -23,7 +23,7 @@ impl ServiceGenerator for GrpcServiceGenerator {
     fn finalize(&mut self, buf: &mut String) {
         buf.insert_str(
             0,
-            "/// DO NOT MODIFY. Auto-generated file\nuse ntex_grpc::codegen as ngrpc;\n\n",
+            "#![allow(dead_code)]\n/// DO NOT MODIFY. Auto-generated file\n\n",
         )
     }
 }
@@ -53,7 +53,7 @@ fn generate_client(service: &Service, buf: &mut String) {
             }
         }
 
-        impl<T> ngrpc::ClientInformation<T> for #service_ident<T> {
+        impl<T> ::ntex_grpc::ClientInformation<T> for #service_ident<T> {
             #[inline]
             /// Create new client instance
             fn create(transport: T) -> Self {
@@ -105,17 +105,17 @@ fn gen_method(method: &Method, service: &Service) -> TokenStream {
         #[derive(Debug, Copy, Clone, PartialEq, Eq)]
         pub struct #def_ident;
 
-        impl ngrpc::MethodDef for #def_ident {
+        impl ::ntex_grpc::MethodDef for #def_ident {
             const NAME: &'static str = #proto_name;
-            const PATH: ngrpc::ByteString = ngrpc::ByteString::from_static(#path);
+            const PATH: ::ntex_grpc::types::ByteString = ::ntex_grpc::types::ByteString::from_static(#path);
             type Input = #input_type;
             type Output = #output_type;
         }
 
-        impl<T: ngrpc::Transport<#def_ident>> #service_ident<T> {
+        impl<T: ::ntex_grpc::Transport<#def_ident>> #service_ident<T> {
             #[doc = #(#comments)*]
-            pub fn #method_ident<'a>(&'a self, req: &'a #input_type) -> ngrpc::Request<'a, T, #def_ident> {
-                ngrpc::Request::new(&self.0, req)
+            pub fn #method_ident<'a>(&'a self, req: &'a #input_type) -> ::ntex_grpc::Request<'a, T, #def_ident> {
+                ::ntex_grpc::Request::new(&self.0, req)
             }
         }
     }

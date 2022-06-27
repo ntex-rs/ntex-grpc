@@ -1,6 +1,6 @@
 use std::{env, io, ops, path::Path};
 
-use prost_build::Config;
+use ntex_prost_build::Config;
 
 use crate::generator::GrpcServiceGenerator;
 
@@ -19,6 +19,11 @@ impl NGrpcGenerator {
         cfg.out_dir(current);
 
         Self { pconfig: cfg }
+    }
+
+    /// Map protobuf bytes type to custom rust type
+    pub fn map_bytes(&mut self, path: &str, rust_type: &str) {
+        let _ = self.pconfig.bytes(&[path], rust_type);
     }
 
     /// Compile `.proto` files into Rust files during a Cargo build with additional code generator

@@ -8,10 +8,9 @@ use ntex_http::{header, HeaderMap, Method};
 use ntex_io::{IoBoxed, OnDisconnect};
 use ntex_service::{fn_service, Service};
 use ntex_util::{channel::oneshot, future::Ready, HashMap};
-use prost::Message;
 
 use crate::service::{ClientInformation, MethodDef, Transport};
-use crate::{consts, ServiceError};
+use crate::{consts, Message, ServiceError};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ClientError {
@@ -105,7 +104,7 @@ impl<T: MethodDef> Transport<T> for Client {
         let stream = self
             .0
             .client
-            .send_request(Method::POST, T::PATH, hdrs)
+            .send_request(Method::POST, T::PATH, hdrs, false)
             .await?;
         stream.send_payload(buf.freeze(), true).await?;
 
@@ -123,7 +122,7 @@ impl<T: MethodDef> Transport<T> for Client {
             Ok(Ok((mut data, trailers))) => {
                 let _compressed = data.get_u8();
                 let len = data.get_u32();
-                match <T::Output as Message>::decode(data.split_to(len as usize)) {
+                match <T::Output as Message>::decode(&mut data.split_to(len as usize)) {
                     Ok(item) => Ok((item, trailers)),
                     Err(_e) => Err(ServiceError::Canceled),
                 }

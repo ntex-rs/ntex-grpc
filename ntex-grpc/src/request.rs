@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin, task::Context, task::Poll};
+use std::{fmt, future::Future, pin::Pin, task::Context, task::Poll};
 
 use ntex_http::HeaderMap;
 use ntex_util::ready;
@@ -73,5 +73,11 @@ impl<T> Response<T> {
     #[inline]
     pub fn into_parts(self) -> (T, HeaderMap) {
         (self.message, self.metadata)
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for Response<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.message.fmt(f)
     }
 }

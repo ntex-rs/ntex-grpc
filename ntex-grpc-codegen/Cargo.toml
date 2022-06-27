@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "3.2", features = ["derive"] }
-prost-build = "0.10"
+ntex-prost-build = "0.10.1"
 proc-macro2 = "1.0"
 quote = "1.0"
 syn = "1.0"

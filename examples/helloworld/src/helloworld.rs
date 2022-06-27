@@ -1,24 +1,31 @@
+#![allow(dead_code)]
 /// DO NOT MODIFY. Auto-generated file
-use ntex_grpc::codegen as ngrpc;
 
-/// The request message containing the user's name.
-#[derive(Clone, PartialEq, ::prost::Message)]
+///  The request message containing the user's name.
+#[derive(Clone, PartialEq, ::ntex_grpc::Message)]
 pub struct HelloRequest {
-    #[prost(string, tag = "1")]
-    pub name: ::prost::alloc::string::String,
+    #[prost(bytes, tag = "1")]
+    pub name: ::ntex_grpc::types::Bytes,
 }
-/// The response message containing the greetings
-#[derive(Clone, PartialEq, ::prost::Message)]
+///  The response message containing the greetings
+#[derive(Clone, PartialEq, ::ntex_grpc::Message)]
 pub struct HelloReply {
     #[prost(string, tag = "1")]
-    pub message: ::prost::alloc::string::String,
+    pub message: ::ntex_grpc::types::ByteString,
 }
 
 /// `Greeter` service client definition
 #[doc = " The greeting service definition."]
 #[derive(Clone)]
 pub struct GreeterClient<T>(T);
-impl<T> ngrpc::ClientInformation<T> for GreeterClient<T> {
+impl<T> GreeterClient<T> {
+    #[inline]
+    #[doc = r" Create new client instance"]
+    pub fn new(transport: T) -> Self {
+        Self(transport)
+    }
+}
+impl<T> ::ntex_grpc::ClientInformation<T> for GreeterClient<T> {
     #[inline]
     #[doc = r" Create new client instance"]
     fn create(transport: T) -> Self {
@@ -42,18 +49,19 @@ impl<T> ngrpc::ClientInformation<T> for GreeterClient<T> {
 }
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct GreeterSayHelloMethod;
-impl ngrpc::MethodDef for GreeterSayHelloMethod {
+impl ::ntex_grpc::MethodDef for GreeterSayHelloMethod {
     const NAME: &'static str = "SayHello";
-    const PATH: ngrpc::ByteString = ngrpc::ByteString::from_static("/helloworld.Greeter/SayHello");
+    const PATH: ::ntex_grpc::types::ByteString =
+        ::ntex_grpc::types::ByteString::from_static("/helloworld.Greeter/SayHello");
     type Input = HelloRequest;
     type Output = HelloReply;
 }
-impl<T: ngrpc::Transport<GreeterSayHelloMethod>> GreeterClient<T> {
+impl<T: ::ntex_grpc::Transport<GreeterSayHelloMethod>> GreeterClient<T> {
     #[doc = " Sends a greeting"]
     pub fn say_hello<'a>(
         &'a self,
         req: &'a HelloRequest,
-    ) -> ngrpc::Request<'a, T, GreeterSayHelloMethod> {
-        ngrpc::Request::new(&self.0, req)
+    ) -> ::ntex_grpc::Request<'a, T, GreeterSayHelloMethod> {
+        ::ntex_grpc::Request::new(&self.0, req)
     }
 }

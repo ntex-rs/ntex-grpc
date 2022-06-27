@@ -2,15 +2,17 @@ use async_trait::async_trait;
 use ntex_bytes::ByteString;
 use ntex_http::HeaderMap;
 
+use crate::types::Message;
+
 /// Trait for service method definition
 pub trait MethodDef {
     const NAME: &'static str;
 
     const PATH: ByteString;
 
-    type Input: prost::Message;
+    type Input: Message;
 
-    type Output: prost::Message + Default;
+    type Output: Message;
 }
 
 #[async_trait(?Send)]

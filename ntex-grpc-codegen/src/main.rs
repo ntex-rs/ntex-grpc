@@ -29,6 +29,10 @@ struct Args {
     #[clap(short, long, value_parser, name = "INCLUDE-DIR")]
     include_dir: Vec<path::PathBuf>,
 
+    /// Map protobuf bytes type to custom rust type that implements BytesAdapter trait. {name}={rust-type-name}
+    #[clap(short, long, value_parser, name = "MAP-BYTES")]
+    map_bytes: Vec<String>,
+
     /// Path to rustfmt configuration file
     #[clap(short, long, value_parser, name = "RUSTFMT-PATH")]
     rustfmt_path: Option<path::PathBuf>,
@@ -43,6 +47,15 @@ fn main() -> io::Result<()> {
     if let Some(out_dir) = args.out_dir.clone() {
         cfg.out_dir(out_dir);
     }
+
+    for map in args.map_bytes {
+        if let Some((s1, s2)) = map.split_once('=') {
+            cfg.map_bytes(s1, s2)
+        } else {
+            println!("Cannot parse bytes mapping: {:?}", map);
+        }
+    }
+
     if let Err(e) = cfg.compile_protos(&args.proto, &args.include_dir) {
         println!("{}", e);
     } else {

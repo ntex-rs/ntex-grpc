@@ -1,7 +1,14 @@
 [package]
 name = "ntex-grpc-codegen"
 version = "0.1.0"
+license = "MIT"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
+description = "GRPC Client/Server framework (codegen)"
+documentation = "https://docs.rs/ntex-grpc-codegen"
+repository = "https://github.com/ntex-rs/ntex-grpc"
+readme = "README.md"
+keywords = ["grpc"]
+categories = ["asynchronous", "network-programming"]
 edition = "2018"
 
 [[bin]]

@@ -182,15 +182,15 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
             fn merge_field(
                 &mut self,
                 tag: u32,
-                wire_type: ::prost::encoding::WireType,
+                wire_type: ::ntex_grpc::prost::encoding::WireType,
                 buf: &mut ::ntex_grpc::types::Bytes,
-                ctx: ::prost::encoding::DecodeContext,
-            ) -> ::core::result::Result<(), ::prost::DecodeError>
+                ctx: ::ntex_grpc::prost::encoding::DecodeContext,
+            ) -> ::core::result::Result<(), ::ntex_grpc::DecodeError>
             {
                 #struct_name
                 match tag {
                     #(#merge)*
-                    _ => ::prost::encoding::skip_field(wire_type, tag, buf, ctx),
+                    _ => ::ntex_grpc::prost::encoding::skip_field(wire_type, tag, buf, ctx),
                 }
             }
 
@@ -435,10 +435,10 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
             pub fn merge(
                 field: &mut ::core::option::Option<#ident #ty_generics>,
                 tag: u32,
-                wire_type: ::prost::encoding::WireType,
+                wire_type: ::ntex_grpc::prost::encoding::WireType,
                 buf: &mut ::ntex_grpc::types::Bytes,
-                ctx: ::prost::encoding::DecodeContext,
-            ) -> ::core::result::Result<(), ::prost::DecodeError>
+                ctx: ::ntex_grpc::prost::encoding::DecodeContext,
+            ) -> ::core::result::Result<(), ::ntex_grpc::DecodeError>
             {
                 match tag {
                     #(#merge,)*

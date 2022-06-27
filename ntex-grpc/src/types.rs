@@ -120,6 +120,8 @@ pub trait BytesAdapter: Default + Sized {
     /// Clear content
     fn clear(&mut self);
 
+    fn is_equal(&self, val: &[u8]) -> bool;
+
     fn is_empty(&self) -> bool {
         self.len() == 0
     }

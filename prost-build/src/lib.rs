@@ -139,16 +139,11 @@ mod ident;
 mod message_graph;
 mod path;
 
-use std::collections::HashMap;
-use std::default;
-use std::env;
 use std::ffi::{OsStr, OsString};
-use std::fmt;
-use std::fs;
 use std::io::{Error, ErrorKind, Result, Write};
 use std::ops::RangeToInclusive;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{collections::HashMap, default, env, fmt, fs, process::Command};
 
 use log::trace;
 use prost::Message;
@@ -238,6 +233,22 @@ impl Default for BytesType {
     }
 }
 
+/// The string collection type to output for Protobuf `string` fields.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq)]
+enum StringType {
+    /// The [`ntex_bytes::ByteString`] type.
+    String,
+    /// Custom type that implements [`ntex_grpc::BytesAdater`] trait
+    Custom(String),
+}
+
+impl Default for StringType {
+    fn default() -> StringType {
+        StringType::String
+    }
+}
+
 /// Configuration options for Protobuf code generation.
 ///
 /// This configuration builder can be used to set non-default code generation options.
@@ -245,7 +256,8 @@ pub struct Config {
     file_descriptor_set_path: Option<PathBuf>,
     service_generator: Option<Box<dyn ServiceGenerator>>,
     map_type: PathMap<MapType>,
-    bytes_type: PathMap<BytesType>,
+    bytes_type: Vec<PathMap<BytesType>>,
+    strings_type: Vec<PathMap<StringType>>,
     type_attributes: PathMap<String>,
     field_attributes: PathMap<String>,
     prost_types: bool,
@@ -378,13 +390,30 @@ impl Config {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.bytes_type.clear();
+        let mut bytes_type = PathMap::default();
         for matcher in paths {
-            self.bytes_type.insert(
+            bytes_type.insert(
                 matcher.as_ref().to_string(),
                 BytesType::Custom(tp.to_string()),
             );
         }
+        self.bytes_type.push(bytes_type);
+        self
+    }
+
+    pub fn string<I, S>(&mut self, paths: I, tp: &str) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut strings_type = PathMap::default();
+        for matcher in paths {
+            strings_type.insert(
+                matcher.as_ref().to_string(),
+                StringType::Custom(tp.to_string()),
+            );
+        }
+        self.strings_type.push(strings_type);
         self
     }
 
@@ -1036,7 +1065,8 @@ impl default::Default for Config {
             file_descriptor_set_path: None,
             service_generator: None,
             map_type: PathMap::default(),
-            bytes_type: PathMap::default(),
+            bytes_type: Vec::default(),
+            strings_type: Vec::default(),
             type_attributes: PathMap::default(),
             field_attributes: PathMap::default(),
             prost_types: true,

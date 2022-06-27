@@ -131,18 +131,18 @@ impl Field {
     pub fn encode(&self, ident: TokenStream) -> TokenStream {
         let tag = self.tag;
         let key_mod = self.key_ty.module();
-        let ke = quote!(::prost::encoding::#key_mod::encode);
-        let kl = quote!(::prost::encoding::#key_mod::encoded_len);
+        let ke = quote!(::ntex_grpc::prost::encoding::#key_mod::encode);
+        let kl = quote!(::ntex_grpc::prost::encoding::#key_mod::encoded_len);
         let module = self.map_ty.module();
         match &self.value_ty {
             ValueTy::Scalar(scalar::Ty::Enumeration(ty)) => {
                 let default = quote!(#ty::default() as i32);
                 quote! {
-                    ::prost::encoding::#module::encode_with_default(
+                    ::ntex_grpc::prost::encoding::#module::encode_with_default(
                         #ke,
                         #kl,
-                        ::prost::encoding::int32::encode,
-                        ::prost::encoding::int32::encoded_len,
+                        ::ntex_grpc::prost::encoding::int32::encode,
+                        ::ntex_grpc::prost::encoding::int32::encoded_len,
                         &(#default),
                         #tag,
                         &#ident,
@@ -152,10 +152,10 @@ impl Field {
             }
             ValueTy::Scalar(value_ty) => {
                 let val_mod = value_ty.module();
-                let ve = quote!(::prost::encoding::#val_mod::encode);
-                let vl = quote!(::prost::encoding::#val_mod::encoded_len);
+                let ve = quote!(::ntex_grpc::prost::encoding::#val_mod::encode);
+                let vl = quote!(::ntex_grpc::prost::encoding::#val_mod::encoded_len);
                 quote! {
-                    ::prost::encoding::#module::encode(
+                    ::ntex_grpc::prost::encoding::#module::encode(
                         #ke,
                         #kl,
                         #ve,
@@ -167,11 +167,11 @@ impl Field {
                 }
             }
             ValueTy::Message => quote! {
-                ::prost::encoding::#module::encode(
+                ::ntex_grpc::prost::encoding::#module::encode(
                     #ke,
                     #kl,
-                    ::prost::encoding::message::encode,
-                    ::prost::encoding::message::encoded_len,
+                    ::ntex_grpc::prost::encoding::message::encode,
+                    ::ntex_grpc::prost::encoding::message::encoded_len,
                     #tag,
                     &#ident,
                     buf,
@@ -184,15 +184,15 @@ impl Field {
     /// into the map.
     pub fn merge(&self, ident: TokenStream) -> TokenStream {
         let key_mod = self.key_ty.module();
-        let km = quote!(::prost::encoding::#key_mod::merge);
+        let km = quote!(::ntex_grpc::prost::encoding::#key_mod::merge);
         let module = self.map_ty.module();
         match &self.value_ty {
             ValueTy::Scalar(scalar::Ty::Enumeration(ty)) => {
                 let default = quote!(#ty::default() as i32);
                 quote! {
-                    ::prost::encoding::#module::merge_with_default(
+                    ::ntex_grpc::prost::encoding::#module::merge_with_default(
                         #km,
-                        ::prost::encoding::int32::merge,
+                        ::ntex_grpc::prost::encoding::int32::merge,
                         #default,
                         &mut #ident,
                         buf,
@@ -202,13 +202,13 @@ impl Field {
             }
             ValueTy::Scalar(value_ty) => {
                 let val_mod = value_ty.module();
-                let vm = quote!(::prost::encoding::#val_mod::merge);
-                quote!(::prost::encoding::#module::merge(#km, #vm, &mut #ident, buf, ctx))
+                let vm = quote!(::ntex_grpc::prost::encoding::#val_mod::merge);
+                quote!(::ntex_grpc::prost::encoding::#module::merge(#km, #vm, &mut #ident, buf, ctx))
             }
             ValueTy::Message => quote! {
-                ::prost::encoding::#module::merge(
+                ::ntex_grpc::prost::encoding::#module::merge(
                     #km,
-                    ::prost::encoding::message::merge,
+                    ::ntex_grpc::prost::encoding::message::merge,
                     &mut #ident,
                     buf,
                     ctx,
@@ -221,15 +221,15 @@ impl Field {
     pub fn encoded_len(&self, ident: TokenStream) -> TokenStream {
         let tag = self.tag;
         let key_mod = self.key_ty.module();
-        let kl = quote!(::prost::encoding::#key_mod::encoded_len);
+        let kl = quote!(::ntex_grpc::prost::encoding::#key_mod::encoded_len);
         let module = self.map_ty.module();
         match &self.value_ty {
             ValueTy::Scalar(scalar::Ty::Enumeration(ty)) => {
                 let default = quote!(#ty::default() as i32);
                 quote! {
-                    ::prost::encoding::#module::encoded_len_with_default(
+                    ::ntex_grpc::prost::encoding::#module::encoded_len_with_default(
                         #kl,
-                        ::prost::encoding::int32::encoded_len,
+                        ::ntex_grpc::prost::encoding::int32::encoded_len,
                         &(#default),
                         #tag,
                         &#ident,
@@ -238,13 +238,13 @@ impl Field {
             }
             ValueTy::Scalar(value_ty) => {
                 let val_mod = value_ty.module();
-                let vl = quote!(::prost::encoding::#val_mod::encoded_len);
-                quote!(::prost::encoding::#module::encoded_len(#kl, #vl, #tag, &#ident))
+                let vl = quote!(::ntex_grpc::prost::encoding::#val_mod::encoded_len);
+                quote!(::ntex_grpc::prost::encoding::#module::encoded_len(#kl, #vl, #tag, &#ident))
             }
             ValueTy::Message => quote! {
-                ::prost::encoding::#module::encoded_len(
+                ::ntex_grpc::prost::encoding::#module::encoded_len(
                     #kl,
-                    ::prost::encoding::message::encoded_len,
+                    ::ntex_grpc::prost::encoding::message::encoded_len,
                     #tag,
                     &#ident,
                 )

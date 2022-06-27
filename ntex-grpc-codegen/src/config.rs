@@ -26,6 +26,11 @@ impl NGrpcGenerator {
         let _ = self.pconfig.bytes(&[path], rust_type);
     }
 
+    /// Map protobuf string type to custom rust type
+    pub fn map_string(&mut self, path: &str, rust_type: &str) {
+        let _ = self.pconfig.string(&[path], rust_type);
+    }
+
     /// Compile `.proto` files into Rust files during a Cargo build with additional code generator
     /// configuration options.
     pub fn compile_protos(

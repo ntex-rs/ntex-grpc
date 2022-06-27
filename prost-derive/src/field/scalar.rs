@@ -118,14 +118,24 @@ impl Field {
             Kind::Packed => quote!(encode_packed),
         };
         let encode_fn = quote!(#module_prefix::#module::#encode_fn);
+        let encode_fn2 = quote!(#module_prefix::#module::is_equal);
         let tag = self.tag;
 
         match self.kind {
             Kind::Plain(ref default) => {
-                let default = default.typed();
-                quote! {
-                    if #ident != #default {
-                        #encode_fn(#tag, &#ident, buf);
+                if matches!(self.ty, Ty::String | Ty::Bytes) {
+                    let default = default.typed_for_cmp();
+                    quote! {
+                        if !#encode_fn2(&#ident, #default) {
+                            #encode_fn(#tag, &#ident, buf);
+                        }
+                    }
+                } else {
+                    let default = default.typed();
+                    quote! {
+                        if #ident != #default {
+                            #encode_fn(#tag, &#ident, buf);
+                        }
                     }
                 }
             }
@@ -174,16 +184,28 @@ impl Field {
             Kind::Packed => quote!(encoded_len_packed),
         };
         let encoded_len_fn = quote!(#module_prefix::#module::#encoded_len_fn);
+        let encoded_len_fn2 = quote!(#module_prefix::#module::is_equal);
         let tag = self.tag;
 
         match self.kind {
             Kind::Plain(ref default) => {
-                let default = default.typed();
-                quote! {
-                    if #ident != #default {
-                        #encoded_len_fn(#tag, &#ident)
-                    } else {
-                        0
+                if matches!(self.ty, Ty::String | Ty::Bytes) {
+                    let default = default.typed_for_cmp();
+                    quote! {
+                        if !#encoded_len_fn2(&#ident, #default) {
+                            #encoded_len_fn(#tag, &#ident)
+                        } else {
+                            0
+                        }
+                    }
+                } else {
+                    let default = default.typed();
+                    quote! {
+                        if #ident != #default {
+                            #encoded_len_fn(#tag, &#ident)
+                        } else {
+                            0
+                        }
                     }
                 }
             }
@@ -217,7 +239,7 @@ impl Field {
         match self.kind {
             Kind::Plain(ref value) | Kind::Required(ref value) => value.owned(),
             Kind::Optional(_) => quote!(::core::option::Option::None),
-            Kind::Repeated | Kind::Packed => quote!(::prost::alloc::vec::Vec::new()),
+            Kind::Repeated | Kind::Packed => quote!(::ntex_grpc::prost::alloc::vec::Vec::new()),
         }
     }
 
@@ -259,7 +281,7 @@ impl Field {
             },
             Kind::Repeated | Kind::Packed => {
                 quote! {
-                    struct #wrapper_name<'a, T>(&'a ::prost::alloc::vec::Vec<T>);
+                    struct #wrapper_name<'a, T>(&'a ::ntex_grpc::prost::alloc::vec::Vec<T>);
                     impl<'a, T: ::core::fmt::Debug> ::core::fmt::Debug for #wrapper_name<'a, T> {
                         fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
                             let mut vec_builder = f.debug_list();
@@ -538,7 +560,7 @@ impl Ty {
     pub fn module_prefix(&self) -> TokenStream {
         match *self {
             Ty::String | Ty::Bytes => quote!(::ntex_grpc::encoding),
-            _ => quote!(::prost::encoding),
+            _ => quote!(::ntex_grpc::prost::encoding),
         }
     }
 
@@ -750,7 +772,7 @@ impl DefaultValue {
     pub fn owned(&self) -> TokenStream {
         match *self {
             DefaultValue::String(ref value) if value.is_empty() => {
-                quote!(::ntex_grpc::types::ByteString::default())
+                quote!(::core::default::Default::default())
             }
             DefaultValue::String(ref value) => quote!(#value.into()),
             DefaultValue::Bytes(ref value) if value.is_empty() => {
@@ -770,6 +792,19 @@ impl DefaultValue {
             quote!(#self as i32)
         } else {
             quote!(#self)
+        }
+    }
+
+    pub fn typed_for_cmp(&self) -> TokenStream {
+        match *self {
+            DefaultValue::Enumeration(_) => {
+                quote!(#self as i32)
+            }
+            DefaultValue::String(ref value) => {
+                let val = DefaultValue::Bytes(Vec::from(value.clone()));
+                quote!(#val)
+            }
+            _ => quote!(#self),
         }
     }
 }

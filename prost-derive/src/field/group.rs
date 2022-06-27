@@ -75,15 +75,15 @@ impl Field {
         match self.label {
             Label::Optional => quote! {
                 if let Some(ref msg) = #ident {
-                    ::prost::encoding::group::encode(#tag, msg, buf);
+                    ::ntex_grpc::prost::encoding::group::encode(#tag, msg, buf);
                 }
             },
             Label::Required => quote! {
-                ::prost::encoding::group::encode(#tag, &#ident, buf);
+                ::ntex_grpc::prost::encoding::group::encode(#tag, &#ident, buf);
             },
             Label::Repeated => quote! {
                 for msg in &#ident {
-                    ::prost::encoding::group::encode(#tag, msg, buf);
+                    ::ntex_grpc::prost::encoding::group::encode(#tag, msg, buf);
                 }
             },
         }
@@ -92,7 +92,7 @@ impl Field {
     pub fn merge(&self, ident: TokenStream) -> TokenStream {
         match self.label {
             Label::Optional => quote! {
-                ::prost::encoding::group::merge(
+                ::ntex_grpc::prost::encoding::group::merge(
                     tag,
                     wire_type,
                     #ident.get_or_insert_with(::core::default::Default::default),
@@ -101,10 +101,10 @@ impl Field {
                 )
             },
             Label::Required => quote! {
-                ::prost::encoding::group::merge(tag, wire_type, #ident, buf, ctx)
+                ::ntex_grpc::prost::encoding::group::merge(tag, wire_type, #ident, buf, ctx)
             },
             Label::Repeated => quote! {
-                ::prost::encoding::group::merge_repeated(tag, wire_type, #ident, buf, ctx)
+                ::ntex_grpc::prost::encoding::group::merge_repeated(tag, wire_type, #ident, buf, ctx)
             },
         }
     }
@@ -113,13 +113,13 @@ impl Field {
         let tag = self.tag;
         match self.label {
             Label::Optional => quote! {
-                #ident.as_ref().map_or(0, |msg| ::prost::encoding::group::encoded_len(#tag, msg))
+                #ident.as_ref().map_or(0, |msg| ::ntex_grpc::prost::encoding::group::encoded_len(#tag, msg))
             },
             Label::Required => quote! {
-                ::prost::encoding::group::encoded_len(#tag, &#ident)
+                ::ntex_grpc::prost::encoding::group::encoded_len(#tag, &#ident)
             },
             Label::Repeated => quote! {
-                ::prost::encoding::group::encoded_len_repeated(#tag, &#ident)
+                ::ntex_grpc::prost::encoding::group::encoded_len_repeated(#tag, &#ident)
             },
         }
     }

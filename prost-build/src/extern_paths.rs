@@ -37,7 +37,7 @@ impl ExternPaths {
             extern_paths.insert(".google.protobuf.BoolValue".to_string(), "bool".to_string())?;
             extern_paths.insert(
                 ".google.protobuf.BytesValue".to_string(),
-                "::prost::alloc::vec::Vec<u8>".to_string(),
+                "Vec<u8>".to_string(),
             )?;
             extern_paths.insert(
                 ".google.protobuf.DoubleValue".to_string(),
@@ -49,7 +49,7 @@ impl ExternPaths {
             extern_paths.insert(".google.protobuf.Int64Value".to_string(), "i64".to_string())?;
             extern_paths.insert(
                 ".google.protobuf.StringValue".to_string(),
-                "::prost::alloc::string::String".to_string(),
+                "::ntex_grpc::types::ByteString".to_string(),
             )?;
             extern_paths.insert(
                 ".google.protobuf.UInt32Value".to_string(),

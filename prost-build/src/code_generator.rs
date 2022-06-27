@@ -18,7 +18,7 @@ use crate::ast::{Comments, Method, Service};
 use crate::extern_paths::ExternPaths;
 use crate::ident::{to_snake, to_upper_camel};
 use crate::message_graph::MessageGraph;
-use crate::{BytesType, Config, MapType};
+use crate::{BytesType, Config, MapType, StringType};
 
 #[derive(PartialEq)]
 enum Syntax {
@@ -376,12 +376,12 @@ impl<'a> CodeGenerator<'a> {
         self.buf.push_str(&to_snake(field.name()));
         self.buf.push_str(": ");
         if repeated {
-            self.buf.push_str("::prost::alloc::vec::Vec<");
+            self.buf.push_str("Vec<");
         } else if optional {
-            self.buf.push_str("::core::option::Option<");
+            self.buf.push_str("Option<");
         }
         if boxed {
-            self.buf.push_str("::prost::alloc::boxed::Box<");
+            self.buf.push_str("Box<");
         }
         self.buf.push_str(&ty);
         if boxed {
@@ -488,7 +488,7 @@ impl<'a> CodeGenerator<'a> {
         self.append_type_attributes(&oneof_name);
         self.push_indent();
         self.buf
-            .push_str("#[derive(Clone, PartialEq, ::prost::Oneof)]\n");
+            .push_str("#[derive(Clone, PartialEq, ::ntex_grpc::Oneof)]\n");
         self.push_indent();
         self.buf.push_str("pub enum ");
         self.buf.push_str(&to_upper_camel(oneof.name()));
@@ -528,11 +528,8 @@ impl<'a> CodeGenerator<'a> {
             );
 
             if boxed {
-                self.buf.push_str(&format!(
-                    "{}(::prost::alloc::boxed::Box<{}>),\n",
-                    to_upper_camel(field.name()),
-                    ty
-                ));
+                self.buf
+                    .push_str(&format!("{}(Box<{}>),\n", to_upper_camel(field.name()), ty));
             } else {
                 self.buf
                     .push_str(&format!("{}({}),\n", to_upper_camel(field.name()), ty));
@@ -594,7 +591,7 @@ impl<'a> CodeGenerator<'a> {
         self.append_type_attributes(&fq_proto_enum_name);
         self.push_indent();
         self.buf.push_str(
-            "#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]\n",
+            "#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::ntex_grpc::Enumeration)]\n",
         );
         self.push_indent();
         self.buf.push_str("#[repr(i32)]\n");
@@ -777,15 +774,23 @@ impl<'a> CodeGenerator<'a> {
             Type::Int32 | Type::Sfixed32 | Type::Sint32 | Type::Enum => String::from("i32"),
             Type::Int64 | Type::Sfixed64 | Type::Sint64 => String::from("i64"),
             Type::Bool => String::from("bool"),
-            Type::String => String::from("::ntex_grpc::types::ByteString"),
-            Type::Bytes => self
-                .config
-                .bytes_type
-                .get_first_field(fq_message_name, field.name())
-                .cloned()
-                .unwrap_or_default()
-                .rust_type()
-                .to_owned(),
+            Type::String => {
+                for strings_type in &self.config.strings_type {
+                    if let Some(tp) = strings_type.get_first_field(fq_message_name, field.name()) {
+                        return tp.clone().rust_type().to_owned();
+                    }
+                }
+                StringType::String.rust_type().to_owned()
+                // String::from("::ntex_grpc::types::ByteString")
+            }
+            Type::Bytes => {
+                for bytes_type in &self.config.bytes_type {
+                    if let Some(tp) = bytes_type.get_first_field(fq_message_name, field.name()) {
+                        return tp.clone().rust_type().to_owned();
+                    }
+                }
+                BytesType::Bytes.rust_type().to_owned()
+            }
             Type::Group | Type::Message => self.resolve_ident(field.type_name()),
         }
     }
@@ -1094,8 +1099,8 @@ impl MapType {
     /// The fully-qualified Rust type corresponding to the map type.
     fn rust_type(&self) -> &'static str {
         match self {
-            MapType::HashMap => "::std::collections::HashMap",
-            MapType::BTreeMap => "::prost::alloc::collections::BTreeMap",
+            MapType::HashMap => "std::collections::HashMap",
+            MapType::BTreeMap => "std::collections::BTreeMap",
         }
     }
 }
@@ -1106,6 +1111,16 @@ impl BytesType {
         match self {
             BytesType::Bytes => "::ntex_grpc::types::Bytes",
             BytesType::Custom(s) => s,
+        }
+    }
+}
+
+impl StringType {
+    /// The fully-qualified Rust type corresponding to the string type.
+    fn rust_type(&self) -> &str {
+        match self {
+            StringType::String => "::ntex_grpc::types::ByteString",
+            StringType::Custom(s) => s,
         }
     }
 }

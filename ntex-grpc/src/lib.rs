@@ -24,6 +24,11 @@ pub mod codegen {
     pub use crate::ServiceError;
 }
 
+#[doc(hidden)]
+pub mod prost {
+    pub use prost::*;
+}
+
 // [1]: https://github.com/serde-rs/serde/blob/v1.0.89/serde/src/lib.rs#L245-L256
 #[allow(unused_imports)]
 #[macro_use]

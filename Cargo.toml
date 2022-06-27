@@ -4,6 +4,7 @@ members = [
   "ntex-grpc-codegen",
   "prost-build",
   "prost-derive",
+  "examples/custom",
   "examples/helloworld"
 ]
 

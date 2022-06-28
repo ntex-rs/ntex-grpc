@@ -1,9 +1,9 @@
-use std::{fmt, future::Future, pin::Pin, task::Context, task::Poll};
+use std::{fmt, future::Future, ops, pin::Pin, task::Context, task::Poll};
 
 use ntex_http::HeaderMap;
 use ntex_util::ready;
 
-use crate::service::{MethodDef, Transport};
+use crate::service::{MethodDef, Response as TransportResponse, Transport};
 
 pub struct Request<'a, T: Transport<M>, M: MethodDef> {
     transport: &'a T,
@@ -13,7 +13,7 @@ pub struct Request<'a, T: Transport<M>, M: MethodDef> {
 enum State<'a, M: MethodDef, E> {
     Request(&'a M::Input),
     #[allow(clippy::type_complexity)]
-    Call(Pin<Box<dyn Future<Output = Result<(M::Output, HeaderMap), E>> + 'a>>),
+    Call(Pin<Box<dyn Future<Output = Result<TransportResponse<M>, E>> + 'a>>),
     Done,
 }
 
@@ -43,10 +43,11 @@ where
         let mut slf = self.as_mut();
 
         if let State::Call(ref mut fut) = slf.state {
-            let (message, trailers) = ready!(Pin::new(fut).poll(cx))?;
+            let response = ready!(Pin::new(fut).poll(cx))?;
             return Poll::Ready(Ok(Response {
-                message,
-                metadata: trailers,
+                message: response.data,
+                headers: response.headers,
+                trailers: response.trailers,
             }));
         }
         match std::mem::replace(&mut slf.state, State::Done) {
@@ -61,18 +62,43 @@ where
 
 pub struct Response<T> {
     message: T,
-    metadata: HeaderMap,
+    headers: HeaderMap,
+    trailers: HeaderMap,
 }
 
 impl<T> Response<T> {
+    #[inline]
+    pub fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
+
+    #[inline]
+    pub fn trailers(&self) -> &HeaderMap {
+        &self.trailers
+    }
+
     #[inline]
     pub fn into_inner(self) -> T {
         self.message
     }
 
     #[inline]
-    pub fn into_parts(self) -> (T, HeaderMap) {
-        (self.message, self.metadata)
+    pub fn into_parts(self) -> (T, HeaderMap, HeaderMap) {
+        (self.message, self.headers, self.trailers)
+    }
+}
+
+impl<T> ops::Deref for Response<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.message
+    }
+}
+
+impl<T> ops::DerefMut for Response<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.message
     }
 }
 

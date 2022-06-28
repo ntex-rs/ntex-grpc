@@ -1,5 +1,7 @@
 use ntex_h2::{OperationError, StreamError};
-pub use prost::DecodeError;
+use ntex_http::{HeaderMap, StatusCode};
+
+use crate::status::GrpcStatus;
 
 #[derive(thiserror::Error, Clone, Debug)]
 pub enum ServiceError {
@@ -7,8 +9,16 @@ pub enum ServiceError {
     Canceled,
     #[error("{0}")]
     ProstEncoder(#[from] prost::EncodeError),
-    #[error("Http2 operation error: {0}")]
+    #[error("Http operation error: {0}")]
     Operation(#[from] OperationError),
-    #[error("Http2 stream error: {0}")]
+    #[error("Http stream error: {0}")]
     Stream(#[from] StreamError),
+    #[error("Http response {0}, headers: {1:?}")]
+    Response(StatusCode, HeaderMap),
+    #[error("Unknown response status, headers: {0:?}")]
+    UnknownResponseStatus(HeaderMap),
+    #[error("Unexpected disconnect with {0}, headers: {1:?}")]
+    UnexpectedDisconnect(StatusCode, HeaderMap),
+    #[error("Grpc status {0:?}, headers: {1:?}")]
+    GrpcStatus(GrpcStatus, HeaderMap),
 }

@@ -3,8 +3,9 @@ use std::convert::TryFrom;
 use ntex_bytes::{ByteString, Bytes, BytesMut};
 use prost::encoding::{self, decode_varint, encode_key, encode_varint, encoded_len_varint};
 use prost::encoding::{DecodeContext, WireType};
+use prost::DecodeError;
 
-use crate::{error::DecodeError, types::BytesAdapter, Message};
+use crate::{types::BytesAdapter, Message};
 
 impl BytesAdapter for Vec<u8> {
     #[inline]
@@ -343,6 +344,7 @@ macro_rules! map {
             encoded_len_with_default(key_encoded_len, val_encoded_len, &V::default(), tag, values)
         }
 
+        #[allow(clippy::too_many_arguments)]
         /// Generic protobuf map encode function with an overridden value default.
         ///
         /// This is necessary because enumeration values can have a default value other

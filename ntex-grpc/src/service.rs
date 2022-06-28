@@ -15,12 +15,18 @@ pub trait MethodDef {
     type Output: Message;
 }
 
+pub struct Response<T: MethodDef> {
+    pub data: T::Output,
+    pub headers: HeaderMap,
+    pub trailers: HeaderMap,
+}
+
 #[async_trait(?Send)]
 pub trait Transport<T: MethodDef> {
     /// Errors produced by the service.
     type Error;
 
-    async fn request(&self, args: &T::Input) -> Result<(T::Output, HeaderMap), Self::Error>;
+    async fn request(&self, args: &T::Input) -> Result<Response<T>, Self::Error>;
 }
 
 /// Client utils methods

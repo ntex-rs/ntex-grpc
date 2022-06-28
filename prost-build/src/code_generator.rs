@@ -283,6 +283,9 @@ impl<'a> CodeGenerator<'a> {
 
     fn append_field(&mut self, fq_message_name: &str, field: FieldDescriptorProto) {
         let type_ = field.r#type();
+        if type_ == Type::Group {
+            panic!("protobuf group is not supported: {}", field.name());
+        }
         let repeated = field.label == Some(Label::Repeated as i32);
         let deprecated = self.deprecated(&field);
         let optional = self.optional(&field);

@@ -25,7 +25,7 @@ ntex-bytes = "0.1.15"
 ntex-service = "0.3"
 ntex-rt = "0.4"
 
-ntex-prost-derive = "0.10.1"
+ntex-prost-derive = "0.10.2"
 
 async-trait = "0.1.0"
 bitflags = "1.3"

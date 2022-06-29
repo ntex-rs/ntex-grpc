@@ -18,8 +18,8 @@ pub enum ServiceError {
     Response(StatusCode, HeaderMap),
     #[error("Unknown response status, headers: {0:?}")]
     UnknownResponseStatus(HeaderMap),
-    #[error("Unexpected disconnect with {0}, headers: {1:?}")]
-    UnexpectedDisconnect(StatusCode, HeaderMap),
+    #[error("Got eof without payload with {0}, headers: {1:?}")]
+    UnexpectedEof(StatusCode, HeaderMap),
     #[error("Grpc status {0:?}, headers: {1:?}")]
     GrpcStatus(GrpcStatus, HeaderMap),
 }

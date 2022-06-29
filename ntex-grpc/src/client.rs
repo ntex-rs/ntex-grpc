@@ -153,10 +153,11 @@ impl Inner {
                 } => {
                     if let Some(status) = pseudo.status {
                         if eof {
-                            let _ =
-                                inner.remove(&id).unwrap().tx.send(Err(
-                                    ServiceError::UnexpectedDisconnect(status, headers),
-                                ));
+                            let _ = inner
+                                .remove(&id)
+                                .unwrap()
+                                .tx
+                                .send(Err(ServiceError::UnexpectedEof(status, headers)));
                             return Err(());
                         } else if !status.is_success() {
                             let _ = inner

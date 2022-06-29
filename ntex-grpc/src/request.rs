@@ -1,9 +1,8 @@
 use std::{fmt, future::Future, ops, pin::Pin, task::Context, task::Poll};
 
 use ntex_http::HeaderMap;
-use ntex_util::ready;
 
-use crate::service::{MethodDef, Response as TransportResponse, Transport};
+use crate::transport::{MethodDef, Transport};
 
 pub struct Request<'a, T: Transport<M>, M: MethodDef> {
     transport: &'a T,
@@ -13,7 +12,7 @@ pub struct Request<'a, T: Transport<M>, M: MethodDef> {
 enum State<'a, M: MethodDef, E> {
     Request(&'a M::Input),
     #[allow(clippy::type_complexity)]
-    Call(Pin<Box<dyn Future<Output = Result<TransportResponse<M>, E>> + 'a>>),
+    Call(Pin<Box<dyn Future<Output = Result<Response<M>, E>> + 'a>>),
     Done,
 }
 
@@ -37,36 +36,32 @@ where
     T: Transport<M>,
     M: MethodDef,
 {
-    type Output = Result<Response<M::Output>, T::Error>;
+    type Output = Result<Response<M>, T::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut slf = self.as_mut();
 
         if let State::Call(ref mut fut) = slf.state {
-            let response = ready!(Pin::new(fut).poll(cx))?;
-            return Poll::Ready(Ok(Response {
-                message: response.data,
-                headers: response.headers,
-                trailers: response.trailers,
-            }));
-        }
-        match std::mem::replace(&mut slf.state, State::Done) {
-            State::Request(input) => {
-                slf.state = State::Call(slf.transport.request(input));
-                self.poll(cx)
+            Pin::new(fut).poll(cx)
+        } else {
+            match std::mem::replace(&mut slf.state, State::Done) {
+                State::Request(input) => {
+                    slf.state = State::Call(slf.transport.request(input));
+                    self.poll(cx)
+                }
+                _ => panic!("Future cannot be polled after completion"),
             }
-            _ => panic!("Future cannot be polled after completion"),
         }
     }
 }
 
-pub struct Response<T> {
-    message: T,
-    headers: HeaderMap,
-    trailers: HeaderMap,
+pub struct Response<T: MethodDef> {
+    pub output: T::Output,
+    pub headers: HeaderMap,
+    pub trailers: HeaderMap,
 }
 
-impl<T> Response<T> {
+impl<T: MethodDef> Response<T> {
     #[inline]
     pub fn headers(&self) -> &HeaderMap {
         &self.headers
@@ -78,32 +73,39 @@ impl<T> Response<T> {
     }
 
     #[inline]
-    pub fn into_inner(self) -> T {
-        self.message
+    pub fn into_inner(self) -> T::Output {
+        self.output
     }
 
     #[inline]
-    pub fn into_parts(self) -> (T, HeaderMap, HeaderMap) {
-        (self.message, self.headers, self.trailers)
+    pub fn into_parts(self) -> (T::Output, HeaderMap, HeaderMap) {
+        (self.output, self.headers, self.trailers)
     }
 }
 
-impl<T> ops::Deref for Response<T> {
-    type Target = T;
+impl<T: MethodDef> ops::Deref for Response<T> {
+    type Target = T::Output;
 
     fn deref(&self) -> &Self::Target {
-        &self.message
+        &self.output
     }
 }
 
-impl<T> ops::DerefMut for Response<T> {
+impl<T: MethodDef> ops::DerefMut for Response<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.message
+        &mut self.output
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for Response<T> {
+impl<T: MethodDef> fmt::Debug for Response<T>
+where
+    T::Output: fmt::Debug,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.message.fmt(f)
+        f.debug_struct(format!("ResponseFor<{}>", T::NAME).as_str())
+            .field("output", &self.output)
+            .field("headers", &self.headers)
+            .field("translers", &self.headers)
+            .finish()
     }
 }

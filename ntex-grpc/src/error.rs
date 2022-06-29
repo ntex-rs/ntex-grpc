@@ -1,5 +1,6 @@
 use ntex_h2::{OperationError, StreamError};
 use ntex_http::{HeaderMap, StatusCode};
+pub use prost::DecodeError;
 
 use crate::status::GrpcStatus;
 

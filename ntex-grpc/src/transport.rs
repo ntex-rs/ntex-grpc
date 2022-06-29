@@ -1,8 +1,7 @@
 use async_trait::async_trait;
 use ntex_bytes::ByteString;
-use ntex_http::HeaderMap;
 
-use crate::types::Message;
+use crate::{request::Response, types::Message};
 
 /// Trait for service method definition
 pub trait MethodDef {
@@ -13,12 +12,6 @@ pub trait MethodDef {
     type Input: Message;
 
     type Output: Message;
-}
-
-pub struct Response<T: MethodDef> {
-    pub data: T::Output,
-    pub headers: HeaderMap,
-    pub trailers: HeaderMap,
 }
 
 #[async_trait(?Send)]

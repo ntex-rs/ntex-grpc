@@ -9,8 +9,8 @@ use ntex_io::{IoBoxed, OnDisconnect};
 use ntex_service::{fn_service, Service};
 use ntex_util::{channel::oneshot, future::Ready, HashMap};
 
-use crate::service::{ClientInformation, MethodDef, Response, Transport};
-use crate::{consts, GrpcStatus, Message, ServiceError, GRPC_STATUS};
+use crate::transport::{ClientInformation, MethodDef, Transport};
+use crate::{consts, GrpcStatus, Message, Response, ServiceError, GRPC_STATUS};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ClientError {
@@ -125,8 +125,8 @@ impl<T: MethodDef> Transport<T> for Client {
                 let _compressed = data.get_u8();
                 let len = data.get_u32();
                 match <T::Output as Message>::decode(&mut data.split_to(len as usize)) {
-                    Ok(data) => Ok(Response {
-                        data,
+                    Ok(output) => Ok(Response {
+                        output,
                         headers,
                         trailers,
                     }),

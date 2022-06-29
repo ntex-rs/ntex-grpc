@@ -13,10 +13,7 @@ impl ServiceGenerator for GrpcServiceGenerator {
             service
         );
 
-        buf.push_str(&format!(
-            "\n/// `{}` service client definition\n",
-            service.name
-        ));
+        buf.push_str(&format!("\n/// `{}` service definition\n", service.name));
         generate_client(&service, buf);
     }
 
@@ -29,7 +26,34 @@ impl ServiceGenerator for GrpcServiceGenerator {
 }
 
 fn generate_client(service: &Service, buf: &mut String) {
-    let service_ident = quote::format_ident!("{}Client", service.name);
+    let service_ident = quote::format_ident!("{}", service.name);
+    let client_ident = quote::format_ident!("{}Client", service.name);
+    let service_name = format!("{}.{}", service.package, service.proto_name);
+    let service_methods_name = quote::format_ident!("{}Methods", service.name);
+    let service_methods: Vec<_> = service
+        .methods
+        .iter()
+        .map(|m| {
+            let name = quote::format_ident!("{}", m.proto_name);
+            let m_name = quote::format_ident!("{}{}Method", service.proto_name, m.proto_name);
+            quote! {
+                #name(#m_name)
+            }
+        })
+        .collect();
+    let mut service_methods_match: Vec<_> = service
+        .methods
+        .iter()
+        .map(|m| {
+            let name = quote::format_ident!("{}", m.proto_name);
+            let m_name = quote::format_ident!("{}{}Method", service.proto_name, m.proto_name);
+            quote! {
+                #m_name::NAME => Some(#service_methods_name::#name(#m_name))
+            }
+        })
+        .collect();
+    service_methods_match.push(quote!(_ => None));
+
     let methods: Vec<_> = service
         .methods
         .iter()
@@ -41,11 +65,34 @@ fn generate_client(service: &Service, buf: &mut String) {
     }
 
     let stream = quote! {
+
+        pub struct #service_ident;
+
+        impl ::ntex_grpc::ServiceDef for #service_ident {
+            const NAME: &'static str = #service_name;
+
+            type Methods = #service_methods_name;
+        }
+
+        pub enum #service_methods_name {
+            #(#service_methods),*
+        }
+        impl ::ntex_grpc::MethodsDef for #service_methods_name {
+            #[inline]
+            fn by_name(name: &str) -> Option<Self> {
+                use ::ntex_grpc::MethodDef;
+
+                match name {
+                    #(#service_methods_match),*
+                }
+            }
+        }
+
         #[doc = #(#comments)*]
         #[derive(Clone)]
-        pub struct #service_ident<T>(T);
+        pub struct #client_ident<T>(T);
 
-        impl<T> #service_ident<T> {
+        impl<T> #client_ident<T> {
             #[inline]
             /// Create new client instance
             pub fn new(transport: T) -> Self {
@@ -53,7 +100,7 @@ fn generate_client(service: &Service, buf: &mut String) {
             }
         }
 
-        impl<T> ::ntex_grpc::ClientInformation<T> for #service_ident<T> {
+        impl<T> ::ntex_grpc::ClientInformation<T> for #client_ident<T> {
             #[inline]
             /// Create new client instance
             fn create(transport: T) -> Self {

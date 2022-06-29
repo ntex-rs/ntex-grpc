@@ -1,4 +1,4 @@
-use std::{cell::RefCell, convert::TryFrom, future::Future, mem, rc::Rc, str::FromStr};
+use std::{cell::RefCell, convert::TryFrom, future::Future, rc::Rc, str::FromStr};
 
 use async_trait::async_trait;
 use ntex_bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -10,7 +10,7 @@ use ntex_service::{fn_service, Service};
 use ntex_util::{channel::oneshot, future::Ready, HashMap};
 
 use crate::transport::{ClientInformation, MethodDef, Transport};
-use crate::{consts, GrpcStatus, Message, Response, ServiceError, GRPC_STATUS};
+use crate::{consts, utils::Data, GrpcStatus, Message, Response, ServiceError, GRPC_STATUS};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ClientError {
@@ -31,39 +31,6 @@ struct Inflight {
     data: Data,
     headers: Option<HeaderMap>,
     tx: oneshot::Sender<Result<(Bytes, HeaderMap, HeaderMap), ServiceError>>,
-}
-
-enum Data {
-    Chunk(Bytes),
-    MutChunk(BytesMut),
-    Empty,
-}
-
-impl Data {
-    fn get(&mut self) -> Bytes {
-        match mem::replace(self, Data::Empty) {
-            Data::Chunk(data) => data,
-            Data::MutChunk(data) => data.freeze(),
-            Data::Empty => Bytes::new(),
-        }
-    }
-
-    fn push(&mut self, data: Bytes) {
-        if !data.is_empty() {
-            *self = match mem::replace(self, Data::Empty) {
-                Data::Chunk(d) => {
-                    let mut d = BytesMut::from(d);
-                    d.extend_from_slice(&data);
-                    Data::MutChunk(d)
-                }
-                Data::MutChunk(mut d) => {
-                    d.extend_from_slice(&data);
-                    Data::MutChunk(d)
-                }
-                Data::Empty => Data::Chunk(data),
-            };
-        }
-    }
 }
 
 impl Client {

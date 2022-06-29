@@ -1,7 +1,24 @@
 use async_trait::async_trait;
-use ntex_bytes::ByteString;
+use ntex_bytes::{ByteString, Bytes, BytesMut};
 
-use crate::{request::Response, types::Message};
+use crate::{error::DecodeError, error::EncodeError, request::Response, types::Message};
+
+/// Trait for service method definition
+pub trait ServiceDef {
+    const NAME: &'static str;
+
+    type Methods: MethodsDef;
+
+    #[inline]
+    fn method_by_name(name: &str) -> Option<Self::Methods> {
+        <Self::Methods as MethodsDef>::by_name(name)
+    }
+}
+
+/// Service methods
+pub trait MethodsDef: Sized {
+    fn by_name(name: &str) -> Option<Self>;
+}
 
 /// Trait for service method definition
 pub trait MethodDef {
@@ -12,6 +29,18 @@ pub trait MethodDef {
     type Input: Message;
 
     type Output: Message;
+
+    #[inline]
+    fn decode(&self, buf: &mut Bytes) -> Result<Self::Input, DecodeError> {
+        let mut value: Self::Input = Default::default();
+        value.merge(buf)?;
+        Ok(value)
+    }
+
+    #[inline]
+    fn encode(&self, val: Self::Output, buf: &mut BytesMut) -> Result<(), EncodeError> {
+        val.encode(buf)
+    }
 }
 
 #[async_trait(?Send)]

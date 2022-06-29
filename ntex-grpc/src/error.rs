@@ -1,6 +1,7 @@
+use ntex_bytes::ByteString;
 use ntex_h2::{OperationError, StreamError};
 use ntex_http::{HeaderMap, StatusCode};
-pub use prost::DecodeError;
+pub use prost::{DecodeError, EncodeError};
 
 use crate::status::GrpcStatus;
 
@@ -22,4 +23,16 @@ pub enum ServiceError {
     UnexpectedEof(StatusCode, HeaderMap),
     #[error("Grpc status {0:?}, headers: {1:?}")]
     GrpcStatus(GrpcStatus, HeaderMap),
+}
+
+#[derive(thiserror::Error, Clone, Debug)]
+pub enum ServerError {
+    #[error("{0}")]
+    Encode(#[from] EncodeError),
+    #[error("{0}")]
+    Decode(#[from] DecodeError),
+    #[error("Service method is not found: {0}")]
+    NotFound(ByteString),
+    #[error("Service method is not implemented: {0}")]
+    NotImplemented(ByteString),
 }

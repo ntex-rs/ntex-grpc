@@ -4,8 +4,8 @@
 ///  The request message containing the user's name.
 #[derive(Clone, PartialEq, ::ntex_grpc::Message)]
 pub struct HelloRequest {
-    #[prost(bytes, tag = "1")]
-    pub name: ::ntex_grpc::types::Bytes,
+    #[prost(string, tag = "1")]
+    pub name: ::ntex_grpc::types::ByteString,
 }
 ///  The response message containing the greetings
 #[derive(Clone, PartialEq, ::ntex_grpc::Message)]
@@ -14,7 +14,24 @@ pub struct HelloReply {
     pub message: ::ntex_grpc::types::ByteString,
 }
 
-/// `Greeter` service client definition
+/// `Greeter` service definition
+pub struct Greeter;
+impl ::ntex_grpc::ServiceDef for Greeter {
+    const NAME: &'static str = "helloworld.Greeter";
+    type Methods = GreeterMethods;
+}
+pub enum GreeterMethods {
+    SayHello(GreeterSayHelloMethod),
+}
+impl ::ntex_grpc::MethodsDef for GreeterMethods {
+    fn by_name(name: &str) -> Option<Self> {
+        use ::ntex_grpc::MethodDef;
+        match name {
+            GreeterSayHelloMethod::NAME => Some(GreeterMethods::SayHello(GreeterSayHelloMethod)),
+            _ => None,
+        }
+    }
+}
 #[doc = " The greeting service definition."]
 #[derive(Clone)]
 pub struct GreeterClient<T>(T);

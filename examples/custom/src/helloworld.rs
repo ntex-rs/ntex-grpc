@@ -15,25 +15,25 @@ pub struct HelloReply {
     #[prost(string, tag = "1")]
     pub message: ::ntex_grpc::types::ByteString,
 }
-#[derive(Clone, PartialEq, ::ntex_grpc::Message)]
-pub struct GetOrCreateSessionResponse {
-    #[prost(oneof = "get_or_create_session_response::Result", tags = "1, 2, 3")]
-    pub result: ::core::option::Option<get_or_create_session_response::Result>,
+
+/// `Greeter` service definition
+pub struct Greeter;
+impl ::ntex_grpc::ServiceDef for Greeter {
+    const NAME: &'static str = "helloworld.Greeter";
+    type Methods = GreeterMethods;
 }
-/// Nested message and enum types in `GetOrCreateSessionResponse`.
-pub mod get_or_create_session_response {
-    #[derive(Clone, PartialEq, ::ntex_grpc::Oneof)]
-    pub enum Result {
-        #[prost(string, tag = "1")]
-        Success(::ntex_grpc::types::ByteString),
-        #[prost(bytes, tag = "2")]
-        ServiceError(::ntex_grpc::types::Bytes),
-        #[prost(int32, tag = "3")]
-        InvalidRequest(i32),
+pub enum GreeterMethods {
+    SayHello(GreeterSayHelloMethod),
+}
+impl ::ntex_grpc::MethodsDef for GreeterMethods {
+    fn by_name(name: &str) -> Option<Self> {
+        use ::ntex_grpc::MethodDef;
+        match name {
+            GreeterSayHelloMethod::NAME => Some(GreeterMethods::SayHello(GreeterSayHelloMethod)),
+            _ => None,
+        }
     }
 }
-
-/// `Greeter` service client definition
 #[doc = " The greeting service definition."]
 #[derive(Clone)]
 pub struct GreeterClient<T>(T);

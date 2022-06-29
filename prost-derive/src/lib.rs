@@ -1,4 +1,4 @@
-#![doc(html_root_url = "https://docs.rs/ntex-prost-derive/0.10.1")]
+#![doc(html_root_url = "https://docs.rs/ntex-prost-derive/0.10.3")]
 // The `quote!` macro requires deep recursion.
 #![recursion_limit = "4096"]
 
@@ -16,6 +16,8 @@ use syn::{
 };
 
 mod field;
+mod server;
+
 use crate::field::Field;
 
 fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
@@ -470,4 +472,9 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
 #[proc_macro_derive(Oneof, attributes(prost))]
 pub fn oneof(input: TokenStream) -> TokenStream {
     try_oneof(input).unwrap()
+}
+
+#[proc_macro_attribute]
+pub fn server(attr: TokenStream, item: TokenStream) -> TokenStream {
+    server::server(attr, item)
 }

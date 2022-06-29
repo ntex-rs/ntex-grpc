@@ -3,14 +3,16 @@ mod error;
 mod request;
 mod status;
 mod transport;
+mod utils;
 
 pub mod client;
+pub mod server;
 pub mod types;
 
 pub use crate::error::{DecodeError, ServiceError};
 pub use crate::request::{Request, Response};
 pub use crate::status::GrpcStatus;
-pub use crate::transport::{ClientInformation, MethodDef, Transport};
+pub use crate::transport::{ClientInformation, MethodDef, MethodsDef, ServiceDef, Transport};
 pub use crate::types::{BytesAdapter, Message};
 
 #[doc(hidden)]

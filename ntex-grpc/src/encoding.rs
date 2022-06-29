@@ -178,8 +178,11 @@ pub mod bytes {
     {
         encoding::check_wire_type(WireType::LengthDelimited, wire_type)?;
         let len = decode_varint(buf)? as usize;
-
-        value.replace_with(buf.split_to(len))
+        if len > buf.len() {
+            Err(DecodeError::new("Not enough data"))
+        } else {
+            value.replace_with(buf.split_to(len))
+        }
     }
 
     pub fn merge_repeated<A>(

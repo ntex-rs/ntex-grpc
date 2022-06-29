@@ -36,11 +36,3 @@ message HelloRequest {
 message HelloReply {
   string message = 1;
 }
-
-message GetOrCreateSessionResponse {
-  oneof Result {
-    string success = 1;
-    bytes serviceError = 2;
-    int32 invalidRequest = 3;
-  }
-}

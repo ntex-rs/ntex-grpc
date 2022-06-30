@@ -1,16 +1,14 @@
-mod group;
+use std::{fmt, slice};
+
 mod map;
 mod message;
 mod oneof;
 mod scalar;
 
-use std::fmt;
-use std::slice;
-
 use anyhow::{bail, Error};
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Attribute, Ident, Lit, LitBool, Meta, MetaList, MetaNameValue, NestedMeta};
+use syn::{Attribute, Lit, LitBool, Meta, MetaList, MetaNameValue, NestedMeta};
 
 #[derive(Clone)]
 pub enum Field {
@@ -22,8 +20,6 @@ pub enum Field {
     Map(map::Field),
     /// A oneof field.
     Oneof(oneof::Field),
-    /// A group field.
-    Group(group::Field),
 }
 
 impl Field {
@@ -44,8 +40,6 @@ impl Field {
             Field::Map(field)
         } else if let Some(field) = oneof::Field::new(&attrs)? {
             Field::Oneof(field)
-        } else if let Some(field) = group::Field::new(&attrs, inferred_tag)? {
-            Field::Group(field)
         } else {
             bail!("no type attribute");
         };
@@ -68,13 +62,15 @@ impl Field {
             Field::Message(field)
         } else if let Some(field) = map::Field::new_oneof(&attrs)? {
             Field::Map(field)
-        } else if let Some(field) = group::Field::new_oneof(&attrs)? {
-            Field::Group(field)
         } else {
             bail!("no type attribute for oneof field");
         };
 
         Ok(Some(field))
+    }
+
+    pub fn is_oneof(&self) -> bool {
+        matches!(*self, Field::Oneof(_))
     }
 
     pub fn tags(&self) -> Vec<u32> {
@@ -83,7 +79,6 @@ impl Field {
             Field::Message(ref message) => vec![message.tag],
             Field::Map(ref map) => vec![map.tag],
             Field::Oneof(ref oneof) => oneof.tags.clone(),
-            Field::Group(ref group) => vec![group.tag],
         }
     }
 
@@ -94,7 +89,6 @@ impl Field {
             Field::Message(ref message) => message.encode(ident),
             Field::Map(ref map) => map.encode(ident),
             Field::Oneof(ref oneof) => oneof.encode(ident),
-            Field::Group(ref group) => group.encode(ident),
         }
     }
 
@@ -102,11 +96,10 @@ impl Field {
     /// value into the field.
     pub fn merge(&self, ident: TokenStream) -> TokenStream {
         match *self {
-            Field::Scalar(ref scalar) => scalar.merge(ident),
+            Field::Scalar(_) => quote!(),
             Field::Message(ref message) => message.merge(ident),
-            Field::Map(ref map) => map.merge(ident),
+            Field::Map(_) => quote!(),
             Field::Oneof(ref oneof) => oneof.merge(ident),
-            Field::Group(ref group) => group.merge(ident),
         }
     }
 
@@ -117,18 +110,6 @@ impl Field {
             Field::Map(ref map) => map.encoded_len(ident),
             Field::Message(ref msg) => msg.encoded_len(ident),
             Field::Oneof(ref oneof) => oneof.encoded_len(ident),
-            Field::Group(ref group) => group.encoded_len(ident),
-        }
-    }
-
-    /// Returns a statement which clears the field.
-    pub fn clear(&self, ident: TokenStream) -> TokenStream {
-        match *self {
-            Field::Scalar(ref scalar) => scalar.clear(ident),
-            Field::Message(ref message) => message.clear(ident),
-            Field::Map(ref map) => map.clear(ident),
-            Field::Oneof(ref oneof) => oneof.clear(ident),
-            Field::Group(ref group) => group.clear(ident),
         }
     }
 
@@ -161,14 +142,6 @@ impl Field {
                 }
             }
             _ => quote!(&#ident),
-        }
-    }
-
-    pub fn methods(&self, ident: &Ident) -> Option<TokenStream> {
-        match *self {
-            Field::Scalar(ref scalar) => scalar.methods(ident),
-            Field::Map(ref map) => map.methods(ident),
-            _ => None,
         }
     }
 }

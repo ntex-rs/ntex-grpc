@@ -110,15 +110,6 @@ impl Field {
     }
 
     pub fn encode(&self, ident: TokenStream) -> TokenStream {
-        let module = self.ty.module();
-        let module_prefix = self.ty.module_prefix();
-        let encode_fn = match self.kind {
-            Kind::Plain(..) | Kind::Optional(..) | Kind::Required(..) => quote!(encode),
-            Kind::Repeated => quote!(encode_repeated),
-            Kind::Packed => quote!(encode_packed),
-        };
-        let encode_fn = quote!(#module_prefix::#module::#encode_fn);
-        let encode_fn2 = quote!(#module_prefix::#module::is_equal);
         let tag = self.tag;
 
         match self.kind {
@@ -126,111 +117,56 @@ impl Field {
                 if matches!(self.ty, Ty::String | Ty::Bytes) {
                     let default = default.typed_for_cmp();
                     quote! {
-                        if !#encode_fn2(&#ident, #default) {
-                            #encode_fn(#tag, &#ident, buf);
+                        if !#ident.is_default(#default) {
+                            NativeType::serialize_field(&#ident, #tag, buf);
                         }
                     }
                 } else {
                     let default = default.typed();
                     quote! {
                         if #ident != #default {
-                            #encode_fn(#tag, &#ident, buf);
+                            NativeType::serialize_field(&#ident, #tag, buf);
                         }
                     }
                 }
             }
             Kind::Optional(..) => quote! {
-                if let ::core::option::Option::Some(ref value) = #ident {
-                    #encode_fn(#tag, value, buf);
-                }
+                NativeType::serialize_field(&#ident, #tag, buf)
             },
             Kind::Required(..) | Kind::Repeated | Kind::Packed => quote! {
-                #encode_fn(#tag, &#ident, buf);
-            },
-        }
-    }
-
-    /// Returns an expression which evaluates to the result of merging a decoded
-    /// scalar value into the field.
-    pub fn merge(&self, ident: TokenStream) -> TokenStream {
-        let module = self.ty.module();
-        let module_prefix = self.ty.module_prefix();
-        let merge_fn = match self.kind {
-            Kind::Plain(..) | Kind::Optional(..) | Kind::Required(..) => quote!(merge),
-            Kind::Repeated | Kind::Packed => quote!(merge_repeated),
-        };
-        let merge_fn = quote!(#module_prefix::#module::#merge_fn);
-
-        match self.kind {
-            Kind::Plain(..) | Kind::Required(..) | Kind::Repeated | Kind::Packed => quote! {
-                #merge_fn(wire_type, #ident, buf, ctx)
-            },
-            Kind::Optional(..) => quote! {
-                #merge_fn(wire_type,
-                          #ident.get_or_insert_with(::core::default::Default::default),
-                          buf,
-                          ctx)
+                NativeType::serialize_field(&#ident, #tag, buf);
             },
         }
     }
 
     /// Returns an expression which evaluates to the encoded length of the field.
     pub fn encoded_len(&self, ident: TokenStream) -> TokenStream {
-        let module = self.ty.module();
-        let module_prefix = self.ty.module_prefix();
-        let encoded_len_fn = match self.kind {
-            Kind::Plain(..) | Kind::Optional(..) | Kind::Required(..) => quote!(encoded_len),
-            Kind::Repeated => quote!(encoded_len_repeated),
-            Kind::Packed => quote!(encoded_len_packed),
-        };
-        let encoded_len_fn = quote!(#module_prefix::#module::#encoded_len_fn);
-        let encoded_len_fn2 = quote!(#module_prefix::#module::is_equal);
         let tag = self.tag;
 
-        match self.kind {
-            Kind::Plain(ref default) => {
-                if matches!(self.ty, Ty::String | Ty::Bytes) {
-                    let default = default.typed_for_cmp();
-                    quote! {
-                        if !#encoded_len_fn2(&#ident, #default) {
-                            #encoded_len_fn(#tag, &#ident)
-                        } else {
-                            0
-                        }
-                    }
-                } else {
-                    let default = default.typed();
-                    quote! {
-                        if #ident != #default {
-                            #encoded_len_fn(#tag, &#ident)
-                        } else {
-                            0
-                        }
+        if let Kind::Plain(ref default) = self.kind {
+            if matches!(self.ty, Ty::String | Ty::Bytes) {
+                let default = default.typed_for_cmp();
+                quote! {
+                    if !#ident.is_default(#default) {
+                        NativeType::field_len(&#ident, #tag)
+                    } else {
+                        0
                     }
                 }
-            }
-            Kind::Optional(..) => quote! {
-                #ident.as_ref().map_or(0, |value| #encoded_len_fn(#tag, value))
-            },
-            Kind::Required(..) | Kind::Repeated | Kind::Packed => quote! {
-                #encoded_len_fn(#tag, &#ident)
-            },
-        }
-    }
-
-    pub fn clear(&self, ident: TokenStream) -> TokenStream {
-        match self.kind {
-            Kind::Plain(ref default) | Kind::Required(ref default) => {
+            } else {
                 let default = default.typed();
-                match self.ty {
-                    Ty::String | Ty::Bytes => {
-                        quote!(::ntex_grpc::encoding::bytes::clear(&mut #ident);)
+                quote! {
+                    if #ident != #default {
+                        NativeType::field_len(&#ident, #tag)
+                    } else {
+                        0
                     }
-                    _ => quote!(#ident = #default),
                 }
             }
-            Kind::Optional(_) => quote!(#ident = ::core::option::Option::None),
-            Kind::Repeated | Kind::Packed => quote!(#ident.clear()),
+        } else {
+            quote! {
+                NativeType::field_len(&#ident, #tag)
+            }
         }
     }
 
@@ -238,8 +174,8 @@ impl Field {
     pub fn default(&self) -> TokenStream {
         match self.kind {
             Kind::Plain(ref value) | Kind::Required(ref value) => value.owned(),
-            Kind::Optional(_) => quote!(::core::option::Option::None),
-            Kind::Repeated | Kind::Packed => quote!(::ntex_grpc::prost::alloc::vec::Vec::new()),
+            Kind::Optional(_) => quote!(::core::default::Default::default()),
+            Kind::Repeated | Kind::Packed => quote!(::std::vec::Vec::new()),
         }
     }
 
@@ -267,12 +203,11 @@ impl Field {
     /// Returns a fragment for formatting the field `ident` in `Debug`.
     pub fn debug(&self, wrapper_name: TokenStream) -> TokenStream {
         let wrapper = self.debug_inner(quote!(Inner));
-        let inner_ty = self.ty.rust_type();
         match self.kind {
             Kind::Plain(_) | Kind::Required(_) => self.debug_inner(wrapper_name),
             Kind::Optional(_) => quote! {
-                struct #wrapper_name<'a>(&'a ::core::option::Option<#inner_ty>);
-                impl<'a> ::core::fmt::Debug for #wrapper_name<'a> {
+                struct #wrapper_name<'a, T>(&'a ::core::option::Option<T>);
+                impl<'a, T: ::core::fmt::Debug> ::core::fmt::Debug for #wrapper_name<'a, T> {
                     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
                         #wrapper
                         ::core::fmt::Debug::fmt(&self.0.as_ref().map(Inner), f)
@@ -281,7 +216,7 @@ impl Field {
             },
             Kind::Repeated | Kind::Packed => {
                 quote! {
-                    struct #wrapper_name<'a, T>(&'a ::ntex_grpc::prost::alloc::vec::Vec<T>);
+                    struct #wrapper_name<'a, T>(&'a ::std::alloc::vec::Vec<T>);
                     impl<'a, T: ::core::fmt::Debug> ::core::fmt::Debug for #wrapper_name<'a, T> {
                         fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
                             let mut vec_builder = f.debug_list();
@@ -294,103 +229,6 @@ impl Field {
                     }
                 }
             }
-        }
-    }
-
-    /// Returns methods to embed in the message.
-    pub fn methods(&self, ident: &Ident) -> Option<TokenStream> {
-        let mut ident_str = ident.to_string();
-        if ident_str.starts_with("r#") {
-            ident_str = ident_str[2..].to_owned();
-        }
-
-        if let Ty::Enumeration(ref ty) = self.ty {
-            let set = Ident::new(&format!("set_{}", ident_str), Span::call_site());
-            let set_doc = format!("Sets `{}` to the provided enum value.", ident_str);
-            Some(match self.kind {
-                Kind::Plain(ref default) | Kind::Required(ref default) => {
-                    let get_doc = format!(
-                        "Returns the enum value of `{}`, \
-                         or the default if the field is set to an invalid enum value.",
-                        ident_str,
-                    );
-                    quote! {
-                        #[doc=#get_doc]
-                        pub fn #ident(&self) -> #ty {
-                            #ty::from_i32(self.#ident).unwrap_or(#default)
-                        }
-
-                        #[doc=#set_doc]
-                        pub fn #set(&mut self, value: #ty) {
-                            self.#ident = value as i32;
-                        }
-                    }
-                }
-                Kind::Optional(ref default) => {
-                    let get_doc = format!(
-                        "Returns the enum value of `{}`, \
-                         or the default if the field is unset or set to an invalid enum value.",
-                        ident_str,
-                    );
-                    quote! {
-                        #[doc=#get_doc]
-                        pub fn #ident(&self) -> #ty {
-                            self.#ident.and_then(#ty::from_i32).unwrap_or(#default)
-                        }
-
-                        #[doc=#set_doc]
-                        pub fn #set(&mut self, value: #ty) {
-                            self.#ident = ::core::option::Option::Some(value as i32);
-                        }
-                    }
-                }
-                Kind::Repeated | Kind::Packed => {
-                    let iter_doc = format!(
-                        "Returns an iterator which yields the valid enum values contained in `{}`.",
-                        ident_str,
-                    );
-                    let push = Ident::new(&format!("push_{}", ident_str), Span::call_site());
-                    let push_doc = format!("Appends the provided enum value to `{}`.", ident_str);
-                    quote! {
-                        #[doc=#iter_doc]
-                        pub fn #ident(&self) -> ::core::iter::FilterMap<
-                            ::core::iter::Cloned<::core::slice::Iter<i32>>,
-                            fn(i32) -> ::core::option::Option<#ty>,
-                        > {
-                            self.#ident.iter().cloned().filter_map(#ty::from_i32)
-                        }
-                        #[doc=#push_doc]
-                        pub fn #push(&mut self, value: #ty) {
-                            self.#ident.push(value as i32);
-                        }
-                    }
-                }
-            })
-        } else if let Kind::Optional(ref default) = self.kind {
-            let ty = self.ty.rust_ref_type();
-
-            let match_some = if self.ty.is_numeric() {
-                quote!(::core::option::Option::Some(val) => val,)
-            } else {
-                quote!(::core::option::Option::Some(ref val) => &val[..],)
-            };
-
-            let get_doc = format!(
-                "Returns the value of `{0}`, or the default value if `{0}` is unset.",
-                ident_str,
-            );
-
-            Some(quote! {
-                #[doc=#get_doc]
-                pub fn #ident(&self) -> #ty {
-                    match self.#ident {
-                        #match_some
-                        ::core::option::Option::None => #default,
-                    }
-                }
-            })
-        } else {
-            None
         }
     }
 }
@@ -546,21 +384,6 @@ impl Ty {
             Ty::String => quote!(&str),
             Ty::Bytes => quote!(&[u8]),
             Ty::Enumeration(..) => quote!(i32),
-        }
-    }
-
-    pub fn module(&self) -> Ident {
-        match *self {
-            Ty::String => Ident::new("bytes", Span::call_site()),
-            Ty::Enumeration(..) => Ident::new("int32", Span::call_site()),
-            _ => Ident::new(self.as_str(), Span::call_site()),
-        }
-    }
-
-    pub fn module_prefix(&self) -> TokenStream {
-        match *self {
-            Ty::String | Ty::Bytes => quote!(::ntex_grpc::encoding),
-            _ => quote!(::ntex_grpc::prost::encoding),
         }
     }
 

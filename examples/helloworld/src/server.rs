@@ -12,8 +12,12 @@ pub struct GreeterServer;
 impl GreeterServer {
     #[method(SayHello)]
     async fn say_hello(&self, req: HelloRequest) -> HelloReply {
-        helloworld::HelloReply {
-            message: format!("Hello {}!", req.name).into(),
+        HelloReply {
+            result: Some(helloworld::hello_reply::Result::Success(
+                helloworld::ResponseResult {
+                    message: format!("Hello {}!", req.name).into(),
+                },
+            )),
         }
     }
 }
@@ -59,6 +63,6 @@ async fn main() -> std::io::Result<()> {
 
 fn parse_usize_default(input: Option<&str>, default: usize) -> usize {
     input
-        .map(|v| v.parse().expect(&format!("not a valid number: {}", v)))
+        .map(|v| v.parse().unwrap_or_else(|_| panic!("not a valid number: {}", v)))
         .unwrap_or(default)
 }

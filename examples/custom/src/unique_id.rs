@@ -28,31 +28,28 @@ impl Default for UniqueId {
     }
 }
 
-impl ntex_grpc::BytesAdapter for UniqueId {
+impl ntex_grpc::NativeType for UniqueId {
+    const TYPE: ntex_grpc::types::WireType = ntex_grpc::types::WireType::LengthDelimited;
+
     #[inline]
-    fn len(&self) -> usize {
+    fn value_len(&self) -> usize {
         16
     }
 
     #[inline]
-    fn replace_with(&mut self, buf: Bytes) -> Result<(), ntex_grpc::DecodeError> {
-        *self = UniqueId::try_from_bytes(&buf)
+    fn merge(&mut self, src: Bytes) -> Result<(), ntex_grpc::DecodeError> {
+        *self = UniqueId::try_from_bytes(&src)
             .map_err(|_| ntex_grpc::DecodeError::new("Cannot parse UUID from Bytes"))?;
         Ok(())
     }
 
     #[inline]
-    fn append_to(&self, buf: &mut BytesMut) {
-        buf.extend_from_slice(self.0.as_bytes())
+    fn encode(&self, dst: &mut BytesMut) {
+        dst.extend_from_slice(self.0.as_bytes())
     }
 
     #[inline]
-    fn clear(&mut self) {
-        *self = Self::nil();
-    }
-
-    #[inline]
-    fn is_equal(&self, val: &[u8]) -> bool {
+    fn is_default(&self, val: &[u8]) -> bool {
         self.as_bytes() == val
     }
 }

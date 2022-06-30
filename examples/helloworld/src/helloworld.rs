@@ -10,6 +10,23 @@ pub struct HelloRequest {
 ///  The response message containing the greetings
 #[derive(Clone, PartialEq, ::ntex_grpc::Message)]
 pub struct HelloReply {
+    #[prost(oneof = "hello_reply::Result", tags = "1, 2, 3")]
+    pub result: ::core::option::Option<hello_reply::Result>,
+}
+/// Nested message and enum types in `HelloReply`.
+pub mod hello_reply {
+    #[derive(Clone, PartialEq, ::ntex_grpc::Oneof)]
+    pub enum Result {
+        #[prost(message, tag = "1")]
+        Success(super::ResponseResult),
+        #[prost(int64, tag = "2")]
+        ServiceError(i64),
+        #[prost(int64, tag = "3")]
+        InvalidRequest(i64),
+    }
+}
+#[derive(Clone, PartialEq, ::ntex_grpc::Message)]
+pub struct ResponseResult {
     #[prost(string, tag = "1")]
     pub message: ::ntex_grpc::types::ByteString,
 }

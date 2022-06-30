@@ -1,3 +1,4 @@
+#![allow(unused_variables, unused_must_use)]
 use std::{cell::RefCell, future::Future, pin::Pin, rc::Rc, task::Context, task::Poll};
 
 use ntex_bytes::{Buf, BufMut};

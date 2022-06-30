@@ -78,16 +78,14 @@ impl Field {
         match self.label {
             Label::Optional => quote! {
                 if let Some(ref msg) = #ident {
-                    ::ntex_grpc::encoding::message::encode(#tag, msg, buf);
+                    NativeType::serialize_field(msg, #tag, buf);
                 }
             },
             Label::Required => quote! {
-                ::ntex_grpc::encoding::message::encode(#tag, &#ident, buf);
+                NativeType::serialize_field(&#ident, #tag, buf);
             },
             Label::Repeated => quote! {
-                for msg in &#ident {
-                    ::ntex_grpc::encoding::message::encode(#tag, msg, buf);
-                }
+                NativeType::serialize_field(&#ident, #tag, buf);
             },
         }
     }
@@ -113,22 +111,14 @@ impl Field {
         let tag = self.tag;
         match self.label {
             Label::Optional => quote! {
-                #ident.as_ref().map_or(0, |msg| ::ntex_grpc::encoding::message::encoded_len(#tag, msg))
+                #ident.as_ref().map_or(0, |msg| NativeType::field_len(msg, #tag))
             },
             Label::Required => quote! {
-                ::ntex_grpc::encoding::message::encoded_len(#tag, &#ident)
+                NativeType::field_len(&#ident, #tag)
             },
             Label::Repeated => quote! {
-                ::ntex_grpc::encoding::message::encoded_len_repeated(#tag, &#ident)
+                NativeType::field_len(&#ident, #tag)
             },
-        }
-    }
-
-    pub fn clear(&self, ident: TokenStream) -> TokenStream {
-        match self.label {
-            Label::Optional => quote!(#ident = ::core::option::Option::None),
-            Label::Required => quote!(#ident.clear()),
-            Label::Repeated => quote!(#ident.clear()),
         }
     }
 }

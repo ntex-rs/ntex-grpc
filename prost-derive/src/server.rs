@@ -36,7 +36,8 @@ pub fn server(attr: TokenStream, item: TokenStream) -> TokenStream {
             Some(#methods_path::#m_name(method)) => {
                 let input = method.decode(&mut req.payload)?;
                 let output = #ty::#fn_name(&slf, input).await;
-                method.encode(output, &mut buf).map_err(::ntex_grpc::server::ServerError::Encode)
+                method.encode(output, &mut buf);
+                Ok(())
             }
         });
     }

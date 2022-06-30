@@ -9,19 +9,14 @@ pub mod client;
 pub mod server;
 pub mod types;
 
-pub use crate::error::{DecodeError, ServiceError};
+pub use crate::error::{DecodeError, ServerError, ServiceError};
 pub use crate::request::{Request, Response};
 pub use crate::status::GrpcStatus;
 pub use crate::transport::{ClientInformation, MethodDef, MethodsDef, ServiceDef, Transport};
-pub use crate::types::{BytesAdapter, Message};
+pub use crate::types::{Message, NativeType};
 
 #[doc(hidden)]
 pub mod encoding;
-
-#[doc(hidden)]
-pub mod prost {
-    pub use prost::*;
-}
 
 use ntex_http::HeaderName;
 

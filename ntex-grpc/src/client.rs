@@ -62,7 +62,7 @@ impl<T: MethodDef> Transport<T> for Client {
         let mut buf = BytesMut::with_capacity(len + 5);
         buf.put_u8(0); // compression
         buf.put_u32(len as u32); // length
-        val.encode(&mut buf)?;
+        val.write(&mut buf);
 
         let mut hdrs = HeaderMap::new();
         hdrs.append(header::CONTENT_TYPE, consts::HDRV_CT_GRPC);
@@ -91,13 +91,13 @@ impl<T: MethodDef> Transport<T> for Client {
             Ok(Ok((mut data, headers, trailers))) => {
                 let _compressed = data.get_u8();
                 let len = data.get_u32();
-                match <T::Output as Message>::decode(&mut data.split_to(len as usize)) {
+                match <T::Output as Message>::read(&mut data.split_to(len as usize)) {
                     Ok(output) => Ok(Response {
                         output,
                         headers,
                         trailers,
                     }),
-                    Err(_e) => Err(ServiceError::Canceled),
+                    Err(e) => Err(ServiceError::Decode(e)),
                 }
             }
             Ok(Err(err)) => Err(err),

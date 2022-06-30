@@ -1,128 +1,459 @@
-use std::fmt::Debug;
+use std::{collections::HashMap, convert::TryFrom, hash::BuildHasher, hash::Hash};
 
 pub use ntex_bytes::{ByteString, Bytes, BytesMut};
 
-use prost::encoding::{decode_key, encode_varint, encoded_len_varint, DecodeContext, WireType};
-use prost::{DecodeError, EncodeError};
+pub use crate::encoding::WireType;
+use crate::encoding::{self, DecodeError};
 
-/// A Protocol Buffers message.
-pub trait Message: Debug + Default {
-    /// Encodes the message to a buffer.
-    ///
-    /// This method will panic if the buffer has insufficient capacity.
-    ///
-    /// Meant to be used only by `Message` implementations.
-    #[doc(hidden)]
-    fn encode_raw(&self, buf: &mut BytesMut)
-    where
-        Self: Sized;
+/// Protobuf struct read/write operations
+pub trait Message: Default + Sized {
+    /// Decodes an instance of the message from a buffer
+    fn read(src: &mut Bytes) -> Result<Self, DecodeError>;
 
-    /// Decodes a field from a buffer, and merges it into `self`.
-    ///
-    /// Meant to be used only by `Message` implementations.
-    #[doc(hidden)]
-    fn merge_field(
-        &mut self,
-        tag: u32,
-        wire_type: WireType,
-        buf: &mut Bytes,
-        ctx: DecodeContext,
-    ) -> Result<(), DecodeError>
-    where
-        Self: Sized;
+    /// Encodes and writes the message to a buffer
+    fn write(&self, dst: &mut BytesMut);
+
+    /// Returns the encoded length of the message with a length delimiter
+    fn encoded_len(&self) -> usize;
+}
+
+/// Protobuf type serializer
+pub trait NativeType: Default + Sized {
+    const TYPE: WireType;
 
     /// Returns the encoded length of the message without a length delimiter.
-    fn encoded_len(&self) -> usize;
+    fn value_len(&self) -> usize;
 
-    /// Encodes the message to a buffer.
-    ///
-    /// An error will be returned if the buffer does not have sufficient capacity.
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), EncodeError>
-    where
-        Self: Sized,
-    {
-        buf.reserve(self.encoded_len());
-        self.encode_raw(buf);
-        Ok(())
+    /// Deserialize from the input
+    fn merge(&mut self, src: Bytes) -> Result<(), DecodeError>;
+
+    /// Serialize field
+    fn encode(&self, dst: &mut BytesMut);
+
+    /// Check if value is default
+    fn is_default(&self, _: &[u8]) -> bool {
+        false
     }
 
-    /// Encodes the message with a length-delimiter to a buffer.
-    ///
-    /// An error will be returned if the buffer does not have sufficient capacity.
-    fn encode_length_delimited(&self, buf: &mut BytesMut) -> Result<(), EncodeError>
-    where
-        Self: Sized,
-    {
-        let len = self.encoded_len();
-        let required = len + encoded_len_varint(len as u64);
-        buf.reserve(required);
-        encode_varint(len as u64, buf);
-        self.encode_raw(buf);
-        Ok(())
+    /// Protobuf field length
+    fn field_len(&self, tag: u32) -> usize {
+        encoding::key_len(tag)
+            + encoding::encoded_len_varint(self.value_len() as u64)
+            + self.value_len()
     }
 
-    /// Decodes an instance of the message from a buffer.
-    ///
-    /// The entire buffer will be consumed.
-    fn decode(buf: &mut Bytes) -> Result<Self, DecodeError> {
-        let mut message = Self::default();
-        Self::merge(&mut message, buf).map(|_| message)
+    /// Serialize protobuf field
+    fn serialize_field(&self, tag: u32, dst: &mut BytesMut) {
+        encoding::encode_key(tag, Self::TYPE, dst);
+        encoding::encode_varint(self.value_len() as u64, dst);
+        self.encode(dst);
     }
 
-    /// Decodes a length-delimited instance of the message from the buffer.
-    fn decode_length_delimited(buf: &mut Bytes) -> Result<Self, DecodeError> {
-        let mut message = Self::default();
-        message.merge_length_delimited(buf)?;
-        Ok(message)
-    }
-
-    /// Decodes an instance of the message from a buffer, and merges it into `self`.
-    ///
-    /// The entire buffer will be consumed.
-    fn merge(&mut self, buf: &mut Bytes) -> Result<(), DecodeError>
-    where
-        Self: Sized,
-    {
-        let ctx = DecodeContext::default();
-        while !buf.is_empty() {
-            let (tag, wire_type) = decode_key(buf)?;
-            self.merge_field(tag, wire_type, buf, ctx.clone())?;
+    /// Deserialize protobuf field
+    fn deserialize_field(&mut self, wtype: WireType, src: &mut Bytes) -> Result<(), DecodeError> {
+        encoding::check_wire_type(Self::TYPE, wtype)?;
+        let len = encoding::decode_varint(src)? as usize;
+        if len > src.len() {
+            Err(DecodeError::new("Not enough data"))
+        } else {
+            let buf = src.split_to(len);
+            self.merge(buf)
         }
+    }
+}
+
+impl<T: Message> NativeType for T {
+    const TYPE: WireType = WireType::LengthDelimited;
+
+    fn value_len(&self) -> usize {
+        Message::encoded_len(self)
+    }
+
+    /// Encode message to the buffer
+    fn encode(&self, dst: &mut BytesMut) {
+        self.write(dst)
+    }
+
+    /// Deserialize from the input
+    fn merge(&mut self, mut src: Bytes) -> Result<(), DecodeError> {
+        *self = Message::read(&mut src)?;
+        Ok(())
+    }
+}
+
+impl NativeType for Bytes {
+    const TYPE: WireType = WireType::LengthDelimited;
+
+    #[inline]
+    fn value_len(&self) -> usize {
+        self.len()
+    }
+
+    #[inline]
+    /// Serialize field value
+    fn encode(&self, dst: &mut BytesMut) {
+        dst.extend_from_slice(self);
+    }
+
+    #[inline]
+    /// Deserialize from the input
+    fn merge(&mut self, src: Bytes) -> Result<(), DecodeError> {
+        *self = src;
         Ok(())
     }
 
-    /// Decodes a length-delimited instance of the message from buffer, and
-    /// merges it into `self`.
-    fn merge_length_delimited(&mut self, buf: &mut Bytes) -> Result<(), DecodeError>
-    where
-        Self: Sized,
-    {
-        let ctx = DecodeContext::default();
-        prost::encoding::merge_loop(self, buf, ctx, |msg: &mut Self, buf: &mut Bytes, ctx| {
-            let (tag, wire_type) = decode_key(buf)?;
-            msg.merge_field(tag, wire_type, buf, ctx)
-        })
-    }
-
-    /// Clears the message, resetting all fields to their default.
-    fn clear(&mut self);
-}
-
-pub trait BytesAdapter: Default + Sized {
-    fn len(&self) -> usize;
-
-    /// Replace contents of this buffer with the contents of another buffer.
-    fn replace_with(&mut self, buf: Bytes) -> Result<(), DecodeError>;
-
-    /// Appends this buffer to the (contents of) other buffer.
-    fn append_to(&self, buf: &mut BytesMut);
-
-    /// Clear content
-    fn clear(&mut self);
-
-    fn is_equal(&self, val: &[u8]) -> bool;
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
+    #[inline]
+    fn is_default(&self, default: &[u8]) -> bool {
+        self == default
     }
 }
+
+impl NativeType for String {
+    const TYPE: WireType = WireType::LengthDelimited;
+
+    #[inline]
+    fn value_len(&self) -> usize {
+        self.len()
+    }
+
+    #[inline]
+    fn merge(&mut self, src: Bytes) -> Result<(), DecodeError> {
+        if let Ok(s) = ByteString::try_from(src) {
+            *self = s.as_str().to_string();
+            Ok(())
+        } else {
+            Err(DecodeError::new(
+                "invalid string value: data is not UTF-8 encoded",
+            ))
+        }
+    }
+
+    #[inline]
+    fn encode(&self, dst: &mut BytesMut) {
+        dst.extend_from_slice(self.as_bytes());
+    }
+
+    #[inline]
+    fn is_default(&self, default: &[u8]) -> bool {
+        self.as_bytes() == default
+    }
+}
+
+impl NativeType for ByteString {
+    const TYPE: WireType = WireType::LengthDelimited;
+
+    #[inline]
+    fn value_len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    #[inline]
+    fn merge(&mut self, src: Bytes) -> Result<(), DecodeError> {
+        if let Ok(s) = ByteString::try_from(src) {
+            *self = s;
+            Ok(())
+        } else {
+            Err(DecodeError::new(
+                "invalid string value: data is not UTF-8 encoded",
+            ))
+        }
+    }
+
+    #[inline]
+    fn encode(&self, dst: &mut BytesMut) {
+        dst.extend_from_slice(self.as_bytes());
+    }
+
+    #[inline]
+    fn is_default(&self, default: &[u8]) -> bool {
+        self.as_bytes() == default
+    }
+}
+
+impl<T: NativeType> NativeType for Option<T> {
+    const TYPE: WireType = WireType::LengthDelimited;
+
+    #[inline]
+    fn value_len(&self) -> usize {
+        panic!("Value length is not known for Vec<T>");
+    }
+
+    #[inline]
+    /// Serialize field value
+    fn encode(&self, _: &mut BytesMut) {}
+
+    #[inline]
+    /// Deserialize from the input
+    fn merge(&mut self, _: Bytes) -> Result<(), DecodeError> {
+        Err(DecodeError::new(
+            "Cannot directly call deserialize for Vec<T>",
+        ))
+    }
+
+    /// Deserialize protobuf field
+    fn deserialize_field(&mut self, wtype: WireType, src: &mut Bytes) -> Result<(), DecodeError> {
+        let mut value: T = Default::default();
+        value.deserialize_field(wtype, src)?;
+        *self = Some(value);
+        Ok(())
+    }
+
+    /// Serialize protobuf field
+    fn serialize_field(&self, tag: u32, dst: &mut BytesMut) {
+        if let Some(ref value) = self {
+            value.serialize_field(tag, dst);
+        }
+    }
+
+    #[inline]
+    fn is_default(&self, _: &[u8]) -> bool {
+        false
+    }
+
+    /// Protobuf field length
+    fn field_len(&self, tag: u32) -> usize {
+        self.as_ref().map(|value| value.field_len(tag)).unwrap_or(0)
+    }
+}
+
+impl NativeType for Vec<u8> {
+    const TYPE: WireType = WireType::LengthDelimited;
+
+    #[inline]
+    fn value_len(&self) -> usize {
+        self.len()
+    }
+
+    #[inline]
+    /// Serialize field value
+    fn encode(&self, dst: &mut BytesMut) {
+        dst.extend_from_slice(self.as_slice());
+    }
+
+    #[inline]
+    /// Deserialize from the input
+    fn merge(&mut self, src: Bytes) -> Result<(), DecodeError> {
+        *self = Vec::from(&src[..]);
+        Ok(())
+    }
+
+    #[inline]
+    fn is_default(&self, default: &[u8]) -> bool {
+        self == default
+    }
+}
+
+impl<T: NativeType> NativeType for Vec<T> {
+    const TYPE: WireType = WireType::LengthDelimited;
+
+    #[inline]
+    fn value_len(&self) -> usize {
+        panic!("Value length is not known for Vec<T>");
+    }
+
+    #[inline]
+    /// Serialize field value
+    fn encode(&self, _: &mut BytesMut) {}
+
+    #[inline]
+    /// Deserialize from the input
+    fn merge(&mut self, _: Bytes) -> Result<(), DecodeError> {
+        Err(DecodeError::new(
+            "Cannot directly call deserialize for Vec<T>",
+        ))
+    }
+
+    /// Deserialize protobuf field
+    fn deserialize_field(&mut self, wtype: WireType, src: &mut Bytes) -> Result<(), DecodeError> {
+        let mut value: T = Default::default();
+        value.deserialize_field(wtype, src)?;
+        self.push(value);
+        Ok(())
+    }
+
+    /// Serialize protobuf field
+    fn serialize_field(&self, tag: u32, dst: &mut BytesMut) {
+        for item in self.iter() {
+            item.serialize_field(tag, dst);
+        }
+    }
+
+    #[inline]
+    fn is_default(&self, _: &[u8]) -> bool {
+        false
+    }
+
+    /// Protobuf field length
+    fn field_len(&self, tag: u32) -> usize {
+        self.iter().map(|value| value.field_len(tag)).sum()
+    }
+}
+
+impl<K: NativeType + Eq + Hash, V: NativeType + Eq, S: BuildHasher + Default> NativeType
+    for HashMap<K, V, S>
+{
+    const TYPE: WireType = WireType::LengthDelimited;
+
+    #[inline]
+    fn value_len(&self) -> usize {
+        panic!("Value length is not known for Map<K, V>");
+    }
+
+    #[inline]
+    /// Deserialize from the input
+    fn merge(&mut self, _: Bytes) -> Result<(), DecodeError> {
+        Err(DecodeError::new(
+            "Cannot directly call deserialize for Map<K, V>",
+        ))
+    }
+
+    #[inline]
+    /// Serialize field value
+    fn encode(&self, _: &mut BytesMut) {}
+
+    #[inline]
+    fn is_default(&self, _: &[u8]) -> bool {
+        false
+    }
+
+    /// Deserialize protobuf field
+    fn deserialize_field(&mut self, wtype: WireType, src: &mut Bytes) -> Result<(), DecodeError> {
+        encoding::check_wire_type(Self::TYPE, wtype)?;
+        let len = encoding::decode_varint(src)? as usize;
+        if len > src.len() {
+            Err(DecodeError::new("Not enough data"))
+        } else {
+            let mut buf = src.split_to(len);
+            let mut key = Default::default();
+            let mut val = Default::default();
+
+            while !buf.is_empty() {
+                let (tag, wire_type) = encoding::decode_key(&mut buf)?;
+                match tag {
+                    1 => NativeType::deserialize_field(&mut key, wire_type, &mut buf)?,
+                    2 => NativeType::deserialize_field(&mut val, wire_type, &mut buf)?,
+                    _ => return Err(DecodeError::new("Map deserialization error")),
+                }
+            }
+            self.insert(key, val);
+            Ok(())
+        }
+    }
+
+    /// Serialize protobuf field
+    fn serialize_field(&self, tag: u32, dst: &mut BytesMut) {
+        let key_default = K::default();
+        let val_default = V::default();
+
+        for item in self.iter() {
+            let skip_key = item.0 == &key_default;
+            let skip_val = item.1 == &val_default;
+
+            let len = (if skip_key { 0 } else { item.0.field_len(1) })
+                + (if skip_val { 0 } else { item.1.field_len(2) });
+
+            encoding::encode_key(tag, WireType::LengthDelimited, dst);
+            encoding::encode_varint(len as u64, dst);
+            if !skip_key {
+                item.0.serialize_field(1, dst);
+            }
+            if !skip_val {
+                item.1.serialize_field(1, dst);
+            }
+        }
+    }
+
+    /// Generic protobuf map encode function with an overridden value default.
+    fn field_len(&self, tag: u32) -> usize {
+        let key_default = K::default();
+        let val_default = V::default();
+
+        self.iter()
+            .map(|(key, val)| {
+                let len = (if key == &key_default {
+                    0
+                } else {
+                    key.field_len(1)
+                }) + (if val == &val_default {
+                    0
+                } else {
+                    val.field_len(2)
+                });
+
+                encoding::key_len(tag) + encoding::encoded_len_varint(len as u64) + len
+            })
+            .sum::<usize>()
+    }
+}
+
+/// Macro which emits a module containing a set of encoding functions for a
+/// variable width numeric type.
+macro_rules! varint {
+    ($ty:ident) => (
+        varint!($ty, to_uint64(self) { *self as u64 }, from_uint64(v) { v as $ty });
+    );
+
+    ($ty:ty, to_uint64($slf:ident) $to_uint64:expr, from_uint64($val:ident) $from_uint64:expr) => (
+
+        impl NativeType for $ty {
+            const TYPE: WireType = WireType::Varint;
+
+            #[inline]
+            fn value_len(&self) -> usize {
+                0
+            }
+
+            #[inline]
+            fn encode(&$slf, dst: &mut BytesMut) {
+                encoding::encode_varint($to_uint64, dst);
+            }
+
+            #[inline]
+            fn merge(&mut self, mut src: Bytes) -> Result<(), DecodeError> {
+                *self = encoding::decode_varint(&mut src).map(|$val| $from_uint64)?;
+                Ok(())
+            }
+
+            #[inline]
+            fn field_len(&$slf, tag: u32) -> usize {
+                encoding::key_len(tag) + encoding::encoded_len_varint($to_uint64)
+            }
+
+            /// Serialize protobuf field
+            fn serialize_field(&self, tag: u32, dst: &mut BytesMut) {
+                encoding::encode_key(tag, Self::TYPE, dst);
+                self.encode(dst);
+            }
+
+            /// Deserialize protobuf field
+            fn deserialize_field(&mut self, wtype: WireType, src: &mut Bytes) -> Result<(), DecodeError> {
+                encoding::check_wire_type(Self::TYPE, wtype)?;
+                *self = encoding::decode_varint(src).map(|$val| $from_uint64)?;
+                Ok(())
+            }
+        }
+    );
+}
+
+varint!(bool,
+        to_uint64(self) if *self { 1u64 } else { 0u64 },
+        from_uint64(value) value != 0);
+varint!(i32);
+varint!(i64);
+varint!(u32);
+varint!(u64);
+// varint!(i32, sint32,
+// to_uint64(value) {
+//     ((value << 1) ^ (value >> 31)) as u32 as u64
+// },
+// from_uint64(value) {
+//     let value = value as u32;
+//     ((value >> 1) as i32) ^ (-((value & 1) as i32))
+// });
+// varint!(i64, sint64,
+// to_uint64(value) {
+//     ((value << 1) ^ (value >> 63)) as u64
+// },
+// from_uint64(value) {
+//     ((value >> 1) as i64) ^ (-((value & 1) as i64))
+// });

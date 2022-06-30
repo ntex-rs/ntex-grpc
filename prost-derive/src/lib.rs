@@ -103,18 +103,25 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         .map(|&(ref field_ident, ref field)| field.encode(quote!(self.#field_ident)));
 
     let merge = fields.iter().map(|&(ref field_ident, ref field)| {
-        let merge = field.merge(quote!(value));
         let tags = field.tags().into_iter().map(|tag| quote!(#tag));
         let tags = Itertools::intersperse(tags, quote!(|));
 
-        quote! {
-            #(#tags)* => {
-                let mut value = &mut self.#field_ident;
-                #merge.map_err(|mut error| {
+        if field.is_oneof() {
+            let val = field.merge(quote!(#field_ident));
+            quote! {
+                #(#tags)* => msg.#field_ident = #val.map_err(|mut error| {
                     error.push(STRUCT_NAME, stringify!(#field_ident));
                     error
-                })
-            },
+                })?,
+            }
+        } else {
+            quote! {
+                #(#tags)* => NativeType::deserialize_field(&mut msg.#field_ident, wire_type, buf)
+                .map_err(|mut error| {
+                    error.push(STRUCT_NAME, stringify!(#field_ident));
+                    error
+                })?,
+            }
         }
     });
 
@@ -129,42 +136,23 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
     // TODO
     let is_struct = true;
 
-    let clear = fields
-        .iter()
-        .map(|&(ref field_ident, ref field)| field.clear(quote!(self.#field_ident)));
-
     let default = fields.iter().map(|&(ref field_ident, ref field)| {
         let value = field.default();
         quote!(#field_ident: #value,)
     });
 
-    let methods = fields
-        .iter()
-        .flat_map(|&(ref field_ident, ref field)| field.methods(field_ident))
-        .collect::<Vec<_>>();
-    let methods = if methods.is_empty() {
-        quote!()
-    } else {
-        quote! {
-            #[allow(dead_code)]
-            impl #impl_generics #ident #ty_generics #where_clause {
-                #(#methods)*
-            }
-        }
-    };
-
     let debugs = unsorted_fields.iter().map(|&(ref field_ident, ref field)| {
         let wrapper = field.debug(quote!(self.#field_ident));
-        let call = if is_struct {
-            quote!(builder.field(stringify!(#field_ident), &wrapper))
+        if is_struct {
+            quote!(builder.field(stringify!(#field_ident), &self.#field_ident))
         } else {
-            quote!(builder.field(&wrapper))
-        };
-        quote! {
-             let builder = {
-                 let wrapper = #wrapper;
-                 #call
-             };
+            let call = quote!(builder.field(&wrapper));
+            quote! {
+                let builder = {
+                    let wrapper = #wrapper;
+                    #call
+                };
+            }
         }
     });
     let debug_builder = if is_struct {
@@ -174,39 +162,43 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
     };
 
     let expanded = quote! {
-        impl #impl_generics ::ntex_grpc::types::Message for #ident #ty_generics #where_clause {
+        impl ::ntex_grpc::Message for #ident #ty_generics #where_clause {
             #[allow(unused_variables)]
-            fn encode_raw(&self, buf: &mut ::ntex_grpc::types::BytesMut) {
+            fn write(&self, buf: &mut ::ntex_grpc::types::BytesMut) {
+                use ::ntex_grpc::NativeType;
+
                 #(#encode)*
             }
 
             #[allow(unused_variables)]
-            fn merge_field(
-                &mut self,
-                tag: u32,
-                wire_type: ::ntex_grpc::prost::encoding::WireType,
-                buf: &mut ::ntex_grpc::types::Bytes,
-                ctx: ::ntex_grpc::prost::encoding::DecodeContext,
-            ) -> ::core::result::Result<(), ::ntex_grpc::DecodeError>
-            {
+            fn read(buf: &mut ::ntex_grpc::types::Bytes) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {
+                use ::ntex_grpc::NativeType;
+
                 #struct_name
-                match tag {
-                    #(#merge)*
-                    _ => ::ntex_grpc::prost::encoding::skip_field(wire_type, tag, buf, ctx),
+
+                let mut msg = Self::default();
+
+                while !buf.is_empty() {
+                    let (tag, wire_type) = ::ntex_grpc::encoding::decode_key(buf)?;
+
+                    match tag {
+                        #(#merge)*
+                        _ => ::ntex_grpc::encoding::skip_field(wire_type, tag, buf)?,
+                    }
                 }
+
+                Ok(msg)
             }
 
             #[inline]
             fn encoded_len(&self) -> usize {
-                0 #(+ #encoded_len)*
-            }
+                use ::ntex_grpc::NativeType;
 
-            fn clear(&mut self) {
-                #(#clear;)*
+                0 #(+ #encoded_len)*
             }
         }
 
-        impl #impl_generics ::core::default::Default for #ident #ty_generics #where_clause {
+        impl #impl_generics ::std::default::Default for #ident #ty_generics #where_clause {
             fn default() -> Self {
                 #ident {
                     #(#default)*
@@ -214,15 +206,13 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
             }
         }
 
-        impl #impl_generics ::core::fmt::Debug for #ident #ty_generics #where_clause {
-            fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        impl #impl_generics ::std::fmt::Debug for #ident #ty_generics #where_clause {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
                 let mut builder = #debug_builder;
                 #(#debugs;)*
                 builder.finish()
             }
         }
-
-        #methods
     };
 
     Ok(expanded.into())
@@ -278,7 +268,7 @@ fn try_enumeration(input: TokenStream) -> Result<TokenStream, Error> {
         .iter()
         .map(|&(_, ref value)| quote!(#value => true));
     let from = variants.iter().map(
-        |&(ref variant, ref value)| quote!(#value => ::core::option::Option::Some(#ident::#variant)),
+        |&(ref variant, ref value)| quote!(#value => ::std::option::Option::Some(#ident::#variant)),
     );
 
     let is_valid_doc = format!("Returns `true` if `value` is a variant of `{}`.", ident);
@@ -298,21 +288,21 @@ fn try_enumeration(input: TokenStream) -> Result<TokenStream, Error> {
             }
 
             #[doc=#from_i32_doc]
-            pub fn from_i32(value: i32) -> ::core::option::Option<#ident> {
+            pub fn from_i32(value: i32) -> ::std::option::Option<#ident> {
                 match value {
                     #(#from,)*
-                    _ => ::core::option::Option::None,
+                    _ => ::std::option::Option::None,
                 }
             }
         }
 
-        impl #impl_generics ::core::default::Default for #ident #ty_generics #where_clause {
+        impl #impl_generics ::std::default::Default for #ident #ty_generics #where_clause {
             fn default() -> #ident {
                 #ident::#default
             }
         }
 
-        impl #impl_generics ::core::convert::From::<#ident> for i32 #ty_generics #where_clause {
+        impl #impl_generics ::std::convert::From::<#ident> for i32 #ty_generics #where_clause {
             fn from(value: #ident) -> i32 {
                 value as i32
             }
@@ -392,19 +382,11 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
 
     let merge = fields.iter().map(|&(ref variant_ident, ref field)| {
         let tag = field.tags()[0];
-        let merge = field.merge(quote!(value));
         quote! {
             #tag => {
-                match field {
-                    ::core::option::Option::Some(#ident::#variant_ident(ref mut value)) => {
-                        #merge
-                    },
-                    _ => {
-                        let mut owned_value = ::core::default::Default::default();
-                        let value = &mut owned_value;
-                        #merge.map(|_| *field = ::core::option::Option::Some(#ident::#variant_ident(owned_value)))
-                    },
-                }
+                let mut value = Default::default();
+                NativeType::deserialize_field(&mut value, wire_type, buf)?;
+                Ok(Some(#ident::#variant_ident(value)))
             }
         }
     });
@@ -428,20 +410,17 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
         impl #impl_generics #ident #ty_generics #where_clause {
             /// Encodes the message to a buffer.
             pub fn encode(&self, buf: &mut ::ntex_grpc::types::BytesMut) {
+                use ::ntex_grpc::NativeType;
+
                 match *self {
                     #(#encode,)*
                 }
             }
 
             /// Decodes an instance of the message from a buffer, and merges it into self.
-            pub fn merge(
-                field: &mut ::core::option::Option<#ident #ty_generics>,
-                tag: u32,
-                wire_type: ::ntex_grpc::prost::encoding::WireType,
-                buf: &mut ::ntex_grpc::types::Bytes,
-                ctx: ::ntex_grpc::prost::encoding::DecodeContext,
-            ) -> ::core::result::Result<(), ::ntex_grpc::DecodeError>
-            {
+            pub fn decode(tag: u32, wire_type: ::ntex_grpc::types::WireType, buf: &mut ::ntex_grpc::types::Bytes) -> ::std::result::Result<::std::option::Option<Self>, ::ntex_grpc::DecodeError> {
+                use ::ntex_grpc::NativeType;
+
                 match tag {
                     #(#merge,)*
                     _ => unreachable!(concat!("invalid ", stringify!(#ident), " tag: {}"), tag),
@@ -451,14 +430,16 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
             /// Returns the encoded length of the message without a length delimiter.
             #[inline]
             pub fn encoded_len(&self) -> usize {
+                use ::ntex_grpc::NativeType;
+
                 match *self {
                     #(#encoded_len,)*
                 }
             }
         }
 
-        impl #impl_generics ::core::fmt::Debug for #ident #ty_generics #where_clause {
-            fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        impl #impl_generics ::std::fmt::Debug for #ident #ty_generics #where_clause {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
                 match *self {
                     #(#debug,)*
                 }

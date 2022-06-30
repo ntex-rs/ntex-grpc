@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use ntex_bytes::{ByteString, Bytes, BytesMut};
 
-use crate::{error::DecodeError, error::EncodeError, request::Response, types::Message};
+use crate::{error::DecodeError, request::Response, types::Message};
 
 /// Trait for service method definition
 pub trait ServiceDef {
@@ -32,14 +32,12 @@ pub trait MethodDef {
 
     #[inline]
     fn decode(&self, buf: &mut Bytes) -> Result<Self::Input, DecodeError> {
-        let mut value: Self::Input = Default::default();
-        value.merge(buf)?;
-        Ok(value)
+        Message::read(buf)
     }
 
     #[inline]
-    fn encode(&self, val: Self::Output, buf: &mut BytesMut) -> Result<(), EncodeError> {
-        val.encode(buf)
+    fn encode(&self, val: Self::Output, buf: &mut BytesMut) {
+        val.write(buf);
     }
 }
 

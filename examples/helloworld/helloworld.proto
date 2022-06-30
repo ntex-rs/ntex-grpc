@@ -33,5 +33,13 @@ message HelloRequest {
 
 // The response message containing the greetings
 message HelloReply {
+  oneof Result {
+    ResponseResult success = 1;
+    int64 serviceError = 2;
+    int64 invalidRequest = 3;
+  }
+}
+
+message ResponseResult {
   string message = 1;
 }

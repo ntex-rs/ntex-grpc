@@ -10,6 +10,8 @@ pub struct HelloRequest {
 ///  The response message containing the greetings
 #[derive(Clone, PartialEq, ::ntex_grpc::Message)]
 pub struct HelloReply {
+    #[prost(int64, tag = "4")]
+    pub metadata: i64,
     #[prost(oneof = "hello_reply::Result", tags = "1, 2, 3")]
     pub result: ::core::option::Option<hello_reply::Result>,
 }

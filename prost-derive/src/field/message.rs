@@ -75,50 +75,11 @@ impl Field {
 
     pub fn encode(&self, ident: TokenStream) -> TokenStream {
         let tag = self.tag;
-        match self.label {
-            Label::Optional => quote! {
-                if let Some(ref msg) = #ident {
-                    NativeType::serialize_field(msg, #tag, buf);
-                }
-            },
-            Label::Required => quote! {
-                NativeType::serialize_field(&#ident, #tag, buf);
-            },
-            Label::Repeated => quote! {
-                NativeType::serialize_field(&#ident, #tag, buf);
-            },
-        }
-    }
-
-    pub fn merge(&self, ident: TokenStream) -> TokenStream {
-        match self.label {
-            Label::Optional => quote! {
-                ::ntex_grpc::encoding::message::merge(wire_type,
-                                                 #ident.get_or_insert_with(::core::default::Default::default),
-                                                 buf,
-                                                 ctx)
-            },
-            Label::Required => quote! {
-                ::ntex_grpc::encoding::message::merge(wire_type, #ident, buf, ctx)
-            },
-            Label::Repeated => quote! {
-                ::ntex_grpc::encoding::message::merge_repeated(wire_type, #ident, buf, ctx)
-            },
-        }
+        quote!(NativeType::serialize(&#ident, #tag, buf))
     }
 
     pub fn encoded_len(&self, ident: TokenStream) -> TokenStream {
         let tag = self.tag;
-        match self.label {
-            Label::Optional => quote! {
-                #ident.as_ref().map_or(0, |msg| NativeType::field_len(msg, #tag))
-            },
-            Label::Required => quote! {
-                NativeType::field_len(&#ident, #tag)
-            },
-            Label::Repeated => quote! {
-                NativeType::field_len(&#ident, #tag)
-            },
-        }
+        quote!(NativeType::field_len(&#ident, #tag))
     }
 }

@@ -97,7 +97,7 @@ impl Field {
     pub fn merge(&self, ident: TokenStream) -> TokenStream {
         match *self {
             Field::Scalar(_) => quote!(),
-            Field::Message(ref message) => message.merge(ident),
+            Field::Message(_) => quote!(),
             Field::Map(_) => quote!(),
             Field::Oneof(ref oneof) => oneof.merge(ident),
         }
@@ -117,31 +117,6 @@ impl Field {
         match *self {
             Field::Scalar(ref scalar) => scalar.default(),
             _ => quote!(::core::default::Default::default()),
-        }
-    }
-
-    /// Produces the fragment implementing debug for the given field.
-    pub fn debug(&self, ident: TokenStream) -> TokenStream {
-        match *self {
-            Field::Scalar(ref scalar) => {
-                let wrapper = scalar.debug(quote!(ScalarWrapper));
-                quote! {
-                    {
-                        #wrapper
-                        ScalarWrapper(&#ident)
-                    }
-                }
-            }
-            Field::Map(ref map) => {
-                let wrapper = map.debug(quote!(MapWrapper));
-                quote! {
-                    {
-                        #wrapper
-                        MapWrapper(&#ident)
-                    }
-                }
-            }
-            _ => quote!(&#ident),
         }
     }
 }

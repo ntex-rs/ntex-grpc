@@ -2,7 +2,7 @@ use std::{fmt, future::Future, ops, pin::Pin, task::Context, task::Poll};
 
 use ntex_http::HeaderMap;
 
-use crate::transport::{MethodDef, Transport};
+use crate::service::{MethodDef, Transport};
 
 pub struct Request<'a, T: Transport<M>, M: MethodDef> {
     transport: &'a T,

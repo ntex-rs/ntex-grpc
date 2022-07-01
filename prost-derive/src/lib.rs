@@ -20,6 +20,26 @@ mod server;
 
 use crate::field::Field;
 
+#[proc_macro_derive(Message, attributes(prost))]
+pub fn message(input: TokenStream) -> TokenStream {
+    try_message(input).unwrap()
+}
+
+#[proc_macro_derive(Enumeration, attributes(prost))]
+pub fn enumeration(input: TokenStream) -> TokenStream {
+    try_enumeration(input).unwrap()
+}
+
+#[proc_macro_derive(Oneof, attributes(prost))]
+pub fn oneof(input: TokenStream) -> TokenStream {
+    try_oneof(input).unwrap()
+}
+
+#[proc_macro_attribute]
+pub fn server(attr: TokenStream, item: TokenStream) -> TokenStream {
+    server::server(attr, item)
+}
+
 fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
     let input: DeriveInput = syn::parse(input)?;
 
@@ -109,18 +129,14 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         if field.is_oneof() {
             let val = field.merge(quote!(#field_ident));
             quote! {
-                #(#tags)* => msg.#field_ident = #val.map_err(|mut error| {
-                    error.push(STRUCT_NAME, stringify!(#field_ident));
-                    error
-                })?,
+                #(#tags)* => msg.#field_ident = #val.map_err(
+                    |err| err.push(STRUCT_NAME, stringify!(#field_ident))
+                )?,
             }
         } else {
             quote! {
-                #(#tags)* => NativeType::deserialize_field(&mut msg.#field_ident, wire_type, buf)
-                .map_err(|mut error| {
-                    error.push(STRUCT_NAME, stringify!(#field_ident));
-                    error
-                })?,
+                #(#tags)* => NativeType::deserialize(&mut msg.#field_ident, wire_type, buf)
+                .map_err(|err| err.push(STRUCT_NAME, stringify!(#field_ident)))?,
             }
         }
     });
@@ -133,33 +149,15 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         )
     };
 
-    // TODO
-    let is_struct = true;
-
     let default = fields.iter().map(|&(ref field_ident, ref field)| {
         let value = field.default();
         quote!(#field_ident: #value,)
     });
 
-    let debugs = unsorted_fields.iter().map(|&(ref field_ident, ref field)| {
-        let wrapper = field.debug(quote!(self.#field_ident));
-        if is_struct {
-            quote!(builder.field(stringify!(#field_ident), &self.#field_ident))
-        } else {
-            let call = quote!(builder.field(&wrapper));
-            quote! {
-                let builder = {
-                    let wrapper = #wrapper;
-                    #call
-                };
-            }
-        }
+    let debugs = unsorted_fields.iter().map(|&(ref field_ident, _)| {
+        quote!(builder.field(stringify!(#field_ident), &self.#field_ident))
     });
-    let debug_builder = if is_struct {
-        quote!(f.debug_struct(stringify!(#ident)))
-    } else {
-        quote!(f.debug_tuple(stringify!(#ident)))
-    };
+    let debug_builder = quote!(f.debug_struct(stringify!(#ident)));
 
     let expanded = quote! {
         impl ::ntex_grpc::Message for #ident #ty_generics #where_clause {
@@ -216,11 +214,6 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
     };
 
     Ok(expanded.into())
-}
-
-#[proc_macro_derive(Message, attributes(prost))]
-pub fn message(input: TokenStream) -> TokenStream {
-    try_message(input).unwrap()
 }
 
 fn try_enumeration(input: TokenStream) -> Result<TokenStream, Error> {
@@ -312,11 +305,6 @@ fn try_enumeration(input: TokenStream) -> Result<TokenStream, Error> {
     Ok(expanded.into())
 }
 
-#[proc_macro_derive(Enumeration, attributes(prost))]
-pub fn enumeration(input: TokenStream) -> TokenStream {
-    try_enumeration(input).unwrap()
-}
-
 fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
     let input: DeriveInput = syn::parse(input)?;
 
@@ -384,9 +372,7 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
         let tag = field.tags()[0];
         quote! {
             #tag => {
-                let mut value = Default::default();
-                NativeType::deserialize_field(&mut value, wire_type, buf)?;
-                Ok(Some(#ident::#variant_ident(value)))
+                #ident::#variant_ident(NativeType::deserialize_default(wire_type, buf)?)
             }
         }
     });
@@ -396,12 +382,10 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
         quote!(#ident::#variant_ident(ref value) => #encoded_len)
     });
 
-    let debug = fields.iter().map(|&(ref variant_ident, ref field)| {
-        let wrapper = field.debug(quote!(*value));
+    let debug = fields.iter().map(|&(ref variant_ident, _)| {
         quote!(#ident::#variant_ident(ref value) => {
-            let wrapper = #wrapper;
             f.debug_tuple(stringify!(#variant_ident))
-                .field(&wrapper)
+                .field(value)
                 .finish()
         })
     });
@@ -421,10 +405,10 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
             pub fn decode(tag: u32, wire_type: ::ntex_grpc::types::WireType, buf: &mut ::ntex_grpc::types::Bytes) -> ::std::result::Result<::std::option::Option<Self>, ::ntex_grpc::DecodeError> {
                 use ::ntex_grpc::NativeType;
 
-                match tag {
+                Ok(Some(match tag {
                     #(#merge,)*
                     _ => unreachable!(concat!("invalid ", stringify!(#ident), " tag: {}"), tag),
-                }
+                }))
             }
 
             /// Returns the encoded length of the message without a length delimiter.
@@ -448,14 +432,4 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
     };
 
     Ok(expanded.into())
-}
-
-#[proc_macro_derive(Oneof, attributes(prost))]
-pub fn oneof(input: TokenStream) -> TokenStream {
-    try_oneof(input).unwrap()
-}
-
-#[proc_macro_attribute]
-pub fn server(attr: TokenStream, item: TokenStream) -> TokenStream {
-    server::server(attr, item)
 }

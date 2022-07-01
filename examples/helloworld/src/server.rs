@@ -18,6 +18,7 @@ impl GreeterServer {
                     message: format!("Hello {}!", req.name).into(),
                 },
             )),
+            metadata: 10,
         }
     }
 }
@@ -63,6 +64,9 @@ async fn main() -> std::io::Result<()> {
 
 fn parse_usize_default(input: Option<&str>, default: usize) -> usize {
     input
-        .map(|v| v.parse().unwrap_or_else(|_| panic!("not a valid number: {}", v)))
+        .map(|v| {
+            v.parse()
+                .unwrap_or_else(|_| panic!("not a valid number: {}", v))
+        })
         .unwrap_or(default)
 }

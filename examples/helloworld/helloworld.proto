@@ -38,6 +38,7 @@ message HelloReply {
     int64 serviceError = 2;
     int64 invalidRequest = 3;
   }
+  int64 metadata = 4;
 }
 
 message ResponseResult {

@@ -1,7 +1,6 @@
-use std::convert::TryFrom;
-use std::fmt;
+use std::{convert::TryFrom, fmt};
 
-use anyhow::{anyhow, bail, Error};
+use anyhow::{bail, Error};
 use proc_macro2::{Span, TokenStream};
 use quote::{quote, ToTokens, TokenStreamExt};
 use syn::{parse_str, Ident, Lit, LitByteStr, Meta, MetaList, MetaNameValue, NestedMeta, Path};
@@ -118,23 +117,23 @@ impl Field {
                     let default = default.typed_for_cmp();
                     quote! {
                         if !#ident.is_default(#default) {
-                            NativeType::serialize_field(&#ident, #tag, buf);
+                            NativeType::serialize(&#ident, #tag, buf);
                         }
                     }
                 } else {
                     let default = default.typed();
                     quote! {
                         if #ident != #default {
-                            NativeType::serialize_field(&#ident, #tag, buf);
+                            NativeType::serialize(&#ident, #tag, buf);
                         }
                     }
                 }
             }
             Kind::Optional(..) => quote! {
-                NativeType::serialize_field(&#ident, #tag, buf)
+                NativeType::serialize(&#ident, #tag, buf)
             },
             Kind::Required(..) | Kind::Repeated | Kind::Packed => quote! {
-                NativeType::serialize_field(&#ident, #tag, buf);
+                NativeType::serialize(&#ident, #tag, buf)
             },
         }
     }
@@ -176,59 +175,6 @@ impl Field {
             Kind::Plain(ref value) | Kind::Required(ref value) => value.owned(),
             Kind::Optional(_) => quote!(::core::default::Default::default()),
             Kind::Repeated | Kind::Packed => quote!(::std::vec::Vec::new()),
-        }
-    }
-
-    /// An inner debug wrapper, around the base type.
-    fn debug_inner(&self, wrap_name: TokenStream) -> TokenStream {
-        if let Ty::Enumeration(ref ty) = self.ty {
-            quote! {
-                struct #wrap_name<'a>(&'a i32);
-                impl<'a> ::core::fmt::Debug for #wrap_name<'a> {
-                    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-                        match #ty::from_i32(*self.0) {
-                            None => ::core::fmt::Debug::fmt(&self.0, f),
-                            Some(en) => ::core::fmt::Debug::fmt(&en, f),
-                        }
-                    }
-                }
-            }
-        } else {
-            quote! {
-                fn #wrap_name<T>(v: T) -> T { v }
-            }
-        }
-    }
-
-    /// Returns a fragment for formatting the field `ident` in `Debug`.
-    pub fn debug(&self, wrapper_name: TokenStream) -> TokenStream {
-        let wrapper = self.debug_inner(quote!(Inner));
-        match self.kind {
-            Kind::Plain(_) | Kind::Required(_) => self.debug_inner(wrapper_name),
-            Kind::Optional(_) => quote! {
-                struct #wrapper_name<'a, T>(&'a ::core::option::Option<T>);
-                impl<'a, T: ::core::fmt::Debug> ::core::fmt::Debug for #wrapper_name<'a, T> {
-                    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-                        #wrapper
-                        ::core::fmt::Debug::fmt(&self.0.as_ref().map(Inner), f)
-                    }
-                }
-            },
-            Kind::Repeated | Kind::Packed => {
-                quote! {
-                    struct #wrapper_name<'a, T>(&'a ::std::alloc::vec::Vec<T>);
-                    impl<'a, T: ::core::fmt::Debug> ::core::fmt::Debug for #wrapper_name<'a, T> {
-                        fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-                            let mut vec_builder = f.debug_list();
-                            for v in self.0 {
-                                #wrapper
-                                vec_builder.entry(&Inner(v));
-                            }
-                            vec_builder.finish()
-                        }
-                    }
-                }
-            }
         }
     }
 }
@@ -298,45 +244,8 @@ impl Ty {
         Ok(Some(ty))
     }
 
-    pub fn from_str(s: &str) -> Result<Ty, Error> {
-        let enumeration_len = "enumeration".len();
-        let error = Err(anyhow!("invalid type: {}", s));
-        let ty = match s.trim() {
-            "float" => Ty::Float,
-            "double" => Ty::Double,
-            "int32" => Ty::Int32,
-            "int64" => Ty::Int64,
-            "uint32" => Ty::Uint32,
-            "uint64" => Ty::Uint64,
-            "sint32" => Ty::Sint32,
-            "sint64" => Ty::Sint64,
-            "fixed32" => Ty::Fixed32,
-            "fixed64" => Ty::Fixed64,
-            "sfixed32" => Ty::Sfixed32,
-            "sfixed64" => Ty::Sfixed64,
-            "bool" => Ty::Bool,
-            "string" => Ty::String,
-            "bytes" => Ty::Bytes,
-            s if s.len() > enumeration_len && &s[..enumeration_len] == "enumeration" => {
-                let s = &s[enumeration_len..].trim();
-                match s.chars().next() {
-                    Some('<') | Some('(') => (),
-                    _ => return error,
-                }
-                match s.chars().next_back() {
-                    Some('>') | Some(')') => (),
-                    _ => return error,
-                }
-
-                Ty::Enumeration(parse_str::<Path>(s[1..s.len() - 1].trim())?)
-            }
-            _ => return error,
-        };
-        Ok(ty)
-    }
-
     /// Returns the type as it appears in protobuf field declarations.
-    pub fn as_str(&self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match *self {
             Ty::Double => "double",
             Ty::Float => "float",
@@ -357,38 +266,8 @@ impl Ty {
         }
     }
 
-    // TODO: rename to 'owned_type'.
-    pub fn rust_type(&self) -> TokenStream {
-        match self {
-            Ty::String => quote!(::ntex_grpc::types::ByteString),
-            _ => self.rust_ref_type(),
-        }
-    }
-
-    // TODO: rename to 'ref_type'
-    pub fn rust_ref_type(&self) -> TokenStream {
-        match *self {
-            Ty::Double => quote!(f64),
-            Ty::Float => quote!(f32),
-            Ty::Int32 => quote!(i32),
-            Ty::Int64 => quote!(i64),
-            Ty::Uint32 => quote!(u32),
-            Ty::Uint64 => quote!(u64),
-            Ty::Sint32 => quote!(i32),
-            Ty::Sint64 => quote!(i64),
-            Ty::Fixed32 => quote!(u32),
-            Ty::Fixed64 => quote!(u64),
-            Ty::Sfixed32 => quote!(i32),
-            Ty::Sfixed64 => quote!(i64),
-            Ty::Bool => quote!(bool),
-            Ty::String => quote!(&str),
-            Ty::Bytes => quote!(&[u8]),
-            Ty::Enumeration(..) => quote!(i32),
-        }
-    }
-
     /// Returns false if the scalar type is length delimited (i.e., `string` or `bytes`).
-    pub fn is_numeric(&self) -> bool {
+    fn is_numeric(&self) -> bool {
         !matches!(self, Ty::String | Ty::Bytes)
     }
 }

@@ -1,8 +1,8 @@
 mod consts;
 mod error;
 mod request;
+mod service;
 mod status;
-mod transport;
 mod utils;
 
 pub mod client;
@@ -11,8 +11,8 @@ pub mod types;
 
 pub use crate::error::{DecodeError, ServerError, ServiceError};
 pub use crate::request::{Request, Response};
+pub use crate::service::{ClientInformation, MethodDef, MethodsDef, ServiceDef, Transport};
 pub use crate::status::GrpcStatus;
-pub use crate::transport::{ClientInformation, MethodDef, MethodsDef, ServiceDef, Transport};
 pub use crate::types::{Message, NativeType};
 
 #[doc(hidden)]

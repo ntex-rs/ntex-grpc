@@ -317,8 +317,9 @@ impl DecodeError {
     ///
     /// Meant to be used only by `Message` implementations.
     #[doc(hidden)]
-    pub fn push(&mut self, message: &'static str, field: &'static str) {
+    pub fn push(mut self, message: &'static str, field: &'static str) -> Self {
         self.inner.stack.push((message, field));
+        self
     }
 }
 

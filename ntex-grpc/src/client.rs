@@ -9,7 +9,7 @@ use ntex_io::{IoBoxed, OnDisconnect};
 use ntex_service::{fn_service, Service};
 use ntex_util::{channel::oneshot, future::Ready, HashMap};
 
-use crate::transport::{ClientInformation, MethodDef, Transport};
+use crate::service::{ClientInformation, MethodDef, Transport};
 use crate::{consts, utils::Data, GrpcStatus, Message, Response, ServiceError, GRPC_STATUS};
 
 #[derive(thiserror::Error, Debug)]

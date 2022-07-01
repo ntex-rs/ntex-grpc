@@ -1,4 +1,4 @@
-use std::{collections::HashMap, convert::TryFrom, hash::BuildHasher, hash::Hash};
+use std::{collections::HashMap, convert::TryFrom, fmt, hash::BuildHasher, hash::Hash};
 
 pub use ntex_bytes::{ByteString, Bytes, BytesMut};
 
@@ -6,7 +6,7 @@ pub use crate::encoding::WireType;
 use crate::encoding::{self, DecodeError};
 
 /// Protobuf struct read/write operations
-pub trait Message: Default + Sized {
+pub trait Message: Default + Sized + fmt::Debug {
     /// Decodes an instance of the message from a buffer
     fn read(src: &mut Bytes) -> Result<Self, DecodeError>;
 
@@ -18,7 +18,7 @@ pub trait Message: Default + Sized {
 }
 
 /// Protobuf type serializer
-pub trait NativeType: Default + Sized {
+pub trait NativeType: Default + Sized + fmt::Debug {
     const TYPE: WireType;
 
     /// Returns the encoded length of the message without a length delimiter.
@@ -30,11 +30,13 @@ pub trait NativeType: Default + Sized {
     /// Serialize field
     fn encode(&self, dst: &mut BytesMut);
 
+    #[inline]
     /// Check if value is default
     fn is_default(&self, _: &[u8]) -> bool {
         false
     }
 
+    #[inline]
     /// Protobuf field length
     fn field_len(&self, tag: u32) -> usize {
         encoding::key_len(tag)
@@ -42,15 +44,17 @@ pub trait NativeType: Default + Sized {
             + self.value_len()
     }
 
+    #[inline]
     /// Serialize protobuf field
-    fn serialize_field(&self, tag: u32, dst: &mut BytesMut) {
+    fn serialize(&self, tag: u32, dst: &mut BytesMut) {
         encoding::encode_key(tag, Self::TYPE, dst);
         encoding::encode_varint(self.value_len() as u64, dst);
         self.encode(dst);
     }
 
+    #[inline]
     /// Deserialize protobuf field
-    fn deserialize_field(&mut self, wtype: WireType, src: &mut Bytes) -> Result<(), DecodeError> {
+    fn deserialize(&mut self, wtype: WireType, src: &mut Bytes) -> Result<(), DecodeError> {
         encoding::check_wire_type(Self::TYPE, wtype)?;
         let len = encoding::decode_varint(src)? as usize;
         if len > src.len() {
@@ -59,6 +63,14 @@ pub trait NativeType: Default + Sized {
             let buf = src.split_to(len);
             self.merge(buf)
         }
+    }
+
+    #[inline]
+    /// Deserialize protobuf field to default value
+    fn deserialize_default(wtype: WireType, src: &mut Bytes) -> Result<Self, DecodeError> {
+        let mut value = Self::default();
+        value.deserialize(wtype, src)?;
+        Ok(value)
     }
 }
 
@@ -191,17 +203,17 @@ impl<T: NativeType> NativeType for Option<T> {
     }
 
     /// Deserialize protobuf field
-    fn deserialize_field(&mut self, wtype: WireType, src: &mut Bytes) -> Result<(), DecodeError> {
+    fn deserialize(&mut self, wtype: WireType, src: &mut Bytes) -> Result<(), DecodeError> {
         let mut value: T = Default::default();
-        value.deserialize_field(wtype, src)?;
+        value.deserialize(wtype, src)?;
         *self = Some(value);
         Ok(())
     }
 
     /// Serialize protobuf field
-    fn serialize_field(&self, tag: u32, dst: &mut BytesMut) {
+    fn serialize(&self, tag: u32, dst: &mut BytesMut) {
         if let Some(ref value) = self {
-            value.serialize_field(tag, dst);
+            value.serialize(tag, dst);
         }
     }
 
@@ -264,17 +276,17 @@ impl<T: NativeType> NativeType for Vec<T> {
     }
 
     /// Deserialize protobuf field
-    fn deserialize_field(&mut self, wtype: WireType, src: &mut Bytes) -> Result<(), DecodeError> {
+    fn deserialize(&mut self, wtype: WireType, src: &mut Bytes) -> Result<(), DecodeError> {
         let mut value: T = Default::default();
-        value.deserialize_field(wtype, src)?;
+        value.deserialize(wtype, src)?;
         self.push(value);
         Ok(())
     }
 
     /// Serialize protobuf field
-    fn serialize_field(&self, tag: u32, dst: &mut BytesMut) {
+    fn serialize(&self, tag: u32, dst: &mut BytesMut) {
         for item in self.iter() {
-            item.serialize_field(tag, dst);
+            item.serialize(tag, dst);
         }
     }
 
@@ -317,7 +329,7 @@ impl<K: NativeType + Eq + Hash, V: NativeType + Eq, S: BuildHasher + Default> Na
     }
 
     /// Deserialize protobuf field
-    fn deserialize_field(&mut self, wtype: WireType, src: &mut Bytes) -> Result<(), DecodeError> {
+    fn deserialize(&mut self, wtype: WireType, src: &mut Bytes) -> Result<(), DecodeError> {
         encoding::check_wire_type(Self::TYPE, wtype)?;
         let len = encoding::decode_varint(src)? as usize;
         if len > src.len() {
@@ -330,8 +342,8 @@ impl<K: NativeType + Eq + Hash, V: NativeType + Eq, S: BuildHasher + Default> Na
             while !buf.is_empty() {
                 let (tag, wire_type) = encoding::decode_key(&mut buf)?;
                 match tag {
-                    1 => NativeType::deserialize_field(&mut key, wire_type, &mut buf)?,
-                    2 => NativeType::deserialize_field(&mut val, wire_type, &mut buf)?,
+                    1 => NativeType::deserialize(&mut key, wire_type, &mut buf)?,
+                    2 => NativeType::deserialize(&mut val, wire_type, &mut buf)?,
                     _ => return Err(DecodeError::new("Map deserialization error")),
                 }
             }
@@ -341,7 +353,7 @@ impl<K: NativeType + Eq + Hash, V: NativeType + Eq, S: BuildHasher + Default> Na
     }
 
     /// Serialize protobuf field
-    fn serialize_field(&self, tag: u32, dst: &mut BytesMut) {
+    fn serialize(&self, tag: u32, dst: &mut BytesMut) {
         let key_default = K::default();
         let val_default = V::default();
 
@@ -355,10 +367,10 @@ impl<K: NativeType + Eq + Hash, V: NativeType + Eq, S: BuildHasher + Default> Na
             encoding::encode_key(tag, WireType::LengthDelimited, dst);
             encoding::encode_varint(len as u64, dst);
             if !skip_key {
-                item.0.serialize_field(1, dst);
+                item.0.serialize(1, dst);
             }
             if !skip_val {
-                item.1.serialize_field(1, dst);
+                item.1.serialize(1, dst);
             }
         }
     }
@@ -420,13 +432,13 @@ macro_rules! varint {
             }
 
             /// Serialize protobuf field
-            fn serialize_field(&self, tag: u32, dst: &mut BytesMut) {
+            fn serialize(&self, tag: u32, dst: &mut BytesMut) {
                 encoding::encode_key(tag, Self::TYPE, dst);
                 self.encode(dst);
             }
 
             /// Deserialize protobuf field
-            fn deserialize_field(&mut self, wtype: WireType, src: &mut Bytes) -> Result<(), DecodeError> {
+            fn deserialize(&mut self, wtype: WireType, src: &mut Bytes) -> Result<(), DecodeError> {
                 encoding::check_wire_type(Self::TYPE, wtype)?;
                 *self = encoding::decode_varint(src).map(|$val| $from_uint64)?;
                 Ok(())

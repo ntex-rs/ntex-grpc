@@ -1,71 +1,44 @@
-use anyhow::{bail, Error};
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{parse_str, Lit, Meta, MetaNameValue, NestedMeta, Path};
+use syn::Meta;
 
 use crate::field::{set_option, tags_attr};
 
 #[derive(Clone)]
 pub struct Field {
-    pub ty: Path,
     pub tags: Vec<u32>,
 }
 
 impl Field {
-    pub fn new(attrs: &[Meta]) -> Result<Option<Field>, Error> {
-        let mut ty = None;
+    pub fn new(attrs: &[Meta]) -> Option<Field> {
         let mut tags = None;
         let mut unknown_attrs = Vec::new();
 
         for attr in attrs {
             if attr.path().is_ident("oneof") {
-                let t = match *attr {
-                    Meta::NameValue(MetaNameValue {
-                        lit: Lit::Str(ref lit),
-                        ..
-                    }) => parse_str::<Path>(&lit.value())?,
-                    Meta::List(ref list) if list.nested.len() == 1 => {
-                        // TODO(rustlang/rust#23121): slice pattern matching would make this much nicer.
-                        if let NestedMeta::Meta(Meta::Path(ref path)) = list.nested[0] {
-                            if let Some(ident) = path.get_ident() {
-                                Path::from(ident.clone())
-                            } else {
-                                bail!("invalid oneof attribute: item must be an identifier");
-                            }
-                        } else {
-                            bail!("invalid oneof attribute: item must be an identifier");
-                        }
-                    }
-                    _ => bail!("invalid oneof attribute: {:?}", attr),
-                };
-                set_option(&mut ty, t, "duplicate oneof attribute")?;
-            } else if let Some(t) = tags_attr(attr)? {
-                set_option(&mut tags, t, "duplicate tags attributes")?;
+                continue;
+            } else if let Some(t) = tags_attr(attr).unwrap() {
+                set_option(&mut tags, t, "duplicate tags attributes").unwrap();
             } else {
                 unknown_attrs.push(attr);
             }
         }
 
-        let ty = match ty {
-            Some(ty) => ty,
-            None => return Ok(None),
-        };
-
         match unknown_attrs.len() {
             0 => (),
-            1 => bail!(
+            1 => panic!(
                 "unknown attribute for message field: {:?}",
                 unknown_attrs[0]
             ),
-            _ => bail!("unknown attributes for message field: {:?}", unknown_attrs),
+            _ => panic!("unknown attributes for message field: {:?}", unknown_attrs),
         }
 
         let tags = match tags {
             Some(tags) => tags,
-            None => bail!("oneof field is missing a tags attribute"),
+            None => panic!("oneof field is missing a tags attribute"),
         };
 
-        Ok(Some(Field { ty, tags }))
+        Some(Field { tags })
     }
 
     /// Returns a statement which encodes the oneof field.

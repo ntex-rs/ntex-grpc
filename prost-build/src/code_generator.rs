@@ -458,8 +458,7 @@ impl<'a> CodeGenerator<'a> {
         self.append_doc(fq_message_name, None);
         self.push_indent();
         self.buf.push_str(&format!(
-            "#[prost(oneof=\"{}\", tags=\"{}\")]\n",
-            name,
+            "#[prost(oneof, tags=\"{}\")]\n",
             fields
                 .iter()
                 .map(|&(ref field, _)| field.number())

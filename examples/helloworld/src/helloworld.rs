@@ -12,7 +12,7 @@ pub struct HelloRequest {
 pub struct HelloReply {
     #[prost(int64, tag = "4")]
     pub metadata: i64,
-    #[prost(oneof = "hello_reply::Result", tags = "1, 2, 3")]
+    #[prost(oneof, tags = "1, 2, 3")]
     pub result: ::core::option::Option<hello_reply::Result>,
 }
 /// Nested message and enum types in `HelloReply`.
@@ -43,6 +43,7 @@ pub enum GreeterMethods {
     SayHello(GreeterSayHelloMethod),
 }
 impl ::ntex_grpc::MethodsDef for GreeterMethods {
+    #[inline]
     fn by_name(name: &str) -> Option<Self> {
         use ::ntex_grpc::MethodDef;
         match name {

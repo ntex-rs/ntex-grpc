@@ -38,7 +38,7 @@ impl Field {
             Field::Message(field)
         } else if let Some(field) = map::Field::new(&attrs, inferred_tag)? {
             Field::Map(field)
-        } else if let Some(field) = oneof::Field::new(&attrs)? {
+        } else if let Some(field) = oneof::Field::new(&attrs) {
             Field::Oneof(field)
         } else {
             bail!("no type attribute");

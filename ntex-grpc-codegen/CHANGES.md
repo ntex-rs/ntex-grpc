@@ -1,8 +1,10 @@
 # Changes
 
-## [0.1.2] - 2022-xx-xx
+## [0.1.2] - 2022-07-01
 
 * Add support for server
+
+* Refactor protobuf handling
 
 ## [0.1.1] - 2022-06-28
 

@@ -17,6 +17,23 @@ pub trait Message: Default + Sized + fmt::Debug {
     fn encoded_len(&self) -> usize;
 }
 
+pub trait OneofType: Sized {
+    /// Encodes the message to a buffer
+    fn encode(&self, buf: &mut BytesMut);
+
+    /// Decodes an instance of the oneof message from a buffer and update self
+    fn merge(&mut self, tag: u32, wtype: WireType, buf: &mut Bytes) -> Result<(), DecodeError> {
+        *self = Self::decode(tag, wtype, buf)?;
+        Ok(())
+    }
+
+    /// Decodes an instance of the oneof message from a buffer
+    fn decode(tag: u32, wtype: WireType, buf: &mut Bytes) -> Result<Self, DecodeError>;
+
+    /// Returns the encoded length of the message without a length delimiter
+    fn encoded_len(&self) -> usize;
+}
+
 /// Protobuf type serializer
 pub trait NativeType: Default + Sized + fmt::Debug {
     const TYPE: WireType;
@@ -90,6 +107,35 @@ impl<T: Message> NativeType for T {
     fn merge(&mut self, mut src: Bytes) -> Result<(), DecodeError> {
         *self = Message::read(&mut src)?;
         Ok(())
+    }
+}
+
+impl<T: OneofType> OneofType for Option<T> {
+    #[inline]
+    fn encode(&self, buf: &mut BytesMut) {
+        if let Some(ref inner) = self {
+            inner.encode(buf)
+        }
+    }
+
+    #[inline]
+    fn merge(&mut self, tag: u32, wtype: WireType, buf: &mut Bytes) -> Result<(), DecodeError> {
+        if let Some(ref mut inner) = self {
+            inner.merge(tag, wtype, buf)?;
+        } else {
+            *self = Some(T::decode(tag, wtype, buf)?);
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn decode(tag: u32, wtype: WireType, buf: &mut Bytes) -> Result<Self, DecodeError> {
+        Ok(Some(T::decode(tag, wtype, buf)?))
+    }
+
+    #[inline]
+    fn encoded_len(&self) -> usize {
+        self.as_ref().map(|inner| inner.encoded_len()).unwrap_or(0)
     }
 }
 

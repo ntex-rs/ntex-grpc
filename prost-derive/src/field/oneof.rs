@@ -71,25 +71,14 @@ impl Field {
     /// Returns a statement which encodes the oneof field.
     pub fn encode(&self, ident: TokenStream) -> TokenStream {
         quote! {
-            if let Some(ref oneof) = #ident {
-                oneof.encode(buf)
-            }
-        }
-    }
-
-    /// Returns an expression which evaluates to the result of decoding the oneof field.
-    pub fn merge(&self, _: TokenStream) -> TokenStream {
-        let ty = &self.ty;
-        quote! {
-            #ty::decode(tag, wire_type, buf)
+            OneofType::encode(&#ident, buf);
         }
     }
 
     /// Returns an expression which evaluates to the encoded length of the oneof field.
     pub fn encoded_len(&self, ident: TokenStream) -> TokenStream {
-        let ty = &self.ty;
         quote! {
-            #ident.as_ref().map_or(0, #ty::encoded_len)
+            OneofType::encoded_len(&#ident)
         }
     }
 }

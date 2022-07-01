@@ -127,11 +127,9 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         let tags = Itertools::intersperse(tags, quote!(|));
 
         if field.is_oneof() {
-            let val = field.merge(quote!(#field_ident));
             quote! {
-                #(#tags)* => msg.#field_ident = #val.map_err(
-                    |err| err.push(STRUCT_NAME, stringify!(#field_ident))
-                )?,
+                #(#tags)* => OneofType::merge(&mut msg.#field_ident, tag, wire_type, buf)
+                .map_err(|err| err.push(STRUCT_NAME, stringify!(#field_ident)))?,
             }
         } else {
             quote! {
@@ -160,17 +158,16 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
     let debug_builder = quote!(f.debug_struct(stringify!(#ident)));
 
     let expanded = quote! {
+        #[allow(unused_variables)]
         impl ::ntex_grpc::Message for #ident #ty_generics #where_clause {
-            #[allow(unused_variables)]
             fn write(&self, buf: &mut ::ntex_grpc::types::BytesMut) {
-                use ::ntex_grpc::NativeType;
+                use ::ntex_grpc::{NativeType, types::OneofType};
 
                 #(#encode)*
             }
 
-            #[allow(unused_variables)]
             fn read(buf: &mut ::ntex_grpc::types::Bytes) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {
-                use ::ntex_grpc::NativeType;
+                use ::ntex_grpc::{NativeType, types::OneofType};
 
                 #struct_name
 
@@ -190,7 +187,7 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
 
             #[inline]
             fn encoded_len(&self) -> usize {
-                use ::ntex_grpc::NativeType;
+                use ::ntex_grpc::{NativeType, types::OneofType};
 
                 0 #(+ #encoded_len)*
             }
@@ -391,9 +388,10 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
     });
 
     let expanded = quote! {
-        impl #impl_generics #ident #ty_generics #where_clause {
+        impl ::ntex_grpc::types::OneofType for #impl_generics #ident #ty_generics #where_clause {
+            #[inline]
             /// Encodes the message to a buffer.
-            pub fn encode(&self, buf: &mut ::ntex_grpc::types::BytesMut) {
+            fn encode(&self, buf: &mut ::ntex_grpc::types::BytesMut) {
                 use ::ntex_grpc::NativeType;
 
                 match *self {
@@ -401,19 +399,20 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
                 }
             }
 
+            #[inline]
             /// Decodes an instance of the message from a buffer, and merges it into self.
-            pub fn decode(tag: u32, wire_type: ::ntex_grpc::types::WireType, buf: &mut ::ntex_grpc::types::Bytes) -> ::std::result::Result<::std::option::Option<Self>, ::ntex_grpc::DecodeError> {
+            fn decode(tag: u32, wire_type: ::ntex_grpc::types::WireType, buf: &mut ::ntex_grpc::types::Bytes) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {
                 use ::ntex_grpc::NativeType;
 
-                Ok(Some(match tag {
+                Ok(match tag {
                     #(#merge,)*
                     _ => unreachable!(concat!("invalid ", stringify!(#ident), " tag: {}"), tag),
-                }))
+                })
             }
 
             /// Returns the encoded length of the message without a length delimiter.
             #[inline]
-            pub fn encoded_len(&self) -> usize {
+            fn encoded_len(&self) -> usize {
                 use ::ntex_grpc::NativeType;
 
                 match *self {

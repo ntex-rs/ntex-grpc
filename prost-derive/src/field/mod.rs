@@ -92,17 +92,6 @@ impl Field {
         }
     }
 
-    /// Returns an expression which evaluates to the result of merging a decoded
-    /// value into the field.
-    pub fn merge(&self, ident: TokenStream) -> TokenStream {
-        match *self {
-            Field::Scalar(_) => quote!(),
-            Field::Message(_) => quote!(),
-            Field::Map(_) => quote!(),
-            Field::Oneof(ref oneof) => oneof.merge(ident),
-        }
-    }
-
     /// Returns an expression which evaluates to the encoded length of the field.
     pub fn encoded_len(&self, ident: TokenStream) -> TokenStream {
         match *self {

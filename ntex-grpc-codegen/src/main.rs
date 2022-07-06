@@ -29,13 +29,9 @@ struct Args {
     #[clap(short, long, value_parser, name = "INCLUDE-DIR")]
     include_dir: Vec<path::PathBuf>,
 
-    /// Map protobuf bytes type to custom rust type that implements BytesAdapter trait. {name}={rust-type-name}
-    #[clap(short, long, value_parser, name = "MAP-BYTES")]
-    map_bytes: Vec<String>,
-
-    /// Map protobuf string type to custom rust type that implements BytesAdapter trait. {name}={rust-type-name}
-    #[clap(short, long, value_parser, name = "MAP-STRING")]
-    map_string: Vec<String>,
+    /// Map protobuf type to custom rust type that implements NativeType trait. {name}={rust-type-name}
+    #[clap(short, long, value_parser, name = "MAP")]
+    map: Vec<String>,
 
     /// Path to rustfmt configuration file
     #[clap(short, long, value_parser, name = "RUSTFMT-PATH")]
@@ -52,19 +48,12 @@ fn main() -> io::Result<()> {
         cfg.out_dir(out_dir);
     }
 
-    for map in args.map_bytes {
+    for map in args.map {
         if let Some((s1, s2)) = map.split_once('=') {
-            cfg.map_bytes(s1, s2)
+            cfg.map_bytes(s1, s2);
+            cfg.map_string(s1, s2);
         } else {
-            println!("Cannot parse bytes mapping: {:?}", map);
-        }
-    }
-
-    for map in args.map_string {
-        if let Some((s1, s2)) = map.split_once('=') {
-            cfg.map_string(s1, s2)
-        } else {
-            println!("Cannot parse string mapping: {:?}", map);
+            println!("Cannot parse type mapping: {:?}", map);
         }
     }
 

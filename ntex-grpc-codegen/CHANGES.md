@@ -1,5 +1,11 @@
 # Changes
 
+## [0.1.4] - 2022-07-06
+
+* Generate service defs manually
+
+* Replace --map-bytes and --map-strings with --map
+
 ## [0.1.3] - 2022-07-06
 
 * Generate code instead of proc macro

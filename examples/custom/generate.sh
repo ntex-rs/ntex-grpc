@@ -9,4 +9,4 @@
 # This crate provides `ntex-grpc` command line utility
 
 ntex-grpc helloworld.proto helloworld.rs --out-dir ./src --include-dir ./ \
-          --map-bytes HelloRequest.msg_id=crate::unique_id::UniqueId
+          --map HelloRequest.msg_id=crate::unique_id::UniqueId

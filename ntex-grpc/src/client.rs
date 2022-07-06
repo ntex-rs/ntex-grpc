@@ -10,7 +10,7 @@ use ntex_service::{fn_service, Service};
 use ntex_util::{channel::oneshot, future::Ready, HashMap};
 
 use crate::service::{ClientInformation, MethodDef, Transport};
-use crate::{consts, utils::Data, GrpcStatus, Message, Response, ServiceError};
+use crate::{consts, utils::Data, DecodeError, GrpcStatus, Message, Response, ServiceError};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ClientError {
@@ -150,6 +150,7 @@ impl Inner {
                 }
                 h2::MessageKind::Eof(data) => {
                     let mut inflight = inner.remove(&id).unwrap();
+                    let tx = inflight.tx;
 
                     let result = match data {
                         h2::StreamEof::Data(data) => {
@@ -170,11 +171,15 @@ impl Inner {
                                     .and_then(GrpcStatus::try_from)
                                 {
                                     if status != GrpcStatus::Ok {
-                                        let _ = inflight
-                                            .tx
-                                            .send(Err(ServiceError::GrpcStatus(status, hdrs)));
+                                        let _ =
+                                            tx.send(Err(ServiceError::GrpcStatus(status, hdrs)));
                                         return Err(());
                                     }
+                                } else {
+                                    let _ = tx.send(Err(ServiceError::Decode(DecodeError::new(
+                                        "Cannot parse grpc status",
+                                    ))));
+                                    return Err(());
                                 }
                             }
 
@@ -186,7 +191,7 @@ impl Inner {
                         }
                         h2::StreamEof::Error(err) => Err(ServiceError::Stream(err)),
                     };
-                    let _ = inflight.tx.send(result);
+                    let _ = tx.send(result);
                 }
                 h2::MessageKind::Empty => {
                     inner.remove(&id);

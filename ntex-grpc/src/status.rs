@@ -32,6 +32,13 @@ macro_rules! gen_error_code {
                     $($name::$var => $val),+
                 }
             }
+
+            #[inline]
+            pub const fn code_str(&self) -> &'static str {
+                match self {
+                    $($name::$var => stringify!($val)),+
+                }
+            }
         }
 
         impl std::convert::TryFrom<u8> for $name {
@@ -55,7 +62,7 @@ macro_rules! gen_error_code {
         impl From<$name> for HeaderValue {
             #[inline]
             fn from(v: $name) -> Self {
-                HeaderValue::from_static(v.as_str())
+                HeaderValue::from_static(v.code_str())
             }
         }
     };

@@ -11,6 +11,6 @@ members = [
 [patch.crates-io]
 ntex-grpc = { path = "./ntex-grpc" }
 ntex-grpc-codegen = { path = "./ntex-grpc-codegen" }
+ntex-grpc-derive = { path = "./prost-derive" }
 
 ntex-prost-build = { path = "./prost-build" }
-ntex-prost-derive = { path = "./prost-derive" }

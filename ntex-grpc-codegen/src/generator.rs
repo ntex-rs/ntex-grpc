@@ -16,13 +16,6 @@ impl ServiceGenerator for GrpcServiceGenerator {
         buf.push_str(&format!("\n/// `{}` service definition\n", service.name));
         generate_client(&service, buf);
     }
-
-    fn finalize(&mut self, buf: &mut String) {
-        buf.insert_str(
-            0,
-            "#![allow(dead_code)]\n/// DO NOT MODIFY. Auto-generated file\n\n",
-        )
-    }
 }
 
 fn generate_client(service: &Service, buf: &mut String) {

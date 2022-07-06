@@ -1,434 +1,154 @@
-#![doc(html_root_url = "https://docs.rs/ntex-prost-derive/0.10.3")]
-// The `quote!` macro requires deep recursion.
-#![recursion_limit = "4096"]
-
-extern crate alloc;
-extern crate proc_macro;
-
-use anyhow::{bail, Error};
-use itertools::Itertools;
 use proc_macro::TokenStream;
-use proc_macro2::Span;
-use quote::quote;
-use syn::{
-    punctuated::Punctuated, Data, DataEnum, DataStruct, DeriveInput, Expr, Fields, FieldsNamed,
-    FieldsUnnamed, Ident, Variant,
-};
+use syn::{fold::Fold, parse::Parse, parse::ParseStream, punctuated::Punctuated};
 
-mod field;
-mod server;
-
-use crate::field::Field;
-
-#[proc_macro_derive(Message, attributes(prost))]
-pub fn message(input: TokenStream) -> TokenStream {
-    try_message(input).unwrap()
-}
-
-#[proc_macro_derive(Enumeration, attributes(prost))]
-pub fn enumeration(input: TokenStream) -> TokenStream {
-    try_enumeration(input).unwrap()
-}
-
-#[proc_macro_derive(Oneof, attributes(prost))]
-pub fn oneof(input: TokenStream) -> TokenStream {
-    try_oneof(input).unwrap()
-}
+const ERR_M_MESSAGE: &str = "invalid method definition, expected: #[method(name)]";
 
 #[proc_macro_attribute]
 pub fn server(attr: TokenStream, item: TokenStream) -> TokenStream {
-    server::server(attr, item)
+    server_impl(attr, item)
 }
 
-fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
-    let input: DeriveInput = syn::parse(input)?;
+fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let mut srv = syn::parse_macro_input!(attr as GrpcService);
+    let input: syn::ItemImpl = syn::parse2(item.into()).unwrap();
 
-    let ident = input.ident;
-
-    let variant_data = match input.data {
-        Data::Struct(variant_data) => variant_data,
-        Data::Enum(..) => bail!("Message can not be derived for an enum"),
-        Data::Union(..) => bail!("Message can not be derived for a union"),
-    };
-
-    let generics = &input.generics;
-    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-
-    let fields = match variant_data {
-        DataStruct {
-            fields: Fields::Named(FieldsNamed { named: fields, .. }),
-            ..
-        }
-        | DataStruct {
-            fields:
-                Fields::Unnamed(FieldsUnnamed {
-                    unnamed: fields, ..
-                }),
-            ..
-        } => fields.into_iter().collect(),
-        DataStruct {
-            fields: Fields::Unit,
-            ..
-        } => Vec::new(),
-    };
-
-    let mut next_tag: u32 = 1;
-    let mut fields = fields
-        .into_iter()
-        .enumerate()
-        .flat_map(|(idx, field)| {
-            let field_ident = field
-                .ident
-                .unwrap_or_else(|| Ident::new(&idx.to_string(), Span::call_site()));
-            match Field::new(field.attrs, Some(next_tag)) {
-                Ok(Some(field)) => {
-                    next_tag = field.tags().iter().max().map(|t| t + 1).unwrap_or(next_tag);
-                    Some(Ok((field_ident, field)))
-                }
-                Ok(None) => None,
-                Err(err) => Some(Err(
-                    err.context(format!("invalid message field {}.{}", ident, field_ident))
-                )),
+    match input.self_ty.as_ref() {
+        syn::Type::Path(ref tp) => {
+            srv.self_ty = tp.path.clone();
+            if let Some(s) = tp.path.segments.last() {
+                srv.name = format!("{}", s.ident);
+            } else {
+                panic!("struct name is required");
             }
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // We want Debug to be in declaration order
-    let unsorted_fields = fields.clone();
-
-    // Sort the fields by tag number so that fields will be encoded in tag order.
-    // TODO: This encodes oneof fields in the position of their lowest tag,
-    // regardless of the currently occupied variant, is that consequential?
-    // See: https://developers.google.com/protocol-buffers/docs/encoding#order
-    fields.sort_by_key(|&(_, ref field)| field.tags().into_iter().min().unwrap());
-    let fields = fields;
-
-    let mut tags = fields
-        .iter()
-        .flat_map(|&(_, ref field)| field.tags())
-        .collect::<Vec<_>>();
-    let num_tags = tags.len();
-    tags.sort_unstable();
-    tags.dedup();
-    if tags.len() != num_tags {
-        bail!("message {} has fields with duplicate tags", ident);
+        }
+        _ => panic!("struct impl block is supported only"),
     }
 
-    let encoded_len = fields
-        .iter()
-        .map(|&(ref field_ident, ref field)| field.encoded_len(quote!(self.#field_ident)));
+    let input = srv.fold_item_impl(input);
 
-    let encode = fields
-        .iter()
-        .map(|&(ref field_ident, ref field)| field.encode(quote!(self.#field_ident)));
+    let ty = srv.self_ty;
+    let srvpath = srv.service;
+    let srvname = srv.service_name;
+    let srvmod = srv.service_mod;
+    let modname = quote::format_ident!("_priv_{}", srv.name);
+    let methods_prefix = quote::format_ident!("{}Methods", srvname);
+    let mut methods_path = srvmod;
+    methods_path.segments.push(methods_prefix.into());
 
-    let merge = fields.iter().map(|&(ref field_ident, ref field)| {
-        let tags = field.tags().into_iter().map(|tag| quote!(#tag));
-        let tags = Itertools::intersperse(tags, quote!(|));
-
-        if field.is_oneof() {
-            quote! {
-                #(#tags)* => OneofType::merge(&mut msg.#field_ident, tag, wire_type, buf)
-                .map_err(|err| err.push(STRUCT_NAME, stringify!(#field_ident)))?,
+    let mut methods = Vec::new();
+    for (m_name, fn_name, span) in srv.methods {
+        methods.push(quote::quote_spanned! {span=>
+            Some(#methods_path::#m_name(method)) => {
+                let input = method.decode(&mut req.payload)?;
+                let output = #ty::#fn_name(&slf, input).await;
+                method.encode(output, &mut buf);
+                Ok(())
             }
-        } else {
-            quote! {
-                #(#tags)* => NativeType::deserialize(&mut msg.#field_ident, wire_type, buf)
-                .map_err(|err| err.push(STRUCT_NAME, stringify!(#field_ident)))?,
+        });
+    }
+
+    let service = quote::quote! {
+        mod #modname {
+            use super::*;
+
+            impl ::ntex_grpc::server::Service<::ntex_grpc::server::Request> for #ty {
+                type Response = ::ntex_grpc::server::Response;
+                type Error = ::ntex_grpc::server::ServerError;
+                type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>>>>;
+
+                #[inline]
+                fn poll_ready(&self, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+                    std::task::Poll::Ready(Ok(()))
+                }
+
+                fn call(&self, mut req: ::ntex_grpc::server::Request) -> Self::Future {
+                    use ::ntex_grpc::{ServiceDef, MethodDef};
+
+                    let slf = self.clone();
+                    Box::pin(async move {
+                        let mut buf = ::ntex_grpc::types::BytesMut::new();
+
+                        match #srvpath::method_by_name(&req.name) {
+                            #(#methods)*
+                            Some(_) => Err(::ntex_grpc::server::ServerError::NotImplemented(req.name)),
+                            None => Err(::ntex_grpc::server::ServerError::NotFound(req.name)),
+                        }?;
+                        Ok(::ntex_grpc::server::Response::new(buf.freeze()))
+                    })
+                }
             }
         }
-    });
-
-    let struct_name = if fields.is_empty() {
-        quote!()
-    } else {
-        quote!(
-            const STRUCT_NAME: &'static str = stringify!(#ident);
-        )
     };
 
-    let default = fields.iter().map(|&(ref field_ident, ref field)| {
-        let value = field.default();
-        quote!(#field_ident: #value,)
-    });
+    let tokens = quote::quote! {
+        #input
+        #service
+    };
+    tokens.into()
+}
 
-    let debugs = unsorted_fields.iter().map(|&(ref field_ident, _)| {
-        quote!(builder.field(stringify!(#field_ident), &self.#field_ident))
-    });
-    let debug_builder = quote!(f.debug_struct(stringify!(#ident)));
+#[derive(Debug)]
+struct GrpcService {
+    name: String,
+    self_ty: syn::Path,
+    service: syn::Path,
+    service_mod: syn::Path,
+    service_name: syn::Ident,
+    methods: Vec<(syn::Ident, syn::Ident, proc_macro2::Span)>,
+}
 
-    let expanded = quote! {
-        #[allow(unused_variables)]
-        impl ::ntex_grpc::Message for #ident #ty_generics #where_clause {
-            fn write(&self, buf: &mut ::ntex_grpc::types::BytesMut) {
-                use ::ntex_grpc::{NativeType, types::OneofType};
+impl Parse for GrpcService {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let parsed: Punctuated<syn::Path, syn::Token![,]> = Punctuated::parse_terminated(input)?;
+        let path = parsed.first().unwrap().clone();
+        let service = parsed.first().unwrap().clone();
+        let mut service_mod = service.clone();
+        service_mod.segments.pop();
+        let service_name = path.segments.last().unwrap().ident.clone();
+        Ok(GrpcService {
+            service,
+            service_mod,
+            service_name,
+            methods: Vec::new(),
+            name: String::new(),
+            self_ty: path,
+        })
+    }
+}
 
-                #(#encode)*
-            }
+impl Fold for GrpcService {
+    fn fold_impl_item_method(&mut self, mut m: syn::ImplItemMethod) -> syn::ImplItemMethod {
+        for idx in 0..m.attrs.len() {
+            let attr = &m.attrs[idx];
+            if attr.path.is_ident("method") {
+                let args = attr.parse_meta().map_err(|_| ERR_M_MESSAGE).unwrap();
+                let lst = if let syn::Meta::List(lst) = args {
+                    lst
+                } else {
+                    panic!("{}", ERR_M_MESSAGE)
+                };
+                if lst.nested.len() != 1 {
+                    panic!("{}", ERR_M_MESSAGE)
+                }
 
-            fn read(buf: &mut ::ntex_grpc::types::Bytes) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {
-                use ::ntex_grpc::{NativeType, types::OneofType};
-
-                #struct_name
-
-                let mut msg = Self::default();
-
-                while !buf.is_empty() {
-                    let (tag, wire_type) = ::ntex_grpc::encoding::decode_key(buf)?;
-
-                    match tag {
-                        #(#merge)*
-                        _ => ::ntex_grpc::encoding::skip_field(wire_type, tag, buf)?,
+                let m_name = match lst.nested[0] {
+                    syn::NestedMeta::Meta(syn::Meta::Path(ref name)) => {
+                        if let Some(name) = name.get_ident() {
+                            name.clone()
+                        } else {
+                            panic!("only `Path` literals are supported: {:?}", lst.nested[0]);
+                        }
                     }
-                }
+                    _ => panic!("only `Path` literals are supported: {:?}", lst.nested[0]),
+                };
 
-                Ok(msg)
-            }
-
-            #[inline]
-            fn encoded_len(&self) -> usize {
-                use ::ntex_grpc::{NativeType, types::OneofType};
-
-                0 #(+ #encoded_len)*
+                let _ = m.attrs.remove(idx);
+                self.methods
+                    .push((m_name, m.sig.ident.clone(), m.sig.fn_token.span));
+                break;
             }
         }
 
-        impl #impl_generics ::std::default::Default for #ident #ty_generics #where_clause {
-            fn default() -> Self {
-                #ident {
-                    #(#default)*
-                }
-            }
-        }
-
-        impl #impl_generics ::std::fmt::Debug for #ident #ty_generics #where_clause {
-            fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-                let mut builder = #debug_builder;
-                #(#debugs;)*
-                builder.finish()
-            }
-        }
-    };
-
-    Ok(expanded.into())
-}
-
-fn try_enumeration(input: TokenStream) -> Result<TokenStream, Error> {
-    let input: DeriveInput = syn::parse(input)?;
-    let ident = input.ident;
-
-    let generics = &input.generics;
-    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-
-    let punctuated_variants = match input.data {
-        Data::Enum(DataEnum { variants, .. }) => variants,
-        Data::Struct(_) => bail!("Enumeration can not be derived for a struct"),
-        Data::Union(..) => bail!("Enumeration can not be derived for a union"),
-    };
-
-    // Map the variants into 'fields'.
-    let mut variants: Vec<(Ident, Expr)> = Vec::new();
-    for Variant {
-        ident,
-        fields,
-        discriminant,
-        ..
-    } in punctuated_variants
-    {
-        match fields {
-            Fields::Unit => (),
-            Fields::Named(_) | Fields::Unnamed(_) => {
-                bail!("Enumeration variants may not have fields")
-            }
-        }
-
-        match discriminant {
-            Some((_, expr)) => variants.push((ident, expr)),
-            None => bail!("Enumeration variants must have a disriminant"),
-        }
+        m
     }
-
-    if variants.is_empty() {
-        panic!("Enumeration must have at least one variant");
-    }
-
-    let default = variants[0].0.clone();
-
-    let is_valid = variants
-        .iter()
-        .map(|&(_, ref value)| quote!(#value => true));
-    let from = variants.iter().map(
-        |&(ref variant, ref value)| quote!(#value => ::std::option::Option::Some(#ident::#variant)),
-    );
-
-    let is_valid_doc = format!("Returns `true` if `value` is a variant of `{}`.", ident);
-    let from_i32_doc = format!(
-        "Converts an `i32` to a `{}`, or `None` if `value` is not a valid variant.",
-        ident
-    );
-
-    let expanded = quote! {
-        impl #impl_generics #ident #ty_generics #where_clause {
-            #[doc=#is_valid_doc]
-            pub fn is_valid(value: i32) -> bool {
-                match value {
-                    #(#is_valid,)*
-                    _ => false,
-                }
-            }
-
-            #[doc=#from_i32_doc]
-            pub fn from_i32(value: i32) -> ::std::option::Option<#ident> {
-                match value {
-                    #(#from,)*
-                    _ => ::std::option::Option::None,
-                }
-            }
-        }
-
-        impl #impl_generics ::std::default::Default for #ident #ty_generics #where_clause {
-            fn default() -> #ident {
-                #ident::#default
-            }
-        }
-
-        impl #impl_generics ::std::convert::From::<#ident> for i32 #ty_generics #where_clause {
-            fn from(value: #ident) -> i32 {
-                value as i32
-            }
-        }
-    };
-
-    Ok(expanded.into())
-}
-
-fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
-    let input: DeriveInput = syn::parse(input)?;
-
-    let ident = input.ident;
-
-    let variants = match input.data {
-        Data::Enum(DataEnum { variants, .. }) => variants,
-        Data::Struct(..) => bail!("Oneof can not be derived for a struct"),
-        Data::Union(..) => bail!("Oneof can not be derived for a union"),
-    };
-
-    let generics = &input.generics;
-    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-
-    // Map the variants into 'fields'.
-    let mut fields: Vec<(Ident, Field)> = Vec::new();
-    for Variant {
-        attrs,
-        ident: variant_ident,
-        fields: variant_fields,
-        ..
-    } in variants
-    {
-        let variant_fields = match variant_fields {
-            Fields::Unit => Punctuated::new(),
-            Fields::Named(FieldsNamed { named: fields, .. })
-            | Fields::Unnamed(FieldsUnnamed {
-                unnamed: fields, ..
-            }) => fields,
-        };
-        if variant_fields.len() != 1 {
-            bail!("Oneof enum variants must have a single field");
-        }
-        match Field::new_oneof(attrs)? {
-            Some(field) => fields.push((variant_ident, field)),
-            None => bail!("invalid oneof variant: oneof variants may not be ignored"),
-        }
-    }
-
-    let mut tags = fields
-        .iter()
-        .flat_map(|&(ref variant_ident, ref field)| -> Result<u32, Error> {
-            if field.tags().len() > 1 {
-                bail!(
-                    "invalid oneof variant {}::{}: oneof variants may only have a single tag",
-                    ident,
-                    variant_ident
-                );
-            }
-            Ok(field.tags()[0])
-        })
-        .collect::<Vec<_>>();
-    tags.sort_unstable();
-    tags.dedup();
-    if tags.len() != fields.len() {
-        panic!("invalid oneof {}: variants have duplicate tags", ident);
-    }
-
-    let encode = fields.iter().map(|&(ref variant_ident, ref field)| {
-        let encode = field.encode(quote!(*value));
-        quote!(#ident::#variant_ident(ref value) => { #encode })
-    });
-
-    let merge = fields.iter().map(|&(ref variant_ident, ref field)| {
-        let tag = field.tags()[0];
-        quote! {
-            #tag => {
-                #ident::#variant_ident(NativeType::deserialize_default(wire_type, buf)?)
-            }
-        }
-    });
-
-    let encoded_len = fields.iter().map(|&(ref variant_ident, ref field)| {
-        let encoded_len = field.encoded_len(quote!(*value));
-        quote!(#ident::#variant_ident(ref value) => #encoded_len)
-    });
-
-    let debug = fields.iter().map(|&(ref variant_ident, _)| {
-        quote!(#ident::#variant_ident(ref value) => {
-            f.debug_tuple(stringify!(#variant_ident))
-                .field(value)
-                .finish()
-        })
-    });
-
-    let expanded = quote! {
-        impl ::ntex_grpc::types::OneofType for #impl_generics #ident #ty_generics #where_clause {
-            #[inline]
-            /// Encodes the message to a buffer.
-            fn encode(&self, buf: &mut ::ntex_grpc::types::BytesMut) {
-                use ::ntex_grpc::NativeType;
-
-                match *self {
-                    #(#encode,)*
-                }
-            }
-
-            #[inline]
-            /// Decodes an instance of the message from a buffer, and merges it into self.
-            fn decode(tag: u32, wire_type: ::ntex_grpc::types::WireType, buf: &mut ::ntex_grpc::types::Bytes) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {
-                use ::ntex_grpc::NativeType;
-
-                Ok(match tag {
-                    #(#merge,)*
-                    _ => unreachable!(concat!("invalid ", stringify!(#ident), " tag: {}"), tag),
-                })
-            }
-
-            /// Returns the encoded length of the message without a length delimiter.
-            #[inline]
-            fn encoded_len(&self) -> usize {
-                use ::ntex_grpc::NativeType;
-
-                match *self {
-                    #(#encoded_len,)*
-                }
-            }
-        }
-
-        impl #impl_generics ::std::fmt::Debug for #ident #ty_generics #where_clause {
-            fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-                match *self {
-                    #(#debug,)*
-                }
-            }
-        }
-    };
-
-    Ok(expanded.into())
 }

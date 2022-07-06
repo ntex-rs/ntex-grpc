@@ -19,6 +19,7 @@ impl GreeterServer {
                 },
             )),
             metadata: 10,
+            tp: helloworld::hello_reply::Type::Web,
         }
     }
 }

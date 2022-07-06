@@ -39,6 +39,17 @@ message HelloReply {
     int64 invalidRequest = 3;
   }
   int64 metadata = 4;
+
+  enum Type {
+    UNIVERSAL = 0;
+    WEB = 1;
+    IMAGES = 2;
+    LOCAL = 3;
+    NEWS = 4;
+    PRODUCTS = 5;
+    VIDEO = 6;
+  }
+  Type tp = 5;
 }
 
 message ResponseResult {

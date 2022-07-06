@@ -17,6 +17,10 @@ pub use crate::types::{Message, NativeType};
 
 #[doc(hidden)]
 pub mod encoding;
+#[doc(hidden)]
+pub use self::encoding::WireType;
+#[doc(hidden)]
+pub use ntex_bytes::{ByteString, Bytes, BytesMut};
 
 use ntex_http::HeaderName;
 
@@ -28,6 +32,6 @@ pub const GRPC_MESSAGE: HeaderName = HeaderName::from_static("grpc-message");
 // [1]: https://github.com/serde-rs/serde/blob/v1.0.89/serde/src/lib.rs#L245-L256
 #[allow(unused_imports)]
 #[macro_use]
-extern crate ntex_prost_derive;
+extern crate ntex_grpc_derive;
 #[doc(hidden)]
-pub use ntex_prost_derive::*;
+pub use ntex_grpc_derive::*;

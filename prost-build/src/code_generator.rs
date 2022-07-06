@@ -1,7 +1,4 @@
-use std::ascii;
-use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
-use std::iter;
+use std::{collections::HashMap, collections::HashSet, iter};
 
 use itertools::{Either, Itertools};
 use log::debug;
@@ -10,8 +7,7 @@ use prost_types::field_descriptor_proto::{Label, Type};
 use prost_types::source_code_info::Location;
 use prost_types::{
     DescriptorProto, EnumDescriptorProto, EnumValueDescriptorProto, FieldDescriptorProto,
-    FieldOptions, FileDescriptorProto, OneofDescriptorProto, ServiceDescriptorProto,
-    SourceCodeInfo,
+    FileDescriptorProto, OneofDescriptorProto, ServiceDescriptorProto, SourceCodeInfo,
 };
 
 use crate::ast::{Comments, Method, Service};
@@ -36,6 +32,7 @@ pub struct CodeGenerator<'a> {
     depth: u8,
     path: Vec<i32>,
     buf: &'a mut String,
+    priv_buf: String,
 }
 
 fn push_indent(buf: &mut String, depth: u8) {
@@ -78,6 +75,7 @@ impl<'a> CodeGenerator<'a> {
             depth: 0,
             path: Vec::new(),
             buf,
+            priv_buf: String::new(),
         };
 
         debug!(
@@ -116,6 +114,9 @@ impl<'a> CodeGenerator<'a> {
 
             code_gen.path.pop();
         }
+
+        code_gen.buf.push_str("\n\n\n");
+        code_gen.buf.push_str(&code_gen.priv_buf);
     }
 
     fn append_message(&mut self, message: DescriptorProto) {
@@ -183,17 +184,48 @@ impl<'a> CodeGenerator<'a> {
         self.append_doc(&fq_message_name, None);
         self.append_type_attributes(&fq_message_name);
         self.push_indent();
-        self.buf
-            .push_str("#[derive(Clone, PartialEq, ::ntex_grpc::Message)]\n");
+        self.buf.push_str("#[derive(Clone, PartialEq, Debug)]\n");
         self.push_indent();
         self.buf.push_str("pub struct ");
         self.buf.push_str(&to_upper_camel(&message_name));
         self.buf.push_str(" {\n");
 
+        self.priv_buf.push_str("impl ::ntex_grpc::Message for ");
+        self.priv_buf.push_str(&to_upper_camel(&message_name));
+        self.priv_buf.push_str(" {\n");
+
+        let mut write = String::new();
+        let mut read = String::new();
+        let mut encoded_len = String::new();
+        let mut default = String::new();
+
         self.depth += 1;
         self.path.push(2);
         for (field, idx) in fields {
             self.path.push(idx as i32);
+
+            write.push_str(&format!(
+                "::ntex_grpc::NativeType::serialize(&self.{}, {}, None, dst);",
+                field.name(),
+                field.number()
+            ));
+            read.push_str(&format!(
+                "{} => ::ntex_grpc::NativeType::deserialize(&mut msg.{}, tag, wire_type, src)
+                    .map_err(|err| err.push(STRUCT_NAME, \"{}\"))?,",
+                field.number(),
+                field.name(),
+                field.name(),
+            ));
+            encoded_len.push_str(&format!(
+                " + ::ntex_grpc::NativeType::serialized_len(&self.{}, {}, None)",
+                field.name(),
+                field.number()
+            ));
+            default.push_str(&format!(
+                "{}: ::core::default::Default::default(),\n",
+                field.name()
+            ));
+
             match field
                 .type_name
                 .as_ref()
@@ -204,6 +236,7 @@ impl<'a> CodeGenerator<'a> {
                 }
                 None => self.append_field(&fq_message_name, field),
             }
+
             self.path.pop();
         }
         self.path.pop();
@@ -217,6 +250,30 @@ impl<'a> CodeGenerator<'a> {
                 None => continue,
             };
 
+            write.push_str(&format!(
+                "::ntex_grpc::NativeType::serialize(&self.{}, 0, None, dst);",
+                to_snake(oneof.name()),
+            ));
+            read.push_str(&format!(
+                "
+               {} => ::ntex_grpc::NativeType::deserialize(&mut msg.{}, tag, wire_type, src)
+                        .map_err(|err| err.push(STRUCT_NAME, \"{}\"))?,",
+                fields
+                    .iter()
+                    .map(|&(ref field, _)| field.number())
+                    .join("| "),
+                to_snake(oneof.name()),
+                to_snake(oneof.name()),
+            ));
+            encoded_len.push_str(&format!(
+                " + ::ntex_grpc::NativeType::serialized_len(&self.{}, 0, None)",
+                to_snake(oneof.name()),
+            ));
+            default.push_str(&format!(
+                "{}: ::core::default::Default::default(),\n",
+                to_snake(oneof.name()),
+            ));
+
             self.path.push(idx);
             self.append_oneof_field(&message_name, &fq_message_name, oneof, fields);
             self.path.pop();
@@ -225,7 +282,47 @@ impl<'a> CodeGenerator<'a> {
 
         self.depth -= 1;
         self.push_indent();
-        self.buf.push_str("}\n");
+        self.buf.push_str("}\n\n");
+
+        // message impl =============================
+        self.priv_buf.push_str(&format!(
+            "fn write(&self, dst: &mut ::ntex_grpc::BytesMut) {{
+                {}
+             }}\n\n",
+            write
+        ));
+        self.priv_buf.push_str(&format!(
+            "fn read(src: &mut ::ntex_grpc::Bytes) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {{
+                 const STRUCT_NAME: &str = \"{}\";
+                 let mut msg = Self::default();
+                 while !src.is_empty() {{
+                    let (tag, wire_type) = ::ntex_grpc::encoding::decode_key(src)?;
+                    match tag {{
+                        {}
+                        _ => ::ntex_grpc::encoding::skip_field(wire_type, tag, src)?,
+                    }}
+                 }}
+                 Ok(msg)
+             }}\n\n", to_upper_camel(&message_name), read));
+        self.priv_buf.push_str(&format!(
+            "#[inline]
+             fn encoded_len(&self) -> usize {{
+                 0 {}
+             }}\n\n",
+            encoded_len
+        ));
+        self.priv_buf.push_str("}\n\n");
+
+        // default
+        self.priv_buf.push_str(&format!(
+            "impl ::std::default::Default for {} {{
+        fn default() -> Self {{
+            Self {{ {} }} }} }}\n\n
+        ",
+            to_upper_camel(&message_name),
+            default
+        ));
+        // ==========================================
 
         if !message.enum_type.is_empty() || !nested_types.is_empty() || !oneof_fields.is_empty() {
             self.push_mod(&message_name);
@@ -287,7 +384,6 @@ impl<'a> CodeGenerator<'a> {
             panic!("protobuf group is not supported: {}", field.name());
         }
         let repeated = field.label == Some(Label::Repeated as i32);
-        let deprecated = self.deprecated(&field);
         let optional = self.optional(&field);
         let ty = self.resolve_type(&field, fq_message_name);
 
@@ -306,73 +402,7 @@ impl<'a> CodeGenerator<'a> {
 
         self.append_doc(fq_message_name, Some(field.name()));
 
-        if deprecated {
-            self.push_indent();
-            self.buf.push_str("#[deprecated]\n");
-        }
-
         self.push_indent();
-        self.buf.push_str("#[prost(");
-        let type_tag = self.field_type_tag(&field);
-        self.buf.push_str(&type_tag);
-
-        match field.label() {
-            Label::Optional => {
-                if optional {
-                    self.buf.push_str(", optional");
-                }
-            }
-            Label::Required => self.buf.push_str(", required"),
-            Label::Repeated => {
-                self.buf.push_str(", repeated");
-                if can_pack(&field)
-                    && !field
-                        .options
-                        .as_ref()
-                        .map_or(self.syntax == Syntax::Proto3, |options| options.packed())
-                {
-                    self.buf.push_str(", packed=\"false\"");
-                }
-            }
-        }
-
-        if boxed {
-            self.buf.push_str(", boxed");
-        }
-        self.buf.push_str(", tag=\"");
-        self.buf.push_str(&field.number().to_string());
-
-        if let Some(ref default) = field.default_value {
-            self.buf.push_str("\", default=\"");
-            if type_ == Type::Bytes {
-                self.buf.push_str("b\\\"");
-                for b in unescape_c_escape_string(default) {
-                    self.buf.extend(
-                        ascii::escape_default(b).flat_map(|c| (c as char).escape_default()),
-                    );
-                }
-                self.buf.push_str("\\\"");
-            } else if type_ == Type::Enum {
-                let mut enum_value = to_upper_camel(default);
-                if self.config.strip_enum_prefix {
-                    // Field types are fully qualified, so we extract
-                    // the last segment and strip it from the left
-                    // side of the default value.
-                    let enum_type = field
-                        .type_name
-                        .as_ref()
-                        .and_then(|ty| ty.split('.').last())
-                        .unwrap();
-
-                    enum_value = strip_enum_prefix(&to_upper_camel(enum_type), &enum_value)
-                }
-                self.buf.push_str(&enum_value);
-            } else {
-                self.buf.push_str(&default.escape_default().to_string());
-            }
-        }
-
-        self.buf.push_str("\")]\n");
         self.append_field_attributes(fq_message_name, field.name());
         self.push_indent();
         self.buf.push_str("pub ");
@@ -422,16 +452,7 @@ impl<'a> CodeGenerator<'a> {
             .get_first_field(fq_message_name, field.name())
             .copied()
             .unwrap_or_default();
-        let key_tag = self.field_type_tag(key);
-        let value_tag = self.map_value_type_tag(value);
 
-        self.buf.push_str(&format!(
-            "#[prost({}=\"{}, {}\", tag=\"{}\")]\n",
-            map_type.annotation(),
-            key_tag,
-            value_tag,
-            field.number()
-        ));
         self.append_field_attributes(fq_message_name, field.name());
         self.push_indent();
         self.buf.push_str(&format!(
@@ -457,13 +478,6 @@ impl<'a> CodeGenerator<'a> {
         );
         self.append_doc(fq_message_name, None);
         self.push_indent();
-        self.buf.push_str(&format!(
-            "#[prost(oneof, tags=\"{}\")]\n",
-            fields
-                .iter()
-                .map(|&(ref field, _)| field.number())
-                .join(", ")
-        ));
         self.append_field_attributes(fq_message_name, oneof.name());
         self.push_indent();
         self.buf.push_str(&format!(
@@ -489,33 +503,50 @@ impl<'a> CodeGenerator<'a> {
         let oneof_name = format!("{}.{}", fq_message_name, oneof.name());
         self.append_type_attributes(&oneof_name);
         self.push_indent();
-        self.buf
-            .push_str("#[derive(Clone, PartialEq, ::ntex_grpc::Oneof)]\n");
+        self.buf.push_str("#[derive(Clone, PartialEq, Debug)]\n");
         self.push_indent();
         self.buf.push_str("pub enum ");
         self.buf.push_str(&to_upper_camel(oneof.name()));
         self.buf.push_str(" {\n");
 
+        let mut write = String::new();
+        let mut read = String::new();
+        let mut encoded_len = String::new();
+
         self.path.push(2);
         self.depth += 1;
-        for (field, idx) in fields {
+        for (field, idx) in &fields {
             let type_ = field.r#type();
 
-            self.path.push(idx as i32);
+            write.push_str(&format!(
+                "{}::{}(ref value) => ::ntex_grpc::NativeType::serialize(value, {}, None, dst),",
+                to_upper_camel(oneof.name()),
+                to_upper_camel(field.name()),
+                field.number()
+            ));
+            read.push_str(&format!(
+                "{} => {}::{}(::ntex_grpc::NativeType::deserialize_default({}, wire_type, src)?),\n",
+                field.number(),
+                to_upper_camel(oneof.name()),
+                to_upper_camel(field.name()),
+                field.number(),
+            ));
+            encoded_len.push_str(&format!(
+                "{}::{}(ref value) => ::ntex_grpc::NativeType::serialized_len(value, {}, None),",
+                to_upper_camel(oneof.name()),
+                to_upper_camel(field.name()),
+                field.number()
+            ));
+
+            self.path.push(*idx as i32);
             self.append_doc(fq_message_name, Some(field.name()));
             self.path.pop();
 
             self.push_indent();
-            let ty_tag = self.field_type_tag(&field);
-            self.buf.push_str(&format!(
-                "#[prost({}, tag=\"{}\")]\n",
-                ty_tag,
-                field.number()
-            ));
             self.append_field_attributes(&oneof_name, field.name());
 
             self.push_indent();
-            let ty = self.resolve_type(&field, fq_message_name);
+            let ty = self.resolve_type(field, fq_message_name);
 
             let boxed = (type_ == Type::Message || type_ == Type::Group)
                 && self
@@ -542,6 +573,57 @@ impl<'a> CodeGenerator<'a> {
 
         self.push_indent();
         self.buf.push_str("}\n");
+
+        self.buf.push_str(&format!("
+        impl ::ntex_grpc::NativeType for {} {{
+            const TYPE: ::ntex_grpc::WireType = ::ntex_grpc::WireType::LengthDelimited;
+            fn merge(&mut self, _: &mut ::ntex_grpc::Bytes) -> ::std::result::Result<(), ::ntex_grpc::DecodeError> {{
+                panic!(\"Not supported\")
+            }}
+            fn encode_value(&self, _: &mut ::ntex_grpc::BytesMut) {{
+                panic!(\"Not supported\")
+            }}
+        ", to_upper_camel(oneof.name())));
+
+        self.buf.push_str(&format!(
+            "
+            /// Encodes the message to a buffer.
+            fn serialize(&self, _: u32, _: Option<&Self>, dst: &mut ::ntex_grpc::BytesMut) {{
+                match *self {{ {} }}
+            }}",
+            write
+        ));
+        self.buf.push_str(&format!("
+            /// Decodes an instance of the message from a buffer, and merges it into self.
+            fn deserialize(&mut self, tag: u32, wire_type: ::ntex_grpc::WireType, src: &mut ::ntex_grpc::Bytes) -> ::std::result::Result<(), ::ntex_grpc::DecodeError> {{
+                *self = match tag {{
+                    {}
+                    _ => unreachable!(\"invalid {}, tag: {{}}\", tag),
+                }};
+                Ok(())
+            }}", read, to_upper_camel(oneof.name())));
+        self.buf.push_str(&format!(
+            "
+            /// Returns the encoded length of the message without a length delimiter.
+            fn serialized_len(&self, _: u32, _: Option<&Self>) -> usize {{
+                match *self {{
+                    {}
+                }}
+            }}
+        }}\n\n",
+            encoded_len
+        ));
+        self.buf.push_str(&format!(
+            "
+        impl ::std::default::Default for {} {{
+            fn default() -> Self {{
+                {}::{}(::std::default::Default::default())
+            }}
+        }}",
+            to_upper_camel(oneof.name()),
+            to_upper_camel(oneof.name()),
+            to_upper_camel(fields[0].0.name()),
+        ));
     }
 
     fn location(&self) -> &Location {
@@ -592,9 +674,8 @@ impl<'a> CodeGenerator<'a> {
         self.append_doc(&fq_proto_enum_name, None);
         self.append_type_attributes(&fq_proto_enum_name);
         self.push_indent();
-        self.buf.push_str(
-            "#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::ntex_grpc::Enumeration)]\n",
-        );
+        self.buf
+            .push_str("#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]\n");
         self.push_indent();
         self.buf.push_str("#[repr(i32)]\n");
         self.push_indent();
@@ -625,7 +706,7 @@ impl<'a> CodeGenerator<'a> {
         self.depth -= 1;
 
         self.push_indent();
-        self.buf.push_str("}\n");
+        self.buf.push_str("}\n\n");
 
         self.push_indent();
         self.buf.push_str("impl ");
@@ -650,7 +731,7 @@ impl<'a> CodeGenerator<'a> {
         );
         self.push_indent();
         self.buf
-            .push_str("pub fn to_str_name(&self) -> &'static str {\n");
+            .push_str("pub fn to_str_name(self) -> &'static str {\n");
         self.depth += 1;
 
         self.push_indent();
@@ -678,7 +759,66 @@ impl<'a> CodeGenerator<'a> {
         self.path.pop();
         self.depth -= 1;
         self.push_indent();
-        self.buf.push_str("}\n"); // End of impl
+
+        self.buf.push_str(
+            "pub fn from_i32(value: i32) -> ::std::option::Option<Self> {
+                match value {
+            ",
+        );
+
+        for variant in variant_mappings.iter() {
+            self.buf.push_str(&format!(
+                "{} => Some({}::{}),\n",
+                variant.proto_number, enum_name, variant.generated_variant_name
+            ));
+        }
+        self.buf.push_str(
+            "    _ => ::std::option::Option::None,
+            }
+        }",
+        );
+        self.buf.push_str("}\n\n"); // End of impl
+
+        // NativeType impl
+        self.buf.push_str(&format!(
+            "impl ::ntex_grpc::NativeType for {} {{
+                 const TYPE: ::ntex_grpc::WireType = ::ntex_grpc::WireType::Varint;
+
+                 #[inline]
+                 fn merge(&mut self, src: &mut ::ntex_grpc::Bytes) -> ::std::result::Result<(), ::ntex_grpc::DecodeError> {{
+                     *self = ::ntex_grpc::encoding::decode_varint(src).map(|val| Self::from_i32(val as i32).unwrap_or_default())?;
+                     Ok(())
+                 }}
+
+                 #[inline]
+                 fn encode_value(&self, dst: &mut ::ntex_grpc::BytesMut) {{
+                    ::ntex_grpc::encoding::encode_varint(*self as i32 as u64, dst);
+                 }}
+
+                 #[inline]
+                 fn encoded_len(&self, tag: u32) -> usize {{
+                     ::ntex_grpc::encoding::key_len(tag) + ::ntex_grpc::encoding::encoded_len_varint(*self as i32 as u64)
+                 }}
+
+                 #[inline]
+                 fn is_default(&self) -> bool {{
+                     self == &{}::{}
+                 }}
+            }}
+
+            impl ::std::default::Default for {} {{
+                #[inline]
+                fn default() -> Self {{
+                    {}::{}
+                }}
+            }}\n\n",
+            enum_name,
+            enum_name,
+            &variant_mappings[0].generated_variant_name,
+            enum_name,
+            enum_name,
+            &variant_mappings[0].generated_variant_name
+        ));
     }
 
     fn push_service(&mut self, service: ServiceDescriptorProto) {
@@ -773,7 +913,7 @@ impl<'a> CodeGenerator<'a> {
             Type::Double => String::from("f64"),
             Type::Uint32 | Type::Fixed32 => String::from("u32"),
             Type::Uint64 | Type::Fixed64 => String::from("u64"),
-            Type::Int32 | Type::Sfixed32 | Type::Sint32 | Type::Enum => String::from("i32"),
+            Type::Int32 | Type::Sfixed32 | Type::Sint32 => String::from("i32"),
             Type::Int64 | Type::Sfixed64 | Type::Sint64 => String::from("i64"),
             Type::Bool => String::from("bool"),
             Type::String => {
@@ -783,7 +923,6 @@ impl<'a> CodeGenerator<'a> {
                     }
                 }
                 StringType::String.rust_type().to_owned()
-                // String::from("::ntex_grpc::types::ByteString")
             }
             Type::Bytes => {
                 for bytes_type in &self.config.bytes_type {
@@ -793,7 +932,7 @@ impl<'a> CodeGenerator<'a> {
                 }
                 BytesType::Bytes.rust_type().to_owned()
             }
-            Type::Group | Type::Message => self.resolve_ident(field.type_name()),
+            Type::Group | Type::Message | Type::Enum => self.resolve_ident(field.type_name()),
         }
     }
 
@@ -831,42 +970,6 @@ impl<'a> CodeGenerator<'a> {
             .join("::")
     }
 
-    fn field_type_tag(&self, field: &FieldDescriptorProto) -> Cow<'static, str> {
-        match field.r#type() {
-            Type::Float => Cow::Borrowed("float"),
-            Type::Double => Cow::Borrowed("double"),
-            Type::Int32 => Cow::Borrowed("int32"),
-            Type::Int64 => Cow::Borrowed("int64"),
-            Type::Uint32 => Cow::Borrowed("uint32"),
-            Type::Uint64 => Cow::Borrowed("uint64"),
-            Type::Sint32 => Cow::Borrowed("sint32"),
-            Type::Sint64 => Cow::Borrowed("sint64"),
-            Type::Fixed32 => Cow::Borrowed("fixed32"),
-            Type::Fixed64 => Cow::Borrowed("fixed64"),
-            Type::Sfixed32 => Cow::Borrowed("sfixed32"),
-            Type::Sfixed64 => Cow::Borrowed("sfixed64"),
-            Type::Bool => Cow::Borrowed("bool"),
-            Type::String => Cow::Borrowed("string"),
-            Type::Bytes => Cow::Borrowed("bytes"),
-            Type::Group => Cow::Borrowed("group"),
-            Type::Message => Cow::Borrowed("message"),
-            Type::Enum => Cow::Owned(format!(
-                "enumeration={:?}",
-                self.resolve_ident(field.type_name())
-            )),
-        }
-    }
-
-    fn map_value_type_tag(&self, field: &FieldDescriptorProto) -> Cow<'static, str> {
-        match field.r#type() {
-            Type::Enum => Cow::Owned(format!(
-                "enumeration({})",
-                self.resolve_ident(field.type_name())
-            )),
-            _ => self.field_type_tag(field),
-        }
-    }
-
     fn optional(&self, field: &FieldDescriptorProto) -> bool {
         if field.proto3_optional.unwrap_or(false) {
             return true;
@@ -881,141 +984,6 @@ impl<'a> CodeGenerator<'a> {
             _ => self.syntax == Syntax::Proto2,
         }
     }
-
-    /// Returns `true` if the field options includes the `deprecated` option.
-    fn deprecated(&self, field: &FieldDescriptorProto) -> bool {
-        field
-            .options
-            .as_ref()
-            .map_or(false, FieldOptions::deprecated)
-    }
-}
-
-/// Returns `true` if the repeated field type can be packed.
-fn can_pack(field: &FieldDescriptorProto) -> bool {
-    matches!(
-        field.r#type(),
-        Type::Float
-            | Type::Double
-            | Type::Int32
-            | Type::Int64
-            | Type::Uint32
-            | Type::Uint64
-            | Type::Sint32
-            | Type::Sint64
-            | Type::Fixed32
-            | Type::Fixed64
-            | Type::Sfixed32
-            | Type::Sfixed64
-            | Type::Bool
-            | Type::Enum
-    )
-}
-
-/// Based on [`google::protobuf::UnescapeCEscapeString`][1]
-/// [1]: https://github.com/google/protobuf/blob/3.3.x/src/google/protobuf/stubs/strutil.cc#L312-L322
-fn unescape_c_escape_string(s: &str) -> Vec<u8> {
-    let src = s.as_bytes();
-    let len = src.len();
-    let mut dst = Vec::new();
-
-    let mut p = 0;
-
-    while p < len {
-        if src[p] != b'\\' {
-            dst.push(src[p]);
-            p += 1;
-        } else {
-            p += 1;
-            if p == len {
-                panic!(
-                    "invalid c-escaped default binary value ({}): ends with '\'",
-                    s
-                )
-            }
-            match src[p] {
-                b'a' => {
-                    dst.push(0x07);
-                    p += 1;
-                }
-                b'b' => {
-                    dst.push(0x08);
-                    p += 1;
-                }
-                b'f' => {
-                    dst.push(0x0C);
-                    p += 1;
-                }
-                b'n' => {
-                    dst.push(0x0A);
-                    p += 1;
-                }
-                b'r' => {
-                    dst.push(0x0D);
-                    p += 1;
-                }
-                b't' => {
-                    dst.push(0x09);
-                    p += 1;
-                }
-                b'v' => {
-                    dst.push(0x0B);
-                    p += 1;
-                }
-                b'\\' => {
-                    dst.push(0x5C);
-                    p += 1;
-                }
-                b'?' => {
-                    dst.push(0x3F);
-                    p += 1;
-                }
-                b'\'' => {
-                    dst.push(0x27);
-                    p += 1;
-                }
-                b'"' => {
-                    dst.push(0x22);
-                    p += 1;
-                }
-                b'0'..=b'7' => {
-                    eprintln!("another octal: {}, offset: {}", s, &s[p..]);
-                    let mut octal = 0;
-                    for _ in 0..3 {
-                        if p < len && src[p] >= b'0' && src[p] <= b'7' {
-                            eprintln!("\toctal: {}", octal);
-                            octal = octal * 8 + (src[p] - b'0');
-                            p += 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    dst.push(octal);
-                }
-                b'x' | b'X' => {
-                    if p + 3 > len {
-                        panic!(
-                            "invalid c-escaped default binary value ({}): incomplete hex value",
-                            s
-                        )
-                    }
-                    match u8::from_str_radix(&s[p + 1..p + 3], 16) {
-                        Ok(b) => dst.push(b),
-                        _ => panic!(
-                            "invalid c-escaped default binary value ({}): invalid hex value",
-                            &s[p..p + 2]
-                        ),
-                    }
-                    p += 3;
-                }
-                _ => panic!(
-                    "invalid c-escaped default binary value ({}): invalid escape",
-                    s
-                ),
-            }
-        }
-    }
-    dst
 }
 
 /// Strip an enum's type name from the prefix of an enum value.
@@ -1090,14 +1058,6 @@ fn build_enum_value_mappings<'a>(
 }
 
 impl MapType {
-    /// The `prost-derive` annotation type corresponding to the map type.
-    fn annotation(&self) -> &'static str {
-        match self {
-            MapType::HashMap => "map",
-            MapType::BTreeMap => "btree_map",
-        }
-    }
-
     /// The fully-qualified Rust type corresponding to the map type.
     fn rust_type(&self) -> &'static str {
         match self {
@@ -1111,7 +1071,7 @@ impl BytesType {
     /// The fully-qualified Rust type corresponding to the bytes type.
     fn rust_type(&self) -> &str {
         match self {
-            BytesType::Bytes => "::ntex_grpc::types::Bytes",
+            BytesType::Bytes => "::ntex_grpc::Bytes",
             BytesType::Custom(s) => s,
         }
     }
@@ -1121,7 +1081,7 @@ impl StringType {
     /// The fully-qualified Rust type corresponding to the string type.
     fn rust_type(&self) -> &str {
         match self {
-            StringType::String => "::ntex_grpc::types::ByteString",
+            StringType::String => "::ntex_grpc::ByteString",
             StringType::Custom(s) => s,
         }
     }

@@ -37,19 +37,19 @@ impl ntex_grpc::NativeType for UniqueId {
     }
 
     #[inline]
-    fn merge(&mut self, src: Bytes) -> Result<(), ntex_grpc::DecodeError> {
-        *self = UniqueId::try_from_bytes(&src)
+    fn merge(&mut self, src: &mut Bytes) -> Result<(), ntex_grpc::DecodeError> {
+        *self = UniqueId::try_from_bytes(src)
             .map_err(|_| ntex_grpc::DecodeError::new("Cannot parse UUID from Bytes"))?;
         Ok(())
     }
 
     #[inline]
-    fn encode(&self, dst: &mut BytesMut) {
+    fn encode_value(&self, dst: &mut BytesMut) {
         dst.extend_from_slice(self.0.as_bytes())
     }
 
     #[inline]
-    fn is_default(&self, val: &[u8]) -> bool {
-        self.as_bytes() == val
+    fn is_default(&self) -> bool {
+        self.as_bytes().is_empty()
     }
 }

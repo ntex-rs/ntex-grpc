@@ -276,6 +276,7 @@ where
                 return Either::Left(Box::pin(async move {
                     match fut.await {
                         Ok(res) => {
+                            log::debug!("Response is received {:?}", res);
                             let mut buf = BytesMut::with_capacity(res.payload.len() + 5);
                             buf.put_u8(0); // compression
                             buf.put_u32(res.payload.len() as u32); // length
@@ -288,7 +289,9 @@ where
                             );
                             msg.stream().send_payload(buf.freeze(), true).await;
                         }
-                        Err(err) => (),
+                        Err(err) => {
+                            log::debug!("Failure during service call {:?}", err);
+                        }
                     };
 
                     Ok(())

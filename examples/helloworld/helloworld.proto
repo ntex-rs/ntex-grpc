@@ -49,7 +49,7 @@ message HelloReply {
     PRODUCTS = 5;
     VIDEO = 6;
   }
-  Type tp = 5;
+  Type replyType = 5;
 }
 
 message ResponseResult {

@@ -11,7 +11,7 @@ pub struct HelloRequest {
 #[derive(Clone, PartialEq, Debug)]
 pub struct HelloReply {
     pub metadata: i64,
-    pub tp: hello_reply::Type,
+    pub reply_type: hello_reply::Type,
     pub result: ::core::option::Option<hello_reply::Result>,
 }
 
@@ -286,7 +286,7 @@ impl ::std::default::Default for HelloRequest {
 impl ::ntex_grpc::Message for HelloReply {
     fn write(&self, dst: &mut ::ntex_grpc::BytesMut) {
         ::ntex_grpc::NativeType::serialize(&self.metadata, 4, None, dst);
-        ::ntex_grpc::NativeType::serialize(&self.tp, 5, None, dst);
+        ::ntex_grpc::NativeType::serialize(&self.reply_type, 5, None, dst);
         ::ntex_grpc::NativeType::serialize(&self.result, 0, None, dst);
     }
 
@@ -300,8 +300,10 @@ impl ::ntex_grpc::Message for HelloReply {
             match tag {
                 4 => ::ntex_grpc::NativeType::deserialize(&mut msg.metadata, tag, wire_type, src)
                     .map_err(|err| err.push(STRUCT_NAME, "metadata"))?,
-                5 => ::ntex_grpc::NativeType::deserialize(&mut msg.tp, tag, wire_type, src)
-                    .map_err(|err| err.push(STRUCT_NAME, "tp"))?,
+                5 => {
+                    ::ntex_grpc::NativeType::deserialize(&mut msg.reply_type, tag, wire_type, src)
+                        .map_err(|err| err.push(STRUCT_NAME, "reply_type"))?
+                }
                 1 | 2 | 3 => {
                     ::ntex_grpc::NativeType::deserialize(&mut msg.result, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, "result"))?
@@ -315,7 +317,7 @@ impl ::ntex_grpc::Message for HelloReply {
     #[inline]
     fn encoded_len(&self) -> usize {
         0 + ::ntex_grpc::NativeType::serialized_len(&self.metadata, 4, None)
-            + ::ntex_grpc::NativeType::serialized_len(&self.tp, 5, None)
+            + ::ntex_grpc::NativeType::serialized_len(&self.reply_type, 5, None)
             + ::ntex_grpc::NativeType::serialized_len(&self.result, 0, None)
     }
 }
@@ -324,7 +326,7 @@ impl ::std::default::Default for HelloReply {
     fn default() -> Self {
         Self {
             metadata: ::core::default::Default::default(),
-            tp: ::core::default::Default::default(),
+            reply_type: ::core::default::Default::default(),
             result: ::core::default::Default::default(),
         }
     }

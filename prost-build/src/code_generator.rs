@@ -206,24 +206,24 @@ impl<'a> CodeGenerator<'a> {
 
             write.push_str(&format!(
                 "::ntex_grpc::NativeType::serialize(&self.{}, {}, None, dst);",
-                field.name(),
+                to_snake(field.name()),
                 field.number()
             ));
             read.push_str(&format!(
                 "{} => ::ntex_grpc::NativeType::deserialize(&mut msg.{}, tag, wire_type, src)
                     .map_err(|err| err.push(STRUCT_NAME, \"{}\"))?,",
                 field.number(),
-                field.name(),
-                field.name(),
+                to_snake(field.name()),
+                to_snake(field.name()),
             ));
             encoded_len.push_str(&format!(
                 " + ::ntex_grpc::NativeType::serialized_len(&self.{}, {}, None)",
-                field.name(),
+                to_snake(field.name()),
                 field.number()
             ));
             default.push_str(&format!(
                 "{}: ::core::default::Default::default(),\n",
-                field.name()
+                to_snake(field.name())
             ));
 
             match field

@@ -10,7 +10,7 @@ use ntex_service::{fn_service, Service};
 use ntex_util::{channel::oneshot, future::Ready, HashMap};
 
 use crate::service::{ClientInformation, MethodDef, Transport};
-use crate::{consts, utils::Data, GrpcStatus, Message, Response, ServiceError, GRPC_STATUS};
+use crate::{consts, utils::Data, GrpcStatus, Message, Response, ServiceError};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ClientError {
@@ -162,7 +162,7 @@ impl Inner {
                         }
                         h2::StreamEof::Trailers(hdrs) => {
                             // check grpc status
-                            if let Some(val) = hdrs.get(GRPC_STATUS) {
+                            if let Some(val) = hdrs.get(consts::GRPC_STATUS) {
                                 if let Ok(status) = val
                                     .to_str()
                                     .map_err(|_| ())

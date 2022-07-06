@@ -1,4 +1,5 @@
 use ntex_h2::frame::Reason;
+use ntex_http::HeaderValue;
 
 macro_rules! gen_error_code {
     (
@@ -43,10 +44,18 @@ macro_rules! gen_error_code {
                 }
             }
         }
+
         impl From<$name> for u8 {
             #[inline]
             fn from(v: $name) -> Self {
                 unsafe { ::std::mem::transmute(v) }
+            }
+        }
+
+        impl From<$name> for HeaderValue {
+            #[inline]
+            fn from(v: $name) -> Self {
+                HeaderValue::from_static(v.as_str())
             }
         }
     };

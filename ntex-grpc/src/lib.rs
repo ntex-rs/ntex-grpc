@@ -22,13 +22,6 @@ pub use self::encoding::WireType;
 #[doc(hidden)]
 pub use ntex_bytes::{ByteString, Bytes, BytesMut};
 
-use ntex_http::HeaderName;
-
-#[allow(clippy::declare_interior_mutable_const)]
-pub const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
-#[allow(clippy::declare_interior_mutable_const)]
-pub const GRPC_MESSAGE: HeaderName = HeaderName::from_static("grpc-message");
-
 // [1]: https://github.com/serde-rs/serde/blob/v1.0.89/serde/src/lib.rs#L245-L256
 #[allow(unused_imports)]
 #[macro_use]

@@ -192,6 +192,7 @@ impl<'a> CodeGenerator<'a> {
         self.priv_buf.push_str(&to_upper_camel(&message_name));
         self.priv_buf.push_str(" {\n");
 
+        let mut has_fields = false;
         let mut write = String::new();
         let mut read = String::new();
         let mut encoded_len = String::new();
@@ -202,6 +203,7 @@ impl<'a> CodeGenerator<'a> {
         for (field, idx) in fields {
             self.path.push(idx as i32);
 
+            has_fields = true;
             write.push_str(&format!(
                 "::ntex_grpc::NativeType::serialize(&self.{}, {}, None, dst);",
                 to_snake(field.name()),
@@ -248,6 +250,7 @@ impl<'a> CodeGenerator<'a> {
                 None => continue,
             };
 
+            has_fields = true;
             write.push_str(&format!(
                 "::ntex_grpc::NativeType::serialize(&self.{}, 0, None, dst);",
                 to_snake(oneof.name()),
@@ -284,21 +287,33 @@ impl<'a> CodeGenerator<'a> {
 
         // message impl =============================
         self.priv_buf.push_str(&format!(
-            "fn write(&self, dst: &mut ::ntex_grpc::BytesMut) {{
+            "#[inline]
+              fn write(&self, dst: &mut ::ntex_grpc::BytesMut) {{
                 {}
              }}\n\n",
             write
         ));
+
+        let read = if has_fields {
+            format!(
+                "match tag {{
+                 {}
+                 _ => ::ntex_grpc::encoding::skip_field(wire_type, tag, src)?,
+             }}",
+                read
+            )
+        } else {
+            "::ntex_grpc::encoding::skip_field(wire_type, tag, src)?;".to_string()
+        };
+
         self.priv_buf.push_str(&format!(
-            "fn read(src: &mut ::ntex_grpc::Bytes) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {{
+            "#[inline]
+             fn read(src: &mut ::ntex_grpc::Bytes) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {{
                  const STRUCT_NAME: &str = \"{}\";
                  let mut msg = Self::default();
                  while !src.is_empty() {{
                     let (tag, wire_type) = ::ntex_grpc::encoding::decode_key(src)?;
-                    match tag {{
-                        {}
-                        _ => ::ntex_grpc::encoding::skip_field(wire_type, tag, src)?,
-                    }}
+                    {}
                  }}
                  Ok(msg)
              }}\n\n", to_upper_camel(&message_name), read));
@@ -314,8 +329,10 @@ impl<'a> CodeGenerator<'a> {
         // default
         self.priv_buf.push_str(&format!(
             "impl ::std::default::Default for {} {{
-        fn default() -> Self {{
-            Self {{ {} }} }} }}\n\n
+                 fn default() -> Self {{
+                     Self {{ {} }}
+                 }}
+             }}\n\n
         ",
             to_upper_camel(&message_name),
             default

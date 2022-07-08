@@ -201,63 +201,13 @@ pub trait ServiceGenerator {
     fn finalize_package(&mut self, _package: &str, _buf: &mut String) {}
 }
 
-/// The map collection type to output for Protobuf `map` fields.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum MapType {
-    /// The [`std::collections::HashMap`] type.
-    HashMap,
-    /// The [`std::collections::BTreeMap`] type.
-    BTreeMap,
-}
-
-impl Default for MapType {
-    fn default() -> MapType {
-        MapType::HashMap
-    }
-}
-
-/// The bytes collection type to output for Protobuf `bytes` fields.
-#[non_exhaustive]
-#[derive(Clone, Debug, PartialEq)]
-enum BytesType {
-    /// The [`ntex_bytes::Bytes`] type.
-    Bytes,
-    /// Custom type that implements [`ntex_grpc::BytesAdater`] trait
-    Custom(String),
-}
-
-impl Default for BytesType {
-    fn default() -> BytesType {
-        BytesType::Bytes
-    }
-}
-
-/// The string collection type to output for Protobuf `string` fields.
-#[non_exhaustive]
-#[derive(Clone, Debug, PartialEq)]
-enum StringType {
-    /// The [`ntex_bytes::ByteString`] type.
-    String,
-    /// Custom type that implements [`ntex_grpc::BytesAdater`] trait
-    Custom(String),
-}
-
-impl Default for StringType {
-    fn default() -> StringType {
-        StringType::String
-    }
-}
-
 /// Configuration options for Protobuf code generation.
 ///
 /// This configuration builder can be used to set non-default code generation options.
 pub struct Config {
     file_descriptor_set_path: Option<PathBuf>,
     service_generator: Option<Box<dyn ServiceGenerator>>,
-    map_type: PathMap<MapType>,
-    bytes_type: Vec<PathMap<BytesType>>,
-    strings_type: Vec<PathMap<StringType>>,
+    types_map: PathMap<String>,
     type_attributes: PathMap<String>,
     field_attributes: PathMap<String>,
     prost_types: bool,
@@ -277,17 +227,16 @@ impl Config {
         Config::default()
     }
 
-    /// Configure the code generator to generate Rust [`BTreeMap`][1] fields for Protobuf
-    /// [`map`][2] type fields.
+    /// Configure the code generator to generate Rust type fields for Protobuf fields.
     ///
     /// # Arguments
     ///
     /// **`paths`** - paths to specific fields, messages, or packages which should use a Rust
-    /// `BTreeMap` for Protobuf `map` fields. Paths are specified in terms of the Protobuf type
+    /// types that implements `NativeType` trait. Paths are specified in terms of the Protobuf type
     /// name (not the generated Rust type name). Paths with a leading `.` are treated as fully
     /// qualified names. Paths without a leading `.` are treated as relative, and are suffix
     /// matched on the fully qualified field name. If a Protobuf map field matches any of the
-    /// paths, a Rust `BTreeMap` field is generated instead of the default [`HashMap`][3].
+    /// paths, a Rust field is generated instead of the default types.
     ///
     /// The matching is done on the Protobuf names, before converting to Rust-friendly casing
     /// standards.
@@ -297,123 +246,30 @@ impl Config {
     /// ```rust
     /// # let mut config = prost_build::Config::new();
     /// // Match a specific field in a message type.
-    /// config.btree_map(&[".my_messages.MyMessageType.my_map_field"]);
+    /// config.map_field_type(&[".my_messages.MyMessageType.my_bytes_field"], "MyCustomType");
     ///
-    /// // Match all map fields in a message type.
-    /// config.btree_map(&[".my_messages.MyMessageType"]);
-    ///
-    /// // Match all map fields in a package.
-    /// config.btree_map(&[".my_messages"]);
-    ///
-    /// // Match all map fields. Specially useful in `no_std` contexts.
-    /// config.btree_map(&["."]);
-    ///
-    /// // Match all map fields in a nested message.
-    /// config.btree_map(&[".my_messages.MyMessageType.MyNestedMessageType"]);
-    ///
-    /// // Match all fields named 'my_map_field'.
-    /// config.btree_map(&["my_map_field"]);
-    ///
-    /// // Match all fields named 'my_map_field' in messages named 'MyMessageType', regardless of
-    /// // package or nesting.
-    /// config.btree_map(&["MyMessageType.my_map_field"]);
-    ///
-    /// // Match all fields named 'my_map_field', and all fields in the 'foo.bar' package.
-    /// config.btree_map(&["my_map_field", ".foo.bar"]);
-    /// ```
-    ///
-    /// [1]: https://doc.rust-lang.org/std/collections/struct.BTreeMap.html
-    /// [2]: https://developers.google.com/protocol-buffers/docs/proto3#maps
-    /// [3]: https://doc.rust-lang.org/std/collections/struct.HashMap.html
-    pub fn btree_map<I, S>(&mut self, paths: I) -> &mut Self
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        self.map_type.clear();
-        for matcher in paths {
-            self.map_type
-                .insert(matcher.as_ref().to_string(), MapType::BTreeMap);
-        }
-        self
-    }
-
-    /// Configure the code generator to generate Rust type fields for Protobuf [`bytes`][2] type fields.
-    ///
-    /// # Arguments
-    ///
-    /// **`paths`** - paths to specific fields, messages, or packages which should use a Rust
-    /// `Bytes` for Protobuf `bytes` fields. Paths are specified in terms of the Protobuf type
-    /// name (not the generated Rust type name). Paths with a leading `.` are treated as fully
-    /// qualified names. Paths without a leading `.` are treated as relative, and are suffix
-    /// matched on the fully qualified field name. If a Protobuf map field matches any of the
-    /// paths, a Rust `Bytes` field is generated instead of the default [`Vec<u8>`][3].
-    ///
-    /// The matching is done on the Protobuf names, before converting to Rust-friendly casing
-    /// standards.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// # let mut config = prost_build::Config::new();
-    /// // Match a specific field in a message type.
-    /// config.bytes(&[".my_messages.MyMessageType.my_bytes_field"]);
-    ///
-    /// // Match all bytes fields in a message type.
-    /// config.bytes(&[".my_messages.MyMessageType"]);
-    ///
-    /// // Match all bytes fields in a package.
-    /// config.bytes(&[".my_messages"]);
-    ///
-    /// // Match all bytes fields. Specially useful in `no_std` contexts.
-    /// config.bytes(&["."]);
-    ///
-    /// // Match all bytes fields in a nested message.
-    /// config.bytes(&[".my_messages.MyMessageType.MyNestedMessageType"]);
+    /// // Match all fields in a package.
+    /// config.map_field_type(&[".my_messages"], "MyCustomType");
     ///
     /// // Match all fields named 'my_bytes_field'.
-    /// config.bytes(&["my_bytes_field"]);
+    /// config.map_field_type(&["my_bytes_field"], "Bytes");
     ///
     /// // Match all fields named 'my_bytes_field' in messages named 'MyMessageType', regardless of
     /// // package or nesting.
-    /// config.bytes(&["MyMessageType.my_bytes_field"]);
+    /// config.map_field_type(&["MyMessageType.my_bytes_field"], "Bytes");
     ///
     /// // Match all fields named 'my_bytes_field', and all fields in the 'foo.bar' package.
-    /// config.bytes(&["my_bytes_field", ".foo.bar"]);
+    /// config.map_field_type(&["my_field", "::foo::bar::CustomType"]);
     /// ```
-    ///
-    /// [1]: https://docs.rs/bytes/latest/bytes/struct.Bytes.html
-    /// [2]: https://developers.google.com/protocol-buffers/docs/proto3#scalar
-    /// [3]: https://doc.rust-lang.org/std/vec/struct.Vec.html
-    pub fn bytes<I, S>(&mut self, paths: I, tp: &str) -> &mut Self
+    pub fn map_field_type<I, S>(&mut self, paths: I, tp: &str) -> &mut Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let mut bytes_type = PathMap::default();
         for matcher in paths {
-            bytes_type.insert(
-                matcher.as_ref().to_string(),
-                BytesType::Custom(tp.to_string()),
-            );
+            self.types_map
+                .insert(matcher.as_ref().to_string(), tp.to_string());
         }
-        self.bytes_type.push(bytes_type);
-        self
-    }
-
-    pub fn string<I, S>(&mut self, paths: I, tp: &str) -> &mut Self
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let mut strings_type = PathMap::default();
-        for matcher in paths {
-            strings_type.insert(
-                matcher.as_ref().to_string(),
-                StringType::Custom(tp.to_string()),
-            );
-        }
-        self.strings_type.push(strings_type);
         self
     }
 
@@ -1047,7 +903,7 @@ impl Config {
             let buf = modules.entry(request.0).or_insert_with(String::new);
             buf.insert_str(
                 0,
-                "#![allow(dead_code, clippy::identity_op, clippy::derivable_impls)]\n/// DO NOT MODIFY. Auto-generated file\n\n",
+                "#![allow(dead_code, unused_mut, unused_variables, clippy::identity_op, clippy::derivable_impls)]\n/// DO NOT MODIFY. Auto-generated file\n\n",
             );
             CodeGenerator::generate(self, &message_graph, &extern_paths, request.1, buf);
         }
@@ -1068,9 +924,7 @@ impl default::Default for Config {
         Config {
             file_descriptor_set_path: None,
             service_generator: None,
-            map_type: PathMap::default(),
-            bytes_type: Vec::default(),
-            strings_type: Vec::default(),
+            types_map: PathMap::default(),
             type_attributes: PathMap::default(),
             field_attributes: PathMap::default(),
             prost_types: true,
@@ -1091,8 +945,7 @@ impl fmt::Debug for Config {
         fmt.debug_struct("Config")
             .field("file_descriptor_set_path", &self.file_descriptor_set_path)
             .field("service_generator", &self.service_generator.is_some())
-            .field("map_type", &self.map_type)
-            .field("bytes_type", &self.bytes_type)
+            .field("types_map", &self.types_map)
             .field("type_attributes", &self.type_attributes)
             .field("field_attributes", &self.field_attributes)
             .field("prost_types", &self.prost_types)
@@ -1153,7 +1006,9 @@ impl Module {
             self.components.join(".")
         };
 
-        root.push_str(".rs");
+        if !root.ends_with(".rs") {
+            root.push_str(".rs");
+        }
 
         root
     }

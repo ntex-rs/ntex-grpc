@@ -21,6 +21,8 @@ pub mod encoding;
 pub use self::encoding::WireType;
 #[doc(hidden)]
 pub use ntex_bytes::{ByteString, Bytes, BytesMut};
+#[doc(hidden)]
+pub use ntex_util::HashMap;
 
 // [1]: https://github.com/serde-rs/serde/blob/v1.0.89/serde/src/lib.rs#L245-L256
 #[allow(unused_imports)]

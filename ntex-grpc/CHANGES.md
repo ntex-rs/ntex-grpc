@@ -1,5 +1,9 @@
 # Changes
 
+## [0.1.1] - 2022-07-08
+
+* Export custom HashMap type for auto-gen code
+
 ## [0.1.0] - 2022-07-07
 
 * Initial release

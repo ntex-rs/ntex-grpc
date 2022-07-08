@@ -11,10 +11,8 @@ use prost_types::{
 };
 
 use crate::ast::{Comments, Method, Service};
-use crate::extern_paths::ExternPaths;
 use crate::ident::{to_snake, to_upper_camel};
-use crate::message_graph::MessageGraph;
-use crate::{BytesType, Config, MapType, StringType};
+use crate::{extern_paths::ExternPaths, message_graph::MessageGraph, Config};
 
 #[derive(PartialEq)]
 enum Syntax {
@@ -448,17 +446,17 @@ impl<'a> CodeGenerator<'a> {
 
         let map_type = self
             .config
-            .map_type
+            .types_map
             .get_first_field(fq_message_name, field.name())
-            .copied()
-            .unwrap_or_default();
+            .cloned()
+            .unwrap_or_else(|| "::ntex_grpc::HashMap".to_string());
 
         self.append_field_attributes(fq_message_name, field.name());
         self.push_indent();
         self.buf.push_str(&format!(
             "pub {}: {}<{}, {}>,\n",
             to_snake(field.name()),
-            map_type.rust_type(),
+            map_type,
             key_ty,
             value_ty
         ));
@@ -908,31 +906,17 @@ impl<'a> CodeGenerator<'a> {
     }
 
     fn resolve_type(&self, field: &FieldDescriptorProto, fq_message_name: &str) -> String {
-        match field.r#type() {
-            Type::Float => String::from("f32"),
-            Type::Double => String::from("f64"),
-            Type::Uint32 | Type::Fixed32 => String::from("u32"),
-            Type::Uint64 | Type::Fixed64 => String::from("u64"),
-            Type::Int32 | Type::Sfixed32 | Type::Sint32 => String::from("i32"),
-            Type::Int64 | Type::Sfixed64 | Type::Sint64 => String::from("i64"),
-            Type::Bool => String::from("bool"),
-            Type::String => {
-                for strings_type in &self.config.strings_type {
-                    if let Some(tp) = strings_type.get_first_field(fq_message_name, field.name()) {
-                        return tp.clone().rust_type().to_owned();
-                    }
-                }
-                StringType::String.rust_type().to_owned()
+        if let Some(tp) = self
+            .config
+            .types_map
+            .get_first_field(fq_message_name, field.name())
+        {
+            tp.clone()
+        } else {
+            match field.r#type() {
+                Type::Group | Type::Message | Type::Enum => self.resolve_ident(field.type_name()),
+                _ => to_rust_type(field.r#type()),
             }
-            Type::Bytes => {
-                for bytes_type in &self.config.bytes_type {
-                    if let Some(tp) = bytes_type.get_first_field(fq_message_name, field.name()) {
-                        return tp.clone().rust_type().to_owned();
-                    }
-                }
-                BytesType::Bytes.rust_type().to_owned()
-            }
-            Type::Group | Type::Message | Type::Enum => self.resolve_ident(field.type_name()),
         }
     }
 
@@ -1057,33 +1041,19 @@ fn build_enum_value_mappings<'a>(
     mappings
 }
 
-impl MapType {
-    /// The fully-qualified Rust type corresponding to the map type.
-    fn rust_type(&self) -> &'static str {
-        match self {
-            MapType::HashMap => "std::collections::HashMap",
-            MapType::BTreeMap => "std::collections::BTreeMap",
-        }
-    }
-}
+fn to_rust_type(tp: Type) -> String {
+    match tp {
+        Type::Double => String::from("f64"),
+        Type::Float => String::from("f32"),
+        Type::Uint32 | Type::Fixed32 => String::from("u32"),
+        Type::Uint64 | Type::Fixed64 => String::from("u64"),
+        Type::Int32 | Type::Sfixed32 | Type::Sint32 => String::from("i32"),
+        Type::Int64 | Type::Sfixed64 | Type::Sint64 => String::from("i64"),
+        Type::Bool => String::from("bool"),
+        Type::String => String::from("::ntex_grpc::ByteString"),
+        Type::Bytes => String::from("::ntex_grpc::Bytes"),
 
-impl BytesType {
-    /// The fully-qualified Rust type corresponding to the bytes type.
-    fn rust_type(&self) -> &str {
-        match self {
-            BytesType::Bytes => "::ntex_grpc::Bytes",
-            BytesType::Custom(s) => s,
-        }
-    }
-}
-
-impl StringType {
-    /// The fully-qualified Rust type corresponding to the string type.
-    fn rust_type(&self) -> &str {
-        match self {
-            StringType::String => "::ntex_grpc::ByteString",
-            StringType::Custom(s) => s,
-        }
+        Type::Group | Type::Message | Type::Enum => panic!("Unsupported"),
     }
 }
 

@@ -1,4 +1,10 @@
-#![allow(dead_code, clippy::identity_op, clippy::derivable_impls)]
+#![allow(
+    dead_code,
+    unused_mut,
+    unused_variables,
+    clippy::identity_op,
+    clippy::derivable_impls
+)]
 /// DO NOT MODIFY. Auto-generated file
 
 ///  The request message containing the user's name.

@@ -1,6 +1,6 @@
 [package]
 name = "ntex-prost-build"
-version = "0.10.5"
+version = "0.10.6"
 authors = [
     "Dan Burkert <dan@danburkert.com>",
     "Tokio Contributors <team@tokio.rs>",

@@ -19,7 +19,7 @@ struct Args {
 
     /// Paths to generated .rs file
     #[clap(value_parser, name = "OUT")]
-    out: path::PathBuf,
+    out: String,
 
     /// Configures the output directory where generated Rust files will be written.
     #[clap(short, long, value_parser, name = "OUT-DIR")]
@@ -50,12 +50,13 @@ fn main() -> io::Result<()> {
 
     for map in args.map {
         if let Some((s1, s2)) = map.split_once('=') {
-            cfg.map_bytes(s1, s2);
-            cfg.map_string(s1, s2);
+            cfg.map_field_type(s1, s2);
         } else {
             println!("Cannot parse type mapping: {:?}", map);
         }
     }
+
+    cfg.default_package_filename(args.out.clone());
 
     if let Err(e) = cfg.compile_protos(&args.proto, &args.include_dir) {
         println!("{}", e);
@@ -65,7 +66,7 @@ fn main() -> io::Result<()> {
             out_dir.push(args.out);
             out_dir.canonicalize().unwrap_or(out_dir)
         } else {
-            args.out.canonicalize().unwrap_or(args.out)
+            args.out.into()
         };
 
         println!(

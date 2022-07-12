@@ -1,10 +1,10 @@
 use std::{cell::RefCell, convert::TryFrom, future::Future, rc::Rc, str::FromStr};
 
 use async_trait::async_trait;
-use ntex_bytes::{Buf, BufMut, Bytes, BytesMut};
+use ntex_bytes::{Buf, BufMut, ByteString, Bytes, BytesMut};
 use ntex_connect::{Address, Connect, ConnectError, Connector as DefaultConnector};
 use ntex_h2::{self as h2, client, frame::StreamId, Stream};
-use ntex_http::{header, HeaderMap, Method};
+use ntex_http::{header, HeaderMap, Method, StatusCode};
 use ntex_io::{IoBoxed, OnDisconnect};
 use ntex_service::{fn_service, Service};
 use ntex_util::{channel::oneshot, future::Ready, HashMap};
@@ -29,8 +29,9 @@ struct Inner {
 struct Inflight {
     _stream: Stream,
     data: Data,
+    status: Option<StatusCode>,
     headers: Option<HeaderMap>,
-    tx: oneshot::Sender<Result<(Bytes, HeaderMap, HeaderMap), ServiceError>>,
+    tx: oneshot::Sender<Result<(Option<StatusCode>, Bytes, HeaderMap, HeaderMap), ServiceError>>,
 }
 
 impl Client {
@@ -50,6 +51,12 @@ impl Client {
     /// Notify when connection get closed
     pub fn on_disconnect(&self) -> OnDisconnect {
         self.0.client.on_disconnect()
+    }
+
+    #[inline]
+    /// Get reference to h2 client
+    pub fn get_ref(&self) -> &client::Client {
+        &self.0.client
     }
 }
 
@@ -74,21 +81,31 @@ impl<T: MethodDef> Transport<T> for Client {
             .client
             .send_request(Method::POST, T::PATH, hdrs, false)
             .await?;
-        stream.send_payload(buf.freeze(), true).await?;
 
+        let s_ref = (&*stream).clone();
         let (tx, rx) = oneshot::channel();
         self.0.inflight.borrow_mut().insert(
             stream.id(),
             Inflight {
                 tx,
                 _stream: stream,
+                status: None,
                 headers: None,
                 data: Data::Empty,
             },
         );
+        s_ref.send_payload(buf.freeze(), true).await?;
 
         match rx.await {
-            Ok(Ok((mut data, headers, trailers))) => {
+            Ok(Ok((status, mut data, headers, trailers))) => {
+                match status {
+                    Some(st) => {
+                        if !st.is_success() {
+                            return Err(ServiceError::Response(Some(st), headers, data));
+                        }
+                    }
+                    None => return Err(ServiceError::Response(None, headers, data)),
+                }
                 let _compressed = data.get_u8();
                 let len = data.get_u32();
                 match <T::Output as Message>::read(&mut data.split_to(len as usize)) {
@@ -118,31 +135,16 @@ impl Inner {
                     pseudo,
                     eof,
                 } => {
-                    if let Some(status) = pseudo.status {
-                        if eof {
-                            let _ = inner
-                                .remove(&id)
-                                .unwrap()
-                                .tx
-                                .send(Err(ServiceError::UnexpectedEof(status, headers)));
-                            return Err(());
-                        } else if !status.is_success() {
-                            let _ = inner
-                                .remove(&id)
-                                .unwrap()
-                                .tx
-                                .send(Err(ServiceError::Response(status, headers)));
-                            return Err(());
-                        } else {
-                            inflight.headers = Some(headers);
-                        }
-                    } else {
+                    if eof {
                         let _ = inner
                             .remove(&id)
                             .unwrap()
                             .tx
-                            .send(Err(ServiceError::UnknownResponseStatus(headers)));
+                            .send(Err(ServiceError::UnexpectedEof(pseudo.status, headers)));
                         return Err(());
+                    } else {
+                        inflight.status = pseudo.status;
+                        inflight.headers = Some(headers);
                     }
                 }
                 h2::MessageKind::Data(data, _cap) => {
@@ -156,6 +158,7 @@ impl Inner {
                         h2::StreamEof::Data(data) => {
                             inflight.data.push(data);
                             Ok((
+                                inflight.status,
                                 inflight.data.get(),
                                 inflight.headers.unwrap_or_default(),
                                 HeaderMap::default(),
@@ -184,6 +187,7 @@ impl Inner {
                             }
 
                             Ok((
+                                inflight.status,
                                 inflight.data.get(),
                                 inflight.headers.unwrap_or_default(),
                                 hdrs,
@@ -192,6 +196,13 @@ impl Inner {
                         h2::StreamEof::Error(err) => Err(ServiceError::Stream(err)),
                     };
                     let _ = tx.send(result);
+                }
+                h2::MessageKind::Disconnect(err) => {
+                    let _ = inner
+                        .remove(&id)
+                        .unwrap()
+                        .tx
+                        .send(Err(ServiceError::Operation(err)));
                 }
                 h2::MessageKind::Empty => {
                     inner.remove(&id);
@@ -262,9 +273,13 @@ where
     /// Connect to http2 server
     pub fn connect(&self, address: A) -> impl Future<Output = Result<Client, ClientError>> {
         let slf = self.0.clone();
+        let host = ByteString::from(address.host());
         async move {
             let con = slf.connect(address).await?;
-            let client = con.client();
+            let mut client = con.client();
+            client.set_scheme(ntex_http::uri::Scheme::HTTPS);
+            client.set_authority(host);
+
             let inner = Rc::new(Inner {
                 client,
                 inflight: RefCell::new(HashMap::default()),

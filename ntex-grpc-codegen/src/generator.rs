@@ -19,7 +19,11 @@ impl ServiceGenerator for GrpcServiceGenerator {
 fn generate_client(service: &Service, buf: &mut String) {
     let service_ident = service.name.to_string();
     let client_ident = format!("{}Client", service.name);
-    let service_name = format!("{}.{}", service.package, service.proto_name);
+    let service_name = if service.package.is_empty() {
+        format!("{}", service.proto_name)
+    } else {
+        format!("{}.{}", service.package, service.proto_name)
+    };
     let service_methods_name = format!("{}Methods", service.name);
 
     let service_methods: Vec<_> = service
@@ -145,10 +149,14 @@ fn generate_client(service: &Service, buf: &mut String) {
 
 fn gen_method(method: &Method, service: &Service) -> String {
     let proto_name = &method.proto_name;
-    let path = format!(
-        "/{}.{}/{}",
-        service.package, service.proto_name, method.proto_name
-    );
+    let path = if service.package.is_empty() {
+        format!("/{}/{}", service.proto_name, method.proto_name)
+    } else {
+        format!(
+            "/{}.{}/{}",
+            service.package, service.proto_name, method.proto_name
+        )
+    };
 
     let service_ident = format!("{}Client", service.name);
     let method_ident = method.name.to_string();

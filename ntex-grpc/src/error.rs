@@ -1,4 +1,4 @@
-use ntex_bytes::ByteString;
+use ntex_bytes::{ByteString, Bytes};
 use ntex_h2::{OperationError, StreamError};
 use ntex_http::{HeaderMap, StatusCode};
 
@@ -15,12 +15,10 @@ pub enum ServiceError {
     Operation(#[from] OperationError),
     #[error("Http stream error: {0}")]
     Stream(#[from] StreamError),
-    #[error("Http response {0}, headers: {1:?}")]
-    Response(StatusCode, HeaderMap),
-    #[error("Unknown response status, headers: {0:?}")]
-    UnknownResponseStatus(HeaderMap),
-    #[error("Got eof without payload with {0}, headers: {1:?}")]
-    UnexpectedEof(StatusCode, HeaderMap),
+    #[error("Http response {0:?}, headers: {1:?}, body: {2:?}")]
+    Response(Option<StatusCode>, HeaderMap, Bytes),
+    #[error("Got eof without payload with {0:?}, headers: {1:?}")]
+    UnexpectedEof(Option<StatusCode>, HeaderMap),
     #[error("Grpc status {0:?}, headers: {1:?}")]
     GrpcStatus(GrpcStatus, HeaderMap),
 }

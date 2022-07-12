@@ -340,7 +340,7 @@ where
                     Ok(())
                 }));
             }
-            h2::MessageKind::Empty => {
+            h2::MessageKind::Disconnect(_) | h2::MessageKind::Empty => {
                 streams.remove(&id);
             }
         }

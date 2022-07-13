@@ -1,7 +1,7 @@
 use std::{cell::RefCell, convert::TryFrom, future::Future, rc::Rc, str::FromStr};
 
 use async_trait::async_trait;
-use ntex_bytes::{Buf, BufMut, ByteString, Bytes, BytesMut};
+use ntex_bytes::{Buf, BufMut, Bytes, BytesMut};
 use ntex_connect::{Address, Connect, ConnectError, Connector as DefaultConnector};
 use ntex_h2::{self as h2, client, frame::StreamId, Stream};
 use ntex_http::{header, HeaderMap, Method, StatusCode};
@@ -20,6 +20,15 @@ pub enum ClientError {
 
 #[derive(Clone)]
 pub struct Client(Rc<Inner>);
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        // one for current client and one for Client::start() call
+        if Rc::strong_count(&self.0) <= 2 {
+            self.0.client.close()
+        }
+    }
+}
 
 struct Inner {
     client: client::Client,
@@ -273,15 +282,10 @@ where
     /// Connect to http2 server
     pub fn connect(&self, address: A) -> impl Future<Output = Result<Client, ClientError>> {
         let slf = self.0.clone();
-        let host = ByteString::from(address.host());
         async move {
             let con = slf.connect(address).await?;
-            let mut client = con.client();
-            client.set_scheme(ntex_http::uri::Scheme::HTTPS);
-            client.set_authority(host);
-
             let inner = Rc::new(Inner {
-                client,
+                client: con.client(),
                 inflight: RefCell::new(HashMap::default()),
             });
 

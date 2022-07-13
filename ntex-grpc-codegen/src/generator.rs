@@ -20,7 +20,7 @@ fn generate_client(service: &Service, buf: &mut String) {
     let service_ident = service.name.to_string();
     let client_ident = format!("{}Client", service.name);
     let service_name = if service.package.is_empty() {
-        format!("{}", service.proto_name)
+        service.proto_name.to_string()
     } else {
         format!("{}.{}", service.package, service.proto_name)
     };

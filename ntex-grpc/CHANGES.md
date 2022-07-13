@@ -1,5 +1,9 @@
 # Changes
 
+## [0.1.3] - 2022-07-13
+
+* Disconnect on client drop
+
 ## [0.1.2] - 2022-07-12
 
 * Better client error handling

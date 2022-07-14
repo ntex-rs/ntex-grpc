@@ -103,11 +103,13 @@ impl<T: ::ntex_grpc::Transport<GreeterSayHelloMethod>> GreeterClient<T> {
 }
 
 impl ::ntex_grpc::Message for HelloRequest {
+    #[inline]
     fn write(&self, dst: &mut ::ntex_grpc::BytesMut) {
         ::ntex_grpc::NativeType::serialize(&self.name, 1, None, dst);
         ::ntex_grpc::NativeType::serialize(&self.msg_id, 2, None, dst);
     }
 
+    #[inline]
     fn read(
         src: &mut ::ntex_grpc::Bytes,
     ) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {
@@ -143,10 +145,12 @@ impl ::std::default::Default for HelloRequest {
 }
 
 impl ::ntex_grpc::Message for HelloReply {
+    #[inline]
     fn write(&self, dst: &mut ::ntex_grpc::BytesMut) {
         ::ntex_grpc::NativeType::serialize(&self.message, 1, None, dst);
     }
 
+    #[inline]
     fn read(
         src: &mut ::ntex_grpc::Bytes,
     ) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {

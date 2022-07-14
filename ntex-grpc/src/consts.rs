@@ -7,3 +7,8 @@ pub(crate) const HDRV_TRAILERS: HeaderValue = HeaderValue::from_static("trailers
 
 pub const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
 pub const GRPC_MESSAGE: HeaderName = HeaderName::from_static("grpc-message");
+
+pub(crate) const GRPC_ENCODING: HeaderName = HeaderName::from_static("grpc-encoding");
+pub(crate) const GRPC_ACCEPT_ENCODING: HeaderName =
+    HeaderName::from_static("grpc-accept-encoding");
+pub(crate) const IDENTITY: HeaderValue = HeaderValue::from_static("identity");

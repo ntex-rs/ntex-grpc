@@ -84,6 +84,8 @@ impl<T: MethodDef> Transport<T> for Client {
         hdrs.append(header::CONTENT_TYPE, consts::HDRV_CT_GRPC);
         hdrs.append(header::USER_AGENT, consts::HDRV_USER_AGENT);
         hdrs.insert(header::TE, consts::HDRV_TRAILERS);
+        hdrs.insert(consts::GRPC_ENCODING, consts::IDENTITY);
+        hdrs.insert(consts::GRPC_ACCEPT_ENCODING, consts::IDENTITY);
 
         let stream = self
             .0

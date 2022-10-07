@@ -1,5 +1,9 @@
 # Changes
 
+## [0.1.6] - 2022-10-07
+
+* Fix service name generation for empty package
+
 ## [0.1.5] - 2022-07-08
 
 * Allow to replace any protobuf field with custom rust type

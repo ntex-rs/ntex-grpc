@@ -182,7 +182,8 @@ impl<'a> CodeGenerator<'a> {
         self.append_doc(&fq_message_name, None);
         self.append_type_attributes(&fq_message_name);
         self.push_indent();
-        self.buf.push_str("#[derive(Clone, PartialEq, Debug)]\n");
+        self.buf
+            .push_str("#[derive(Clone, PartialEq, Eq, Debug)]\n");
         self.push_indent();
         self.buf.push_str("pub struct ");
         self.buf.push_str(&to_upper_camel(&message_name));
@@ -518,7 +519,8 @@ impl<'a> CodeGenerator<'a> {
         let oneof_name = format!("{}.{}", fq_message_name, oneof.name());
         self.append_type_attributes(&oneof_name);
         self.push_indent();
-        self.buf.push_str("#[derive(Clone, PartialEq, Debug)]\n");
+        self.buf
+            .push_str("#[derive(Clone, PartialEq, Eq, Debug)]\n");
         self.push_indent();
         self.buf.push_str("pub enum ");
         self.buf.push_str(&to_upper_camel(oneof.name()));

@@ -736,11 +736,11 @@ impl Config {
             }
 
             let output = cmd.output().map_err(|error| {
-            Error::new(
-                error.kind(),
-                format!("failed to invoke protoc (hint: https://docs.rs/prost-build/#sourcing-protoc): {}", error),
-            )
-        })?;
+                Error::new(
+                    error.kind(),
+                    format!("failed to invoke protoc (hint: https://docs.rs/prost-build/#sourcing-protoc): {}", error),
+                )
+            })?;
 
             if !output.status.success() {
                 return Err(Error::new(
@@ -903,7 +903,7 @@ impl Config {
             let buf = modules.entry(request.0).or_insert_with(String::new);
             buf.insert_str(
                 0,
-                "#![allow(dead_code, unused_mut, unused_variables, clippy::identity_op, clippy::derivable_impls)]\n/// DO NOT MODIFY. Auto-generated file\n\n",
+                "#![allow(dead_code, unused_mut, unused_variables, clippy::identity_op, clippy::derivable_impls, clippy::unit_arg)]\n/// DO NOT MODIFY. Auto-generated file\n\n",
             );
             CodeGenerator::generate(self, &message_graph, &extern_paths, request.1, buf);
         }

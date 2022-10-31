@@ -118,6 +118,17 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
     }
 }
 
+/// Protobuf struct read/write operations
+impl Message for () {
+    fn read(_: &mut Bytes) -> Result<Self, DecodeError> {
+        Ok(())
+    }
+    fn write(&self, _: &mut BytesMut) {}
+    fn encoded_len(&self) -> usize {
+        0
+    }
+}
+
 impl<T: Message + PartialEq> NativeType for T {
     const TYPE: WireType = WireType::LengthDelimited;
 

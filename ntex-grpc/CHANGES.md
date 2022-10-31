@@ -1,5 +1,9 @@
 # Changes
 
+## [0.1.4] - 2022-10-31
+
+* Add Message impl for ()
+
 ## [0.1.3] - 2022-07-13
 
 * Disconnect on client drop

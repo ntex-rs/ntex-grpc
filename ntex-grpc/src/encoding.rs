@@ -7,7 +7,7 @@ use ntex_bytes::{Buf, BufMut, Bytes, BytesMut};
 pub const MIN_TAG: u32 = 1;
 pub const MAX_TAG: u32 = (1 << 29) - 1;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(u8)]
 pub enum WireType {
     Varint = 0,

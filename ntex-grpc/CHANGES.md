@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.0-b.0] - 2022-11-01
+
+* Add request context for client calls
+
 ## [0.1.4] - 2022-10-31
 
 * Add Message impl for ()

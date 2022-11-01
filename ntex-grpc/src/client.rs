@@ -9,8 +9,9 @@ use ntex_io::{IoBoxed, OnDisconnect};
 use ntex_service::{fn_service, Service};
 use ntex_util::{channel::oneshot, future::Ready, HashMap};
 
+use crate::request::{RequestContext, Response};
 use crate::service::{ClientInformation, MethodDef, Transport};
-use crate::{consts, utils::Data, DecodeError, GrpcStatus, Message, Response, ServiceError};
+use crate::{consts, utils::Data, DecodeError, GrpcStatus, Message, ServiceError};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ClientError {
@@ -73,7 +74,11 @@ impl Client {
 impl<T: MethodDef> Transport<T> for Client {
     type Error = ServiceError;
 
-    async fn request(&self, val: &T::Input) -> Result<Response<T>, Self::Error> {
+    async fn request(
+        &self,
+        val: &T::Input,
+        ctx: RequestContext,
+    ) -> Result<Response<T>, Self::Error> {
         let len = val.encoded_len();
         let mut buf = BytesMut::with_capacity(len + 5);
         buf.put_u8(0); // compression
@@ -86,6 +91,9 @@ impl<T: MethodDef> Transport<T> for Client {
         hdrs.insert(header::TE, consts::HDRV_TRAILERS);
         hdrs.insert(consts::GRPC_ENCODING, consts::IDENTITY);
         hdrs.insert(consts::GRPC_ACCEPT_ENCODING, consts::IDENTITY);
+        for (key, val) in ctx.headers() {
+            hdrs.insert(key.clone(), val.clone())
+        }
 
         let stream = self
             .0
@@ -93,7 +101,7 @@ impl<T: MethodDef> Transport<T> for Client {
             .send_request(Method::POST, T::PATH, hdrs, false)
             .await?;
 
-        let s_ref = (&*stream).clone();
+        let s_ref = (*stream).clone();
         let (tx, rx) = oneshot::channel();
         self.0.inflight.borrow_mut().insert(
             stream.id(),

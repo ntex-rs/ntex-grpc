@@ -1,6 +1,6 @@
 [package]
 name = "ntex-grpc"
-version = "0.1.4"
+version = "0.2.0-b.0"
 license = "MIT"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 description = "GRPC Client/Server framework"
@@ -17,7 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 ntex-h2 = "0.1.4"
-ntex-http = "0.1"
+ntex-http = "0.1.2"
 ntex-connect = "0.1"
 ntex-io = "0.1"
 ntex-util = "0.1.17"

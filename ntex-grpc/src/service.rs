@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use ntex_bytes::{ByteString, Bytes, BytesMut};
 
-use crate::{error::DecodeError, request::Response, types::Message};
+use crate::request::{RequestContext, Response};
+use crate::{error::DecodeError, error::HttpError, types::Message};
 
 /// Trait for service method definition
 pub trait ServiceDef {
@@ -44,9 +45,13 @@ pub trait MethodDef {
 #[async_trait(?Send)]
 pub trait Transport<T: MethodDef> {
     /// Errors produced by the service.
-    type Error;
+    type Error: From<HttpError>;
 
-    async fn request(&self, args: &T::Input) -> Result<Response<T>, Self::Error>;
+    async fn request(
+        &self,
+        args: &T::Input,
+        ctx: RequestContext,
+    ) -> Result<Response<T>, Self::Error>;
 }
 
 /// Client utils methods

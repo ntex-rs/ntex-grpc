@@ -243,11 +243,7 @@ impl<T: NativeType> NativeType for Option<T> {
 
     #[inline]
     fn is_default(&self) -> bool {
-        if let Some(ref inner) = self {
-            inner.is_default()
-        } else {
-            true
-        }
+        self.is_none()
     }
 
     #[inline]
@@ -496,7 +492,7 @@ macro_rules! varint {
 }
 
 varint!(bool, false,
-        to_uint64(self) if *self { 1u64 } else { 0u64 },
+        to_uint64(self) u64::from(*self),
         from_uint64(value) value != 0);
 varint!(i32, 0i32);
 varint!(i64, 0i64);

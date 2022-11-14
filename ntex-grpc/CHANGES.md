@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.0-b.1] - 2022-11-14
+
+* Fix default value for Option<T>, None is always default
+
 ## [0.2.0-b.0] - 2022-11-01
 
 * Add request context for client calls

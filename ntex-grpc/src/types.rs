@@ -17,6 +17,13 @@ pub trait Message: Default + Sized + fmt::Debug {
     fn encoded_len(&self) -> usize;
 }
 
+/// Default type value
+pub enum DefaultValue<T> {
+    Unknown,
+    Default,
+    Value(T),
+}
+
 /// Protobuf type serializer
 pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
     const TYPE: WireType;
@@ -57,12 +64,14 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
 
     #[inline]
     /// Serialize protobuf field
-    fn serialize(&self, tag: u32, default: Option<&Self>, dst: &mut BytesMut) {
-        let is_default = default
-            .map(|d| self == d)
-            .unwrap_or_else(|| self.is_default());
+    fn serialize(&self, tag: u32, default: DefaultValue<&Self>, dst: &mut BytesMut) {
+        let default = match default {
+            DefaultValue::Unknown => false,
+            DefaultValue::Default => self.is_default(),
+            DefaultValue::Value(d) => self == d,
+        };
 
-        if !is_default {
+        if !default {
             self.encode_type(tag, dst);
             self.encode_value(dst);
         }
@@ -70,12 +79,14 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
 
     #[inline]
     /// Protobuf field length
-    fn serialized_len(&self, tag: u32, default: Option<&Self>) -> usize {
-        let is_default = default
-            .map(|d| self == d)
-            .unwrap_or_else(|| self.is_default());
+    fn serialized_len(&self, tag: u32, default: DefaultValue<&Self>) -> usize {
+        let default = match default {
+            DefaultValue::Unknown => false,
+            DefaultValue::Default => self.is_default(),
+            DefaultValue::Value(d) => self == d,
+        };
 
-        if is_default {
+        if default {
             0
         } else {
             self.encoded_len(tag)
@@ -91,13 +102,16 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
         src: &mut Bytes,
     ) -> Result<(), DecodeError> {
         encoding::check_wire_type(Self::TYPE, wtype)?;
-
         if Self::TYPE == WireType::Varint {
             self.merge(src)
         } else {
             let len = encoding::decode_varint(src)? as usize;
             if len > src.len() {
-                Err(DecodeError::new("Not enough data"))
+                Err(DecodeError::new(format!(
+                    "Not enough data, message size {} buffer size {}",
+                    len,
+                    src.len()
+                )))
             } else {
                 let mut buf = src.split_to(len);
                 self.merge(&mut buf)
@@ -274,9 +288,19 @@ impl<T: NativeType> NativeType for Option<T> {
 
     #[inline]
     /// Serialize protobuf field
-    fn serialize(&self, tag: u32, _: Option<&Self>, dst: &mut BytesMut) {
+    fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytesMut) {
         if let Some(ref value) = self {
-            value.serialize(tag, None, dst);
+            value.serialize(tag, DefaultValue::Unknown, dst);
+        }
+    }
+
+    #[inline]
+    /// Protobuf field length
+    fn serialized_len(&self, tag: u32, _: DefaultValue<&Self>) -> usize {
+        if let Some(ref value) = self {
+            value.serialized_len(tag, DefaultValue::Unknown)
+        } else {
+            0
         }
     }
 
@@ -343,9 +367,9 @@ impl<T: NativeType> NativeType for Vec<T> {
     }
 
     /// Serialize protobuf field
-    fn serialize(&self, tag: u32, _: Option<&Self>, dst: &mut BytesMut) {
+    fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytesMut) {
         for item in self.iter() {
-            item.serialize(tag, None, dst);
+            item.serialize(tag, DefaultValue::Default, dst);
         }
     }
 
@@ -390,7 +414,11 @@ impl<K: NativeType + Eq + Hash, V: NativeType + Eq, S: BuildHasher + Default> Na
         encoding::check_wire_type(Self::TYPE, wtype)?;
         let len = encoding::decode_varint(src)? as usize;
         if len > src.len() {
-            Err(DecodeError::new("Not enough data"))
+            Err(DecodeError::new(format!(
+                "Not enough data for HashMap, message size {}, buf size {}",
+                len,
+                src.len()
+            )))
         } else {
             let mut buf = src.split_to(len);
             let mut key = Default::default();
@@ -410,13 +438,10 @@ impl<K: NativeType + Eq + Hash, V: NativeType + Eq, S: BuildHasher + Default> Na
     }
 
     /// Serialize protobuf field
-    fn serialize(&self, tag: u32, _: Option<&Self>, dst: &mut BytesMut) {
-        let key_default = K::default();
-        let val_default = V::default();
-
+    fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytesMut) {
         for item in self.iter() {
-            let skip_key = item.0 == &key_default;
-            let skip_val = item.1 == &val_default;
+            let skip_key = item.0.is_default();
+            let skip_val = item.1.is_default();
 
             let len = (if skip_key { 0 } else { item.0.encoded_len(1) })
                 + (if skip_val { 0 } else { item.1.encoded_len(2) });
@@ -424,10 +449,10 @@ impl<K: NativeType + Eq + Hash, V: NativeType + Eq, S: BuildHasher + Default> Na
             encoding::encode_key(tag, WireType::LengthDelimited, dst);
             encoding::encode_varint(len as u64, dst);
             if !skip_key {
-                item.0.serialize(1, None, dst);
+                item.0.serialize(1, DefaultValue::Default, dst);
             }
             if !skip_val {
-                item.1.serialize(1, None, dst);
+                item.1.serialize(2, DefaultValue::Default, dst);
             }
         }
     }

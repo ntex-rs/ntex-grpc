@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.0-b.0] - 2022-11-15
+
+* Generate code for ntex-grpc 0.2
+
 ## [0.1.6] - 2022-10-07
 
 * Fix service name generation for empty package

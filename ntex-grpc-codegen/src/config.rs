@@ -23,7 +23,7 @@ impl NGrpcGenerator {
 
     /// Map protobuf type to custom rust type
     pub fn map_field_type(&mut self, path: &str, rust_type: &str) {
-        let _ = self.pconfig.map_field_type(&[path], rust_type);
+        let _ = self.pconfig.map_field_type([path], rust_type);
     }
 
     /// Compile `.proto` files into Rust files during a Cargo build with additional code generator

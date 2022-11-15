@@ -1,7 +1,7 @@
 use ntex::util::{Bytes, BytesMut};
 use uuid::Uuid;
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct UniqueId(Uuid);
 
 impl UniqueId {

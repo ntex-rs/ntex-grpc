@@ -9,7 +9,7 @@ path = "src/client.rs"
 
 [dependencies]
 ntex = "0.5"
-ntex-grpc = "0.1.0"
+ntex-grpc = "0.2.0-b.2"
 
 async-trait = "0.1.0"
 clap = "3.2"

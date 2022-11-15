@@ -206,7 +206,7 @@ impl<'a> CodeGenerator<'a> {
 
             has_fields = true;
             write.push_str(&format!(
-                "::ntex_grpc::NativeType::serialize(&self.{}, {}, None, dst);",
+                "::ntex_grpc::NativeType::serialize(&self.{}, {}, ::ntex_grpc::DefaultValue::Default, dst);",
                 to_snake(field.name()),
                 field.number()
             ));
@@ -218,7 +218,7 @@ impl<'a> CodeGenerator<'a> {
                 to_snake(field.name()),
             ));
             encoded_len.push_str(&format!(
-                " + ::ntex_grpc::NativeType::serialized_len(&self.{}, {}, None)",
+                " + ::ntex_grpc::NativeType::serialized_len(&self.{}, {}, ::ntex_grpc::DefaultValue::Default)",
                 to_snake(field.name()),
                 field.number()
             ));
@@ -253,7 +253,7 @@ impl<'a> CodeGenerator<'a> {
 
             has_fields = true;
             write.push_str(&format!(
-                "::ntex_grpc::NativeType::serialize(&self.{}, 0, None, dst);",
+                "::ntex_grpc::NativeType::serialize(&self.{}, 0, ::ntex_grpc::DefaultValue::Default, dst);",
                 to_snake(oneof.name()),
             ));
             read.push_str(&format!(
@@ -268,7 +268,7 @@ impl<'a> CodeGenerator<'a> {
                 to_snake(oneof.name()),
             ));
             encoded_len.push_str(&format!(
-                " + ::ntex_grpc::NativeType::serialized_len(&self.{}, 0, None)",
+                " + ::ntex_grpc::NativeType::serialized_len(&self.{}, 0, ::ntex_grpc::DefaultValue::Default)",
                 to_snake(oneof.name()),
             ));
             default.push_str(&format!(
@@ -536,7 +536,7 @@ impl<'a> CodeGenerator<'a> {
             let type_ = field.r#type();
 
             write.push_str(&format!(
-                "{}::{}(ref value) => ::ntex_grpc::NativeType::serialize(value, {}, None, dst),",
+                "{}::{}(ref value) => ::ntex_grpc::NativeType::serialize(value, {}, ::ntex_grpc::DefaultValue::Default, dst),",
                 to_upper_camel(oneof.name()),
                 to_upper_camel(field.name()),
                 field.number()
@@ -549,7 +549,7 @@ impl<'a> CodeGenerator<'a> {
                 field.number(),
             ));
             encoded_len.push_str(&format!(
-                "{}::{}(ref value) => ::ntex_grpc::NativeType::serialized_len(value, {}, None),",
+                "{}::{}(ref value) => ::ntex_grpc::NativeType::serialized_len(value, {}, ::ntex_grpc::DefaultValue::Default),",
                 to_upper_camel(oneof.name()),
                 to_upper_camel(field.name()),
                 field.number()
@@ -605,7 +605,7 @@ impl<'a> CodeGenerator<'a> {
         self.buf.push_str(&format!(
             "
             /// Encodes the message to a buffer.
-            fn serialize(&self, _: u32, _: Option<&Self>, dst: &mut ::ntex_grpc::BytesMut) {{
+            fn serialize(&self, _: u32, _: ::ntex_grpc::DefaultValue<&Self>, dst: &mut ::ntex_grpc::BytesMut) {{
                 match *self {{ {} }}
             }}",
             write
@@ -622,7 +622,7 @@ impl<'a> CodeGenerator<'a> {
         self.buf.push_str(&format!(
             "
             /// Returns the encoded length of the message without a length delimiter.
-            fn serialized_len(&self, _: u32, _: Option<&Self>) -> usize {{
+            fn serialized_len(&self, _: u32, _: ::ntex_grpc::DefaultValue<&Self>) -> usize {{
                 match *self {{
                     {}
                 }}

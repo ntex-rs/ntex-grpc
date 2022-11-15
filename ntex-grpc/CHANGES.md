@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.0-b.2] - 2022-11-15
+
+* Fix Option<T> encodinging
+
 ## [0.2.0-b.1] - 2022-11-14
 
 * Fix default value for Option<T>, None is always default

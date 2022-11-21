@@ -12,7 +12,7 @@ use prost_types::{
 
 use crate::ast::{Comments, Method, Service};
 use crate::ident::{to_snake, to_upper_camel};
-use crate::{extern_paths::ExternPaths, message_graph::MessageGraph, Config};
+use crate::{extern_paths::ExternPaths, Config};
 
 #[derive(PartialEq)]
 enum Syntax {
@@ -25,7 +25,6 @@ pub struct CodeGenerator<'a> {
     package: String,
     source_info: SourceCodeInfo,
     syntax: Syntax,
-    message_graph: &'a MessageGraph,
     extern_paths: &'a ExternPaths,
     depth: u8,
     path: Vec<i32>,
@@ -41,7 +40,6 @@ fn push_indent(buf: &mut String, depth: u8) {
 impl<'a> CodeGenerator<'a> {
     pub fn generate(
         config: &mut Config,
-        message_graph: &MessageGraph,
         extern_paths: &ExternPaths,
         file: FileDescriptorProto,
         buf: &mut String,
@@ -68,7 +66,6 @@ impl<'a> CodeGenerator<'a> {
             package: file.package.unwrap_or_default(),
             source_info,
             syntax,
-            message_graph,
             extern_paths,
             depth: 0,
             path: Vec::new(),
@@ -277,7 +274,7 @@ impl<'a> CodeGenerator<'a> {
             ));
 
             self.path.push(idx);
-            self.append_oneof_field(&message_name, &fq_message_name, oneof, fields);
+            self.append_oneof_field(&message_name, &fq_message_name, oneof);
             self.path.pop();
         }
         self.path.pop();
@@ -403,18 +400,7 @@ impl<'a> CodeGenerator<'a> {
         let optional = self.optional(&field);
         let ty = self.resolve_type(&field, fq_message_name);
 
-        let boxed = !repeated
-            && (type_ == Type::Message || type_ == Type::Group)
-            && self
-                .message_graph
-                .is_nested(field.type_name(), fq_message_name);
-
-        debug!(
-            "    field: {:?}, type: {:?}, boxed: {}",
-            field.name(),
-            ty,
-            boxed
-        );
+        debug!("    field: {:?}, type: {:?}", field.name(), ty);
 
         self.append_doc(fq_message_name, Some(field.name()));
 
@@ -429,13 +415,7 @@ impl<'a> CodeGenerator<'a> {
         } else if optional {
             self.buf.push_str("Option<");
         }
-        if boxed {
-            self.buf.push_str("Box<");
-        }
         self.buf.push_str(&ty);
-        if boxed {
-            self.buf.push('>');
-        }
         if repeated || optional {
             self.buf.push('>');
         }
@@ -485,7 +465,6 @@ impl<'a> CodeGenerator<'a> {
         message_name: &str,
         fq_message_name: &str,
         oneof: &OneofDescriptorProto,
-        fields: &[(FieldDescriptorProto, usize)],
     ) {
         let name = format!(
             "{}::{}",
@@ -533,8 +512,6 @@ impl<'a> CodeGenerator<'a> {
         self.path.push(2);
         self.depth += 1;
         for (field, idx) in &fields {
-            let type_ = field.r#type();
-
             write.push_str(&format!(
                 "{}::{}(ref value) => ::ntex_grpc::NativeType::serialize(value, {}, ::ntex_grpc::DefaultValue::Default, dst),",
                 to_upper_camel(oneof.name()),
@@ -565,25 +542,10 @@ impl<'a> CodeGenerator<'a> {
             self.push_indent();
             let ty = self.resolve_type(field, fq_message_name);
 
-            let boxed = (type_ == Type::Message || type_ == Type::Group)
-                && self
-                    .message_graph
-                    .is_nested(field.type_name(), fq_message_name);
+            debug!("    oneof: {:?}, type: {:?}", field.name(), ty,);
 
-            debug!(
-                "    oneof: {:?}, type: {:?}, boxed: {}",
-                field.name(),
-                ty,
-                boxed
-            );
-
-            if boxed {
-                self.buf
-                    .push_str(&format!("{}(Box<{}>),\n", to_upper_camel(field.name()), ty));
-            } else {
-                self.buf
-                    .push_str(&format!("{}({}),\n", to_upper_camel(field.name()), ty));
-            }
+            self.buf
+                .push_str(&format!("{}({}),\n", to_upper_camel(field.name()), ty));
         }
         self.depth -= 1;
         self.path.pop();
@@ -983,7 +945,7 @@ impl<'a> CodeGenerator<'a> {
         }
 
         match field.r#type() {
-            Type::Message => true,
+            Type::Message => false,
             _ => self.syntax == Syntax::Proto2,
         }
     }

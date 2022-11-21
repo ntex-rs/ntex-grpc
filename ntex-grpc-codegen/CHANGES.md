@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.0-b.1] - 2022-11-21
+
+* Do not use Option for message fields if not explicitly set
+
 ## [0.2.0-b.0] - 2022-11-15
 
 * Generate code for ntex-grpc 0.2

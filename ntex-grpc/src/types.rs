@@ -1,6 +1,6 @@
 use std::{collections::HashMap, convert::TryFrom, fmt, hash::BuildHasher, hash::Hash, mem};
 
-pub use ntex_bytes::{ByteString, Bytes, BytesMut};
+use ntex_bytes::{ByteString, Bytes, BytesMut};
 
 pub use crate::encoding::WireType;
 use crate::encoding::{self, DecodeError};

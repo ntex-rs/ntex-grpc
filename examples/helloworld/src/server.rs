@@ -24,8 +24,8 @@ impl GreeterServer {
     }
 }
 
-impl ServiceFactory<server::Request> for GreeterServer {
-    type Response = server::Response;
+impl ServiceFactory<server::ServerRequest> for GreeterServer {
+    type Response = server::ServerResponse;
     type Error = server::ServerError;
     type InitError = ();
     type Service = GreeterServer;

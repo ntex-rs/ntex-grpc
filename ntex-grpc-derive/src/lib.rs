@@ -39,10 +39,19 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     for (m_name, fn_name, span) in srv.methods {
         methods.push(quote::quote_spanned! {span=>
             Some(#methods_path::#m_name(method)) => {
-                let input = method.decode(&mut req.payload)?;
-                let output = #ty::#fn_name(&slf, input).await;
-                method.encode(output, &mut buf);
-                Ok(())
+                let req = ::ntex_grpc::server::Request {
+                    message: method.decode(&mut req.payload)?,
+                    name: req.name,
+                    headers: req.headers
+                };
+
+                let result = #ty::#fn_name(&slf, ::ntex_grpc::server::FromRequest::from(req)).await;
+
+                let response = ::ntex_grpc::server::Response::from(result);
+                let mut buf = ::ntex_grpc::BytesMut::new();
+                method.encode(response.message, &mut buf);
+
+                Ok(::ntex_grpc::server::ServerResponse::with_headers(buf.freeze(), response.headers))
             }
         });
     }
@@ -51,8 +60,8 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         mod #modname {
             use super::*;
 
-            impl ::ntex_grpc::server::Service<::ntex_grpc::server::Request> for #ty {
-                type Response = ::ntex_grpc::server::Response;
+            impl ::ntex_grpc::Service<::ntex_grpc::server::ServerRequest> for #ty {
+                type Response = ::ntex_grpc::server::ServerResponse;
                 type Error = ::ntex_grpc::server::ServerError;
                 type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>>>>;
 
@@ -61,19 +70,16 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                     std::task::Poll::Ready(Ok(()))
                 }
 
-                fn call(&self, mut req: ::ntex_grpc::server::Request) -> Self::Future {
+                fn call(&self, mut req: ::ntex_grpc::server::ServerRequest) -> Self::Future {
                     use ::ntex_grpc::{ServiceDef, MethodDef};
 
                     let slf = self.clone();
                     Box::pin(async move {
-                        let mut buf = ::ntex_grpc::types::BytesMut::new();
-
                         match #srvpath::method_by_name(&req.name) {
                             #(#methods)*
                             Some(_) => Err(::ntex_grpc::server::ServerError::NotImplemented(req.name)),
                             None => Err(::ntex_grpc::server::ServerError::NotFound(req.name)),
-                        }?;
-                        Ok(::ntex_grpc::server::Response::new(buf.freeze()))
+                        }
                     })
                 }
             }

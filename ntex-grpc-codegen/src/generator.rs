@@ -75,20 +75,18 @@ fn generate_client(service: &Service, buf: &mut String) {
         impl ::ntex_grpc::ServiceDef for {} {{
             const NAME: &'static str = \"{}\";
             type Methods = {};
-        }}
 
-        pub enum {} {{
-            {}
-        }}
-
-        impl ::ntex_grpc::MethodsDef for {} {{
             #[inline]
-            fn by_name(name: &str) -> Option<Self> {{
+            fn method_by_name(name: &str) -> Option<Self::Methods> {{
                 use ::ntex_grpc::MethodDef;
                 match name {{
                     {}
                 }}
             }}
+        }}
+
+        pub enum {} {{
+            {}
         }}
 
         #[derive(Clone)]
@@ -103,7 +101,7 @@ fn generate_client(service: &Service, buf: &mut String) {
             }}
         }}
 
-        impl<T> ::ntex_grpc::ClientInformation<T> for {}<T> {{
+        impl<T> ::ntex_grpc::client::ClientInformation<T> for {}<T> {{
             #[inline]
             /// Create new client instance
             fn create(transport: T) -> Self {{
@@ -134,10 +132,9 @@ fn generate_client(service: &Service, buf: &mut String) {
         service_ident,
         service_name,
         service_methods_name,
+        service_methods_match,
         service_methods_name,
         service_methods,
-        service_methods_name,
-        service_methods_match,
         comments,
         client_ident,
         client_ident,
@@ -183,10 +180,10 @@ fn gen_method(method: &Method, service: &Service) -> String {
             type Output = {};
         }}
 
-        impl<T: ::ntex_grpc::Transport<{}>> {}<T> {{
+        impl<T: ::ntex_grpc::client::Transport<{}>> {}<T> {{
             {}
-            pub fn {}<'a>(&'a self, req: &'a {}) -> ::ntex_grpc::Request<'a, T, {}> {{
-                ::ntex_grpc::Request::new(&self.0, req)
+            pub fn {}<'a>(&'a self, req: &'a {}) -> ::ntex_grpc::client::Request<'a, T, {}> {{
+                ::ntex_grpc::client::Request::new(&self.0, req)
             }}
         }}",
         def_ident,

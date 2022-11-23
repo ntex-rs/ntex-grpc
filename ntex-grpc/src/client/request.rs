@@ -3,7 +3,8 @@ use std::{convert::TryFrom, fmt, future::Future, ops, pin::Pin, rc::Rc};
 
 use ntex_http::{error::Error as HttpError, HeaderMap, HeaderName, HeaderValue};
 
-use crate::service::{MethodDef, Transport};
+use crate::client::Transport;
+use crate::service::MethodDef;
 
 pub struct RequestContext(Rc<RequestContextInner>);
 

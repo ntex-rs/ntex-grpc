@@ -1,6 +1,5 @@
 mod consts;
 mod error;
-mod request;
 mod service;
 mod status;
 mod utils;
@@ -9,11 +8,11 @@ pub mod client;
 pub mod server;
 pub mod types;
 
-pub use crate::error::{DecodeError, HttpError, ServerError, ServiceError};
-pub use crate::request::{Request, RequestContext, Response};
-pub use crate::service::{ClientInformation, MethodDef, MethodsDef, ServiceDef, Transport};
+pub use crate::encoding::DecodeError;
+pub use crate::error::ServiceError;
+pub use crate::service::{MethodDef, ServiceDef};
 pub use crate::status::GrpcStatus;
-pub use crate::types::{DefaultValue, Message, NativeType};
+pub use crate::types::{Message, NativeType};
 
 #[doc(hidden)]
 pub mod encoding;
@@ -21,6 +20,8 @@ pub mod encoding;
 pub use self::encoding::WireType;
 #[doc(hidden)]
 pub use ntex_bytes::{ByteString, Bytes, BytesMut};
+#[doc(hidden)]
+pub use ntex_service::{Service, ServiceFactory};
 #[doc(hidden)]
 pub use ntex_util::HashMap;
 

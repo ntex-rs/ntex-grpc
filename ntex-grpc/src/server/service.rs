@@ -1,35 +1,17 @@
-use std::{cell::RefCell, future::Future, pin::Pin, rc::Rc, task::Context, task::Poll};
+use std::task::{Context, Poll};
+use std::{cell::RefCell, future::Future, pin::Pin, rc::Rc};
 
 use ntex_bytes::{Buf, BufMut};
+use ntex_bytes::{ByteString, BytesMut};
 use ntex_h2::{self as h2, frame::StreamId};
 use ntex_http::{HeaderMap, HeaderValue, StatusCode};
 use ntex_io::{Filter, Io, IoBoxed};
+use ntex_service::{Service, ServiceFactory};
 use ntex_util::{future::Either, future::Ready, HashMap};
 
-pub use ntex_bytes::{ByteString, Bytes, BytesMut};
-pub use ntex_service::{Service, ServiceFactory};
-
-pub use crate::error::ServerError;
 use crate::{consts, status::GrpcStatus, utils::Data};
 
-#[derive(Debug)]
-pub struct Request {
-    pub name: ByteString,
-    pub payload: Bytes,
-    pub headers: HeaderMap,
-}
-
-#[derive(Debug)]
-pub struct Response {
-    pub payload: Bytes,
-}
-
-impl Response {
-    #[inline]
-    pub fn new(payload: Bytes) -> Response {
-        Response { payload }
-    }
-}
+use super::{ServerError, ServerRequest, ServerResponse};
 
 /// Grpc server
 pub struct GrpcServer<T> {
@@ -47,7 +29,7 @@ impl<T> GrpcServer<T> {
 
 impl<T> GrpcServer<T>
 where
-    T: ServiceFactory<Request, Response = Response, Error = ServerError>,
+    T: ServiceFactory<ServerRequest, Response = ServerResponse, Error = ServerError>,
     T::Service: Clone,
 {
     /// Create default server
@@ -61,7 +43,7 @@ where
 impl<F, T> ServiceFactory<Io<F>> for GrpcServer<T>
 where
     F: Filter,
-    T: ServiceFactory<Request, Response = Response, Error = ServerError> + 'static,
+    T: ServiceFactory<ServerRequest, Response = ServerResponse, Error = ServerError> + 'static,
     T::Service: Clone,
 {
     type Response = ();
@@ -82,7 +64,7 @@ pub struct GrpcService<T> {
 impl<T, F> Service<Io<F>> for GrpcService<T>
 where
     F: Filter,
-    T: ServiceFactory<Request, Response = Response, Error = ServerError> + 'static,
+    T: ServiceFactory<ServerRequest, Response = ServerResponse, Error = ServerError> + 'static,
 {
     type Response = ();
     type Error = T::InitError;
@@ -115,7 +97,7 @@ where
 
 impl<T> Service<IoBoxed> for GrpcService<T>
 where
-    T: ServiceFactory<Request, Response = Response, Error = ServerError> + 'static,
+    T: ServiceFactory<ServerRequest, Response = ServerResponse, Error = ServerError> + 'static,
 {
     type Response = ();
     type Error = T::InitError;
@@ -169,7 +151,7 @@ impl Service<h2::ControlMessage<h2::StreamError>> for ControlService {
     }
 }
 
-struct PublishService<S: Service<Request>> {
+struct PublishService<S: Service<ServerRequest>> {
     service: S,
     streams: RefCell<HashMap<StreamId, Inflight>>,
 }
@@ -183,7 +165,7 @@ struct Inflight {
 
 impl<S> PublishService<S>
 where
-    S: Service<Request, Response = Response, Error = ServerError>,
+    S: Service<ServerRequest, Response = ServerResponse, Error = ServerError>,
 {
     fn new(service: S) -> Self {
         Self {
@@ -195,7 +177,7 @@ where
 
 impl<S> Service<h2::Message> for PublishService<S>
 where
-    S: Service<Request, Response = Response, Error = ServerError> + 'static,
+    S: Service<ServerRequest, Response = ServerResponse, Error = ServerError> + 'static,
 {
     type Response = ();
     type Error = h2::StreamError;
@@ -296,7 +278,7 @@ where
                 let data = data.split_to(len as usize);
 
                 log::debug!("Call service {} method {}", inflight.service, inflight.name);
-                let req = Request {
+                let req = ServerRequest {
                     payload: data,
                     name: inflight.name,
                     headers: inflight.headers,
@@ -323,6 +305,10 @@ where
 
                             let mut trailers = HeaderMap::default();
                             trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
+                            for (name, val) in res.headers {
+                                trailers.append(name, val);
+                            }
+
                             msg.stream().send_trailers(trailers);
                         }
                         Err(err) => {

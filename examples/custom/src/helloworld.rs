@@ -27,21 +27,19 @@ pub struct Greeter;
 impl ::ntex_grpc::ServiceDef for Greeter {
     const NAME: &'static str = "helloworld.Greeter";
     type Methods = GreeterMethods;
-}
 
-pub enum GreeterMethods {
-    SayHello(GreeterSayHelloMethod),
-}
-
-impl ::ntex_grpc::MethodsDef for GreeterMethods {
     #[inline]
-    fn by_name(name: &str) -> Option<Self> {
+    fn method_by_name(name: &str) -> Option<Self::Methods> {
         use ::ntex_grpc::MethodDef;
         match name {
             GreeterSayHelloMethod::NAME => Some(GreeterMethods::SayHello(GreeterSayHelloMethod)),
             _ => None,
         }
     }
+}
+
+pub enum GreeterMethods {
+    SayHello(GreeterSayHelloMethod),
 }
 
 #[derive(Clone)]
@@ -56,7 +54,7 @@ impl<T> GreeterClient<T> {
     }
 }
 
-impl<T> ::ntex_grpc::ClientInformation<T> for GreeterClient<T> {
+impl<T> ::ntex_grpc::client::ClientInformation<T> for GreeterClient<T> {
     #[inline]
     /// Create new client instance
     fn create(transport: T) -> Self {
@@ -93,24 +91,29 @@ impl ::ntex_grpc::MethodDef for GreeterSayHelloMethod {
     type Output = HelloReply;
 }
 
-impl<T: ::ntex_grpc::Transport<GreeterSayHelloMethod>> GreeterClient<T> {
+impl<T: ::ntex_grpc::client::Transport<GreeterSayHelloMethod>> GreeterClient<T> {
     /// Sends a greeting
     pub fn say_hello<'a>(
         &'a self,
         req: &'a HelloRequest,
-    ) -> ::ntex_grpc::Request<'a, T, GreeterSayHelloMethod> {
-        ::ntex_grpc::Request::new(&self.0, req)
+    ) -> ::ntex_grpc::client::Request<'a, T, GreeterSayHelloMethod> {
+        ::ntex_grpc::client::Request::new(&self.0, req)
     }
 }
 
 impl ::ntex_grpc::Message for HelloRequest {
     #[inline]
     fn write(&self, dst: &mut ::ntex_grpc::BytesMut) {
-        ::ntex_grpc::NativeType::serialize(&self.name, 1, ::ntex_grpc::DefaultValue::Default, dst);
+        ::ntex_grpc::NativeType::serialize(
+            &self.name,
+            1,
+            ::ntex_grpc::types::DefaultValue::Default,
+            dst,
+        );
         ::ntex_grpc::NativeType::serialize(
             &self.msg_id,
             2,
-            ::ntex_grpc::DefaultValue::Default,
+            ::ntex_grpc::types::DefaultValue::Default,
             dst,
         );
     }
@@ -139,11 +142,11 @@ impl ::ntex_grpc::Message for HelloRequest {
         0 + ::ntex_grpc::NativeType::serialized_len(
             &self.name,
             1,
-            ::ntex_grpc::DefaultValue::Default,
+            ::ntex_grpc::types::DefaultValue::Default,
         ) + ::ntex_grpc::NativeType::serialized_len(
             &self.msg_id,
             2,
-            ::ntex_grpc::DefaultValue::Default,
+            ::ntex_grpc::types::DefaultValue::Default,
         )
     }
 }
@@ -163,7 +166,7 @@ impl ::ntex_grpc::Message for HelloReply {
         ::ntex_grpc::NativeType::serialize(
             &self.message,
             1,
-            ::ntex_grpc::DefaultValue::Default,
+            ::ntex_grpc::types::DefaultValue::Default,
             dst,
         );
     }
@@ -190,7 +193,7 @@ impl ::ntex_grpc::Message for HelloReply {
         0 + ::ntex_grpc::NativeType::serialized_len(
             &self.message,
             1,
-            ::ntex_grpc::DefaultValue::Default,
+            ::ntex_grpc::types::DefaultValue::Default,
         )
     }
 }

@@ -126,26 +126,26 @@ pub mod hello_reply {
         fn serialize(
             &self,
             _: u32,
-            _: ::ntex_grpc::DefaultValue<&Self>,
+            _: ::ntex_grpc::types::DefaultValue<&Self>,
             dst: &mut ::ntex_grpc::BytesMut,
         ) {
             match *self {
                 Result::Success(ref value) => ::ntex_grpc::NativeType::serialize(
                     value,
                     1,
-                    ::ntex_grpc::DefaultValue::Default,
+                    ::ntex_grpc::types::DefaultValue::Default,
                     dst,
                 ),
                 Result::ServiceError(ref value) => ::ntex_grpc::NativeType::serialize(
                     value,
                     2,
-                    ::ntex_grpc::DefaultValue::Default,
+                    ::ntex_grpc::types::DefaultValue::Default,
                     dst,
                 ),
                 Result::InvalidRequest(ref value) => ::ntex_grpc::NativeType::serialize(
                     value,
                     3,
-                    ::ntex_grpc::DefaultValue::Default,
+                    ::ntex_grpc::types::DefaultValue::Default,
                     dst,
                 ),
             }
@@ -173,22 +173,22 @@ pub mod hello_reply {
             Ok(())
         }
         /// Returns the encoded length of the message without a length delimiter.
-        fn serialized_len(&self, _: u32, _: ::ntex_grpc::DefaultValue<&Self>) -> usize {
+        fn serialized_len(&self, _: u32, _: ::ntex_grpc::types::DefaultValue<&Self>) -> usize {
             match *self {
                 Result::Success(ref value) => ::ntex_grpc::NativeType::serialized_len(
                     value,
                     1,
-                    ::ntex_grpc::DefaultValue::Default,
+                    ::ntex_grpc::types::DefaultValue::Default,
                 ),
                 Result::ServiceError(ref value) => ::ntex_grpc::NativeType::serialized_len(
                     value,
                     2,
-                    ::ntex_grpc::DefaultValue::Default,
+                    ::ntex_grpc::types::DefaultValue::Default,
                 ),
                 Result::InvalidRequest(ref value) => ::ntex_grpc::NativeType::serialized_len(
                     value,
                     3,
-                    ::ntex_grpc::DefaultValue::Default,
+                    ::ntex_grpc::types::DefaultValue::Default,
                 ),
             }
         }
@@ -211,21 +211,19 @@ pub struct Greeter;
 impl ::ntex_grpc::ServiceDef for Greeter {
     const NAME: &'static str = "helloworld.Greeter";
     type Methods = GreeterMethods;
-}
 
-pub enum GreeterMethods {
-    SayHello(GreeterSayHelloMethod),
-}
-
-impl ::ntex_grpc::MethodsDef for GreeterMethods {
     #[inline]
-    fn by_name(name: &str) -> Option<Self> {
+    fn method_by_name(name: &str) -> Option<Self::Methods> {
         use ::ntex_grpc::MethodDef;
         match name {
             GreeterSayHelloMethod::NAME => Some(GreeterMethods::SayHello(GreeterSayHelloMethod)),
             _ => None,
         }
     }
+}
+
+pub enum GreeterMethods {
+    SayHello(GreeterSayHelloMethod),
 }
 
 #[derive(Clone)]
@@ -240,7 +238,7 @@ impl<T> GreeterClient<T> {
     }
 }
 
-impl<T> ::ntex_grpc::ClientInformation<T> for GreeterClient<T> {
+impl<T> ::ntex_grpc::client::ClientInformation<T> for GreeterClient<T> {
     #[inline]
     /// Create new client instance
     fn create(transport: T) -> Self {
@@ -277,20 +275,25 @@ impl ::ntex_grpc::MethodDef for GreeterSayHelloMethod {
     type Output = HelloReply;
 }
 
-impl<T: ::ntex_grpc::Transport<GreeterSayHelloMethod>> GreeterClient<T> {
+impl<T: ::ntex_grpc::client::Transport<GreeterSayHelloMethod>> GreeterClient<T> {
     /// Sends a greeting
     pub fn say_hello<'a>(
         &'a self,
         req: &'a HelloRequest,
-    ) -> ::ntex_grpc::Request<'a, T, GreeterSayHelloMethod> {
-        ::ntex_grpc::Request::new(&self.0, req)
+    ) -> ::ntex_grpc::client::Request<'a, T, GreeterSayHelloMethod> {
+        ::ntex_grpc::client::Request::new(&self.0, req)
     }
 }
 
 impl ::ntex_grpc::Message for HelloRequest {
     #[inline]
     fn write(&self, dst: &mut ::ntex_grpc::BytesMut) {
-        ::ntex_grpc::NativeType::serialize(&self.name, 1, ::ntex_grpc::DefaultValue::Default, dst);
+        ::ntex_grpc::NativeType::serialize(
+            &self.name,
+            1,
+            ::ntex_grpc::types::DefaultValue::Default,
+            dst,
+        );
     }
 
     #[inline]
@@ -315,7 +318,7 @@ impl ::ntex_grpc::Message for HelloRequest {
         0 + ::ntex_grpc::NativeType::serialized_len(
             &self.name,
             1,
-            ::ntex_grpc::DefaultValue::Default,
+            ::ntex_grpc::types::DefaultValue::Default,
         )
     }
 }
@@ -334,19 +337,19 @@ impl ::ntex_grpc::Message for HelloReply {
         ::ntex_grpc::NativeType::serialize(
             &self.metadata,
             4,
-            ::ntex_grpc::DefaultValue::Default,
+            ::ntex_grpc::types::DefaultValue::Default,
             dst,
         );
         ::ntex_grpc::NativeType::serialize(
             &self.reply_type,
             5,
-            ::ntex_grpc::DefaultValue::Default,
+            ::ntex_grpc::types::DefaultValue::Default,
             dst,
         );
         ::ntex_grpc::NativeType::serialize(
             &self.result,
             0,
-            ::ntex_grpc::DefaultValue::Default,
+            ::ntex_grpc::types::DefaultValue::Default,
             dst,
         );
     }
@@ -381,15 +384,15 @@ impl ::ntex_grpc::Message for HelloReply {
         0 + ::ntex_grpc::NativeType::serialized_len(
             &self.metadata,
             4,
-            ::ntex_grpc::DefaultValue::Default,
+            ::ntex_grpc::types::DefaultValue::Default,
         ) + ::ntex_grpc::NativeType::serialized_len(
             &self.reply_type,
             5,
-            ::ntex_grpc::DefaultValue::Default,
+            ::ntex_grpc::types::DefaultValue::Default,
         ) + ::ntex_grpc::NativeType::serialized_len(
             &self.result,
             0,
-            ::ntex_grpc::DefaultValue::Default,
+            ::ntex_grpc::types::DefaultValue::Default,
         )
     }
 }
@@ -410,7 +413,7 @@ impl ::ntex_grpc::Message for ResponseResult {
         ::ntex_grpc::NativeType::serialize(
             &self.message,
             1,
-            ::ntex_grpc::DefaultValue::Default,
+            ::ntex_grpc::types::DefaultValue::Default,
             dst,
         );
     }
@@ -437,7 +440,7 @@ impl ::ntex_grpc::Message for ResponseResult {
         0 + ::ntex_grpc::NativeType::serialized_len(
             &self.message,
             1,
-            ::ntex_grpc::DefaultValue::Default,
+            ::ntex_grpc::types::DefaultValue::Default,
         )
     }
 }

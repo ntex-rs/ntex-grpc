@@ -1,5 +1,11 @@
 # Changes
 
+## [0.2.0] - 2022-11-23
+
+* Refactor code layout
+
+* Allow to access request and create custom responses for server
+
 ## [0.2.0-b.2] - 2022-11-15
 
 * Fix Option<T> encodinging

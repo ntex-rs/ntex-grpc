@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.1] - 2022-11-29
+
+* Fix split prefix feature
+
 ## [0.2.0-b.1] - 2022-11-21
 
 * Do not use Option for message fields if not explicitly set

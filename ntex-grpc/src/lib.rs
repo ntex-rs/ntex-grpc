@@ -10,6 +10,8 @@ pub mod types;
 
 pub use crate::encoding::DecodeError;
 pub use crate::error::ServiceError;
+pub use ntex_http::Error as HttpError;
+
 pub use crate::service::{MethodDef, ServiceDef};
 pub use crate::status::GrpcStatus;
 pub use crate::types::{Message, NativeType};

@@ -959,7 +959,11 @@ impl<'a> CodeGenerator<'a> {
 /// It also tries to handle cases where the stripped name would be
 /// invalid - for example, if it were to begin with a number.
 fn strip_enum_prefix(prefix: &str, name: &str) -> String {
-    let stripped = name.strip_prefix(prefix).unwrap_or(name);
+    let stripped = if name.to_lowercase().starts_with(&prefix.to_lowercase()) {
+        name.split_at(prefix.len()).1
+    } else {
+        name
+    };
 
     // If the next character after the stripped prefix is not
     // uppercase, then it means that we didn't have a true prefix -

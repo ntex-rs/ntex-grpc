@@ -110,11 +110,27 @@ impl Inner {
                     eof,
                 } => {
                     if eof {
-                        let _ = inner
-                            .remove(&id)
-                            .unwrap()
-                            .tx
-                            .send(Err(ServiceError::UnexpectedEof(pseudo.status, headers)));
+                        let tx = inner.remove(&id).unwrap().tx;
+
+                        // check grpc status
+                        match check_grpc_status(&headers) {
+                            Some(Ok(status)) => {
+                                if status != GrpcStatus::Ok {
+                                    let _ =
+                                        tx.send(Err(ServiceError::GrpcStatus(status, headers)));
+                                    return Err(());
+                                }
+                            }
+                            Some(Err(())) => {
+                                let _ = tx.send(Err(ServiceError::Decode(DecodeError::new(
+                                    "Cannot parse grpc status",
+                                ))));
+                                return Err(());
+                            }
+                            None => {}
+                        }
+
+                        let _ = tx.send(Err(ServiceError::UnexpectedEof(pseudo.status, headers)));
                         return Err(());
                     } else {
                         inflight.status = pseudo.status;
@@ -140,24 +156,21 @@ impl Inner {
                         }
                         h2::StreamEof::Trailers(hdrs) => {
                             // check grpc status
-                            if let Some(val) = hdrs.get(consts::GRPC_STATUS) {
-                                if let Ok(status) = val
-                                    .to_str()
-                                    .map_err(|_| ())
-                                    .and_then(|v| u8::from_str(v).map_err(|_| ()))
-                                    .and_then(GrpcStatus::try_from)
-                                {
+                            match check_grpc_status(&hdrs) {
+                                Some(Ok(status)) => {
                                     if status != GrpcStatus::Ok {
                                         let _ =
                                             tx.send(Err(ServiceError::GrpcStatus(status, hdrs)));
                                         return Err(());
                                     }
-                                } else {
+                                }
+                                Some(Err(())) => {
                                     let _ = tx.send(Err(ServiceError::Decode(DecodeError::new(
                                         "Cannot parse grpc status",
                                     ))));
                                     return Err(());
                                 }
+                                None => {}
                             }
 
                             Ok((
@@ -184,5 +197,23 @@ impl Inner {
             }
         }
         Ok(())
+    }
+}
+
+fn check_grpc_status(hdrs: &HeaderMap) -> Option<Result<GrpcStatus, ()>> {
+    // check grpc status
+    if let Some(val) = hdrs.get(consts::GRPC_STATUS) {
+        if let Ok(status) = val
+            .to_str()
+            .map_err(|_| ())
+            .and_then(|v| u8::from_str(v).map_err(|_| ()))
+            .and_then(GrpcStatus::try_from)
+        {
+            Some(Ok(status))
+        } else {
+            Some(Err(()))
+        }
+    } else {
+        None
     }
 }

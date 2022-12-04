@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.1] - 2022-12-04
+
+* Try to extract GrpcError instead of UnexpecetedEof
+
 ## [0.2.0] - 2022-11-23
 
 * Refactor code layout

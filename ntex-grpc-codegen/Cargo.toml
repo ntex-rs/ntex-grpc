@@ -1,6 +1,6 @@
 [package]
 name = "ntex-grpc-codegen"
-version = "0.2.1"
+version = "0.2.2"
 license = "MIT"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 description = "GRPC Client/Server framework (codegen)"
@@ -17,6 +17,6 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "3.2", features = ["derive"] }
-ntex-prost-build = "0.11.1"
+ntex-prost-build = "0.11.2"
 log = "0.4"
-env_logger = "0.9"
+env_logger = "0.10"

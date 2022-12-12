@@ -4,7 +4,7 @@ use ntex_prost_build::{Method, Service, ServiceGenerator};
 pub(crate) struct GrpcServiceGenerator;
 
 impl ServiceGenerator for GrpcServiceGenerator {
-    fn generate(&mut self, service: Service, buf: &mut String) {
+    fn generate(&mut self, service: Service, buf: &mut String, priv_buf: &mut String) {
         log::trace!(
             "Generate client for service: {:?}\n{:#?}",
             service.name,
@@ -12,11 +12,11 @@ impl ServiceGenerator for GrpcServiceGenerator {
         );
 
         buf.push_str(&format!("\n/// `{}` service definition\n", service.name));
-        generate_client(&service, buf);
+        generate_client(&service, buf, priv_buf);
     }
 }
 
-fn generate_client(service: &Service, buf: &mut String) {
+fn generate_client(service: &Service, buf: &mut String, priv_buf: &mut String) {
     let service_ident = service.name.to_string();
     let client_ident = format!("{}Client", service.name);
     let service_name = if service.package.is_empty() {
@@ -53,12 +53,22 @@ fn generate_client(service: &Service, buf: &mut String) {
     service_methods_match.push("_ => None".to_string());
     let service_methods_match = service_methods_match.join("\n");
 
-    let methods: Vec<_> = service
+    let all_methods: Vec<_> = service
         .methods
         .iter()
         .map(|m| gen_method(m, service))
         .collect();
-    let methods = methods.join("\n\n");
+    let methods = all_methods
+        .clone()
+        .into_iter()
+        .map(|(b, _)| b)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let priv_methods = all_methods
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect::<Vec<_>>()
+        .join("\n\n");
 
     let comments: Vec<_> = service
         .comments
@@ -70,9 +80,30 @@ fn generate_client(service: &Service, buf: &mut String) {
     let comments = comments.join("");
 
     let stream = format!(
-        "pub struct {};
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub struct {};
 
-        impl ::ntex_grpc::ServiceDef for {} {{
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum {} {{
+            {}
+        }}
+
+        {}
+        #[derive(Debug, Clone)]
+        pub struct {}<T>(T);
+
+        {}",
+        service_ident,
+        service_methods_name,
+        service_methods,
+        comments.trim_end(),
+        client_ident,
+        methods,
+    );
+    buf.push_str(&stream);
+
+    let impl_stream = format!(
+        "impl ::ntex_grpc::ServiceDef for {} {{
             const NAME: &'static str = \"{}\";
             type Methods = {};
 
@@ -84,14 +115,6 @@ fn generate_client(service: &Service, buf: &mut String) {
                 }}
             }}
         }}
-
-        pub enum {} {{
-            {}
-        }}
-
-        #[derive(Clone)]
-        {}
-        pub struct {}<T>(T);
 
         impl<T> {}<T> {{
             #[inline]
@@ -129,22 +152,17 @@ fn generate_client(service: &Service, buf: &mut String) {
 
         {}",
         service_ident,
-        service_ident,
         service_name,
         service_methods_name,
         service_methods_match,
-        service_methods_name,
-        service_methods,
-        comments,
         client_ident,
         client_ident,
-        client_ident,
-        methods,
+        priv_methods,
     );
-    buf.push_str(&stream);
+    priv_buf.push_str(&impl_stream);
 }
 
-fn gen_method(method: &Method, service: &Service) -> String {
+fn gen_method(method: &Method, service: &Service) -> (String, String) {
     let proto_name = &method.proto_name;
     let path = if service.package.is_empty() {
         format!("/{}/{}", service.proto_name, method.proto_name)
@@ -159,6 +177,7 @@ fn gen_method(method: &Method, service: &Service) -> String {
     let method_ident = method.name.to_string();
     let def_ident = format!("{}{}Method", service.name, method.proto_name);
     let input_type = method.input_type.to_string();
+    let req_input_type = format!("super::{}", method.input_type);
     let output_type = method.output_type.to_string();
     let comments: Vec<_> = method
         .comments
@@ -169,8 +188,9 @@ fn gen_method(method: &Method, service: &Service) -> String {
         .collect();
     let comments = comments.join("");
 
-    format!(
-        "#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+    (
+        format!(
+            "#[derive(Debug, Copy, Clone, PartialEq, Eq)]
         pub struct {};
 
         impl ::ntex_grpc::MethodDef for {} {{
@@ -178,25 +198,17 @@ fn gen_method(method: &Method, service: &Service) -> String {
             const PATH: ::ntex_grpc::ByteString = ::ntex_grpc::ByteString::from_static(\"{}\");
             type Input = {};
             type Output = {};
-        }}
-
-        impl<T: ::ntex_grpc::client::Transport<{}>> {}<T> {{
+        }}",
+            def_ident, def_ident, proto_name, path, input_type, output_type,
+        ),
+        format!(
+            "impl<T: ::ntex_grpc::client::Transport<{}>> {}<T> {{
             {}
             pub fn {}<'a>(&'a self, req: &'a {}) -> ::ntex_grpc::client::Request<'a, T, {}> {{
                 ::ntex_grpc::client::Request::new(&self.0, req)
             }}
         }}",
-        def_ident,
-        def_ident,
-        proto_name,
-        path,
-        input_type,
-        output_type,
-        def_ident,
-        service_ident,
-        comments,
-        method_ident,
-        input_type,
-        def_ident
+            def_ident, service_ident, comments, method_ident, req_input_type, def_ident
+        ),
     )
 }

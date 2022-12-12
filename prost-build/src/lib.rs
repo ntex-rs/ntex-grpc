@@ -171,7 +171,7 @@ use crate::path::PathMap;
 pub trait ServiceGenerator {
     /// Generates a Rust interface or implementation for a service, writing the
     /// result to `buf`.
-    fn generate(&mut self, service: Service, buf: &mut String);
+    fn generate(&mut self, service: Service, buf: &mut String, priv_buf: &mut String);
 
     /// Finalizes the generation process.
     ///

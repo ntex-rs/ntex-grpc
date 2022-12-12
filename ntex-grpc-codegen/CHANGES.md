@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.2] - 2022-12-12
+
+* Separate trait impls for generated code
+
 ## [0.2.1] - 2022-11-29
 
 * Fix split prefix feature

@@ -90,7 +90,7 @@ impl<'a> CodeGenerator<'a> {
         code_gen.path.push(5);
         for (idx, desc) in file.enum_type.into_iter().enumerate() {
             code_gen.path.push(idx as i32);
-            code_gen.append_enum(desc);
+            code_gen.append_enum(to_upper_camel(desc.name()), desc);
             code_gen.path.pop();
         }
         code_gen.path.pop();
@@ -111,7 +111,11 @@ impl<'a> CodeGenerator<'a> {
         }
 
         code_gen.buf.push_str("\n\n\n");
+
+        code_gen.buf.push_str("mod _priv_impl {\n");
+        code_gen.buf.push_str("use super::*;\n\n");
         code_gen.buf.push_str(&code_gen.priv_buf);
+        code_gen.buf.push('}');
     }
 
     fn append_message(&mut self, message: DescriptorProto) {
@@ -327,6 +331,7 @@ impl<'a> CodeGenerator<'a> {
         // default
         self.priv_buf.push_str(&format!(
             "impl ::std::default::Default for {} {{
+                 #[inline]
                  fn default() -> Self {{
                      Self {{ {} }}
                  }}
@@ -350,7 +355,12 @@ impl<'a> CodeGenerator<'a> {
             self.path.push(4);
             for (idx, nested_enum) in message.enum_type.into_iter().enumerate() {
                 self.path.push(idx as i32);
-                self.append_enum(nested_enum);
+                let enum_name = format!(
+                    "{}::{}",
+                    to_snake(&message_name),
+                    to_upper_camel(nested_enum.name())
+                );
+                self.append_enum(enum_name, nested_enum);
                 self.path.pop();
             }
             self.path.pop();
@@ -362,7 +372,7 @@ impl<'a> CodeGenerator<'a> {
                     Some(fields) => fields,
                     None => continue,
                 };
-                self.append_oneof(&fq_message_name, oneof, idx, fields);
+                self.append_oneof(&message_name, &fq_message_name, oneof, idx, fields);
             }
 
             self.pop_mod();
@@ -475,15 +485,13 @@ impl<'a> CodeGenerator<'a> {
         self.push_indent();
         self.append_field_attributes(fq_message_name, oneof.name());
         self.push_indent();
-        self.buf.push_str(&format!(
-            "pub {}: ::core::option::Option<{}>,\n",
-            to_snake(oneof.name()),
-            name
-        ));
+        self.buf
+            .push_str(&format!("pub {}: {},\n", to_snake(oneof.name()), name));
     }
 
     fn append_oneof(
         &mut self,
+        message_name: &str,
         fq_message_name: &str,
         oneof: OneofDescriptorProto,
         idx: i32,
@@ -494,6 +502,12 @@ impl<'a> CodeGenerator<'a> {
         self.append_doc(fq_message_name, None);
         self.path.pop();
         self.path.pop();
+
+        let name = format!(
+            "{}::{}",
+            to_snake(message_name),
+            to_upper_camel(oneof.name())
+        );
 
         let oneof_name = format!("{}.{}", fq_message_name, oneof.name());
         self.append_type_attributes(&oneof_name);
@@ -514,20 +528,20 @@ impl<'a> CodeGenerator<'a> {
         for (field, idx) in &fields {
             write.push_str(&format!(
                 "{}::{}(ref value) => ::ntex_grpc::NativeType::serialize(value, {}, ::ntex_grpc::types::DefaultValue::Default, dst),",
-                to_upper_camel(oneof.name()),
+                name,
                 to_upper_camel(field.name()),
                 field.number()
             ));
             read.push_str(&format!(
                 "{} => {}::{}(::ntex_grpc::NativeType::deserialize_default({}, wire_type, src)?),\n",
                 field.number(),
-                to_upper_camel(oneof.name()),
+                name,
                 to_upper_camel(field.name()),
                 field.number(),
             ));
             encoded_len.push_str(&format!(
                 "{}::{}(ref value) => ::ntex_grpc::NativeType::serialized_len(value, {}, ::ntex_grpc::types::DefaultValue::Default),",
-                to_upper_camel(oneof.name()),
+                name,
                 to_upper_camel(field.name()),
                 field.number()
             ));
@@ -553,26 +567,30 @@ impl<'a> CodeGenerator<'a> {
         self.push_indent();
         self.buf.push_str("}\n");
 
-        self.buf.push_str(&format!("
+        self.priv_buf.push_str(&format!("
         impl ::ntex_grpc::NativeType for {} {{
             const TYPE: ::ntex_grpc::WireType = ::ntex_grpc::WireType::LengthDelimited;
+
             fn merge(&mut self, _: &mut ::ntex_grpc::Bytes) -> ::std::result::Result<(), ::ntex_grpc::DecodeError> {{
                 panic!(\"Not supported\")
             }}
+
             fn encode_value(&self, _: &mut ::ntex_grpc::BytesMut) {{
                 panic!(\"Not supported\")
             }}
-        ", to_upper_camel(oneof.name())));
+        ", name));
 
-        self.buf.push_str(&format!(
+        self.priv_buf.push_str(&format!(
             "
+            #[inline]
             /// Encodes the message to a buffer.
             fn serialize(&self, _: u32, _: ::ntex_grpc::types::DefaultValue<&Self>, dst: &mut ::ntex_grpc::BytesMut) {{
                 match *self {{ {} }}
-            }}",
+            }}\n",
             write
         ));
-        self.buf.push_str(&format!("
+        self.priv_buf.push_str(&format!("
+            #[inline]
             /// Decodes an instance of the message from a buffer, and merges it into self.
             fn deserialize(&mut self, tag: u32, wire_type: ::ntex_grpc::WireType, src: &mut ::ntex_grpc::Bytes) -> ::std::result::Result<(), ::ntex_grpc::DecodeError> {{
                 *self = match tag {{
@@ -580,9 +598,10 @@ impl<'a> CodeGenerator<'a> {
                     _ => unreachable!(\"invalid {}, tag: {{}}\", tag),
                 }};
                 Ok(())
-            }}", read, to_upper_camel(oneof.name())));
-        self.buf.push_str(&format!(
+            }}\n", read.trim_end(), to_upper_camel(oneof.name())));
+        self.priv_buf.push_str(&format!(
             "
+            #[inline]
             /// Returns the encoded length of the message without a length delimiter.
             fn serialized_len(&self, _: u32, _: ::ntex_grpc::types::DefaultValue<&Self>) -> usize {{
                 match *self {{
@@ -592,15 +611,16 @@ impl<'a> CodeGenerator<'a> {
         }}\n\n",
             encoded_len
         ));
-        self.buf.push_str(&format!(
+        self.priv_buf.push_str(&format!(
             "
         impl ::std::default::Default for {} {{
+            #[inline]
             fn default() -> Self {{
                 {}::{}(::std::default::Default::default())
             }}
-        }}",
-            to_upper_camel(oneof.name()),
-            to_upper_camel(oneof.name()),
+        }}\n\n",
+            name,
+            name,
             to_upper_camel(fields[0].0.name()),
         ));
     }
@@ -629,7 +649,7 @@ impl<'a> CodeGenerator<'a> {
         }
     }
 
-    fn append_enum(&mut self, desc: EnumDescriptorProto) {
+    fn append_enum(&mut self, full_name: String, desc: EnumDescriptorProto) {
         debug!("  enum: {:?}", desc.name());
 
         let proto_enum_name = desc.name();
@@ -759,7 +779,7 @@ impl<'a> CodeGenerator<'a> {
         self.buf.push_str("}\n\n"); // End of impl
 
         // NativeType impl
-        self.buf.push_str(&format!(
+        self.priv_buf.push_str(&format!(
             "impl ::ntex_grpc::NativeType for {} {{
                  const TYPE: ::ntex_grpc::WireType = ::ntex_grpc::WireType::Varint;
 
@@ -791,11 +811,11 @@ impl<'a> CodeGenerator<'a> {
                     {}::{}
                 }}
             }}\n\n",
-            enum_name,
-            enum_name,
+            full_name,
+            full_name,
             &variant_mappings[0].generated_variant_name,
-            enum_name,
-            enum_name,
+            full_name,
+            full_name,
             &variant_mappings[0].generated_variant_name
         ));
     }
@@ -851,7 +871,7 @@ impl<'a> CodeGenerator<'a> {
         };
 
         if let Some(service_generator) = self.config.service_generator.as_mut() {
-            service_generator.generate(service, self.buf)
+            service_generator.generate(service, self.buf, &mut self.priv_buf)
         }
     }
 
@@ -883,7 +903,7 @@ impl<'a> CodeGenerator<'a> {
         self.package.truncate(idx);
 
         self.push_indent();
-        self.buf.push_str("}\n");
+        self.buf.push_str("}\n\n");
     }
 
     fn resolve_type(&self, field: &FieldDescriptorProto, fq_message_name: &str) -> String {

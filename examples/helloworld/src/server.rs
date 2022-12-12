@@ -13,11 +13,9 @@ impl GreeterServer {
     #[method(SayHello)]
     async fn say_hello(&self, req: HelloRequest) -> HelloReply {
         HelloReply {
-            result: Some(helloworld::hello_reply::Result::Success(
-                helloworld::ResponseResult {
-                    message: format!("Hello {}!", req.name).into(),
-                },
-            )),
+            result: helloworld::hello_reply::Result::Success(helloworld::ResponseResult {
+                message: format!("Hello {}!", req.name).into(),
+            }),
             metadata: 10,
             reply_type: helloworld::hello_reply::Type::Web,
         }

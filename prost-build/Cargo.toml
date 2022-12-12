@@ -1,6 +1,6 @@
 [package]
 name = "ntex-prost-build"
-version = "0.11.1"
+version = "0.11.2"
 authors = [
     "Dan Burkert <dan@danburkert.com>",
     "Tokio Contributors <team@tokio.rs>",
@@ -15,23 +15,17 @@ edition = "2018"
 [features]
 default = []
 vendored = []
-# When MSRV moves to 1.60, these can change to dep:
-cleanup-markdown = ["pulldown-cmark", "pulldown-cmark-to-cmark"]
 
 [dependencies]
 heck = "0.4"
 itertools = "0.10"
 log = "0.4"
 multimap = { version = "0.8", default-features = false }
-petgraph = { version = "0.6", default-features = false }
-prost = { version = "0.10.0", default-features = false }
-prost-types = { version = "0.10.0", default-features = false }
+prost = { version = "0.11", default-features = false }
+prost-types = { version = "0.11", default-features = false }
 tempfile = "3"
-lazy_static = "1.4.0"
+once_cell = "1.9"
 regex = { version = "1.5.5", default-features = false, features = ["std", "unicode-bool"] }
-# These two must be kept in sync
-pulldown-cmark = { version = "0.9.1", optional = true, default-features = false }
-pulldown-cmark-to-cmark = { version = "10.0.1", optional = true }
 
 [build-dependencies]
 which = { version = "4", default-features = false }
@@ -39,4 +33,4 @@ cfg-if = "1"
 cmake = "0.1"
 
 [dev-dependencies]
-env_logger = { version = "0.8", default-features = false }
+env_logger = { version = "0.10", default-features = false }

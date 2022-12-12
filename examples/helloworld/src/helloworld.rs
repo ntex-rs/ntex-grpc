@@ -19,7 +19,7 @@ pub struct HelloRequest {
 pub struct HelloReply {
     pub metadata: i64,
     pub reply_type: hello_reply::Type,
-    pub result: hello_reply::Result,
+    pub result: Option<hello_reply::Result>,
 }
 
 /// Nested message and enum types in `HelloReply`.

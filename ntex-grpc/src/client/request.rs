@@ -75,19 +75,36 @@ fn ctx(slf: &mut RequestContext) -> Option<&mut RequestContextInner> {
     }
 }
 
-pub struct Request<'a, T: Transport<M>, M: MethodDef> {
-    transport: &'a T,
-    state: State<'a, M, T::Error>,
+pin_project_lite::pin_project! {
+    pub struct Request<'a, T, M>
+    where T: Transport<M>,
+          T: 'a,
+          M: MethodDef
+    {
+        transport: &'a T,
+        #[pin]
+        state: State<'a, T, M>,
+    }
 }
 
-enum State<'a, M: MethodDef, E> {
-    Request(&'a M::Input, RequestContext),
-    #[allow(clippy::type_complexity)]
-    Call(Pin<Box<dyn Future<Output = Result<Response<M>, E>> + 'a>>),
-    Done,
+pin_project_lite::pin_project! {
+    #[project = StateProject]
+    enum State<'a, T, M>
+    where
+        T: Transport<M>,
+        T: 'a,
+        M: MethodDef,
+    {
+        Call {
+            #[pin]
+            fut: T::Future<'a>,
+        },
+        Request {
+            input: &'a M::Input,
+            ctx: Option<RequestContext>,
+        },
+    }
 }
-
-impl<'a, M: MethodDef, E> Unpin for State<'a, M, E> {}
 
 impl<'a, T, M> Request<'a, T, M>
 where
@@ -97,7 +114,10 @@ where
     pub fn new(transport: &'a T, input: &'a M::Input) -> Self {
         Self {
             transport,
-            state: State::Request(input, RequestContext::new()),
+            state: State::Request {
+                input,
+                ctx: Some(RequestContext::new()),
+            },
         }
     }
 
@@ -128,11 +148,11 @@ where
 }
 
 #[inline]
-fn parts<'a, 'b, M: MethodDef, E>(
-    parts: &'b mut State<'a, M, E>,
+fn parts<'a, 'b, T: Transport<M> + 'a, M: MethodDef>(
+    parts: &'b mut State<'a, T, M>,
 ) -> Option<&'b mut RequestContext> {
-    if let State::Request(_, ref mut ctx) = parts {
-        Some(ctx)
+    if let State::Request { ref mut ctx, .. } = parts {
+        ctx.as_mut()
     } else {
         None
     }
@@ -146,17 +166,18 @@ where
     type Output = Result<Response<M>, T::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut slf = self.as_mut();
+        let mut this = self.as_mut().project();
 
-        if let State::Call(ref mut fut) = slf.state {
-            Pin::new(fut).poll(cx)
-        } else {
-            match std::mem::replace(&mut slf.state, State::Done) {
-                State::Request(input, ctx) => {
-                    slf.state = State::Call(slf.transport.request(input, ctx));
-                    self.poll(cx)
+        loop {
+            match this.state.project() {
+                StateProject::Call { fut } => return fut.poll(cx),
+                StateProject::Request { input, ref mut ctx } => {
+                    let st = State::Call {
+                        fut: this.transport.request(input, ctx.take().unwrap()),
+                    };
+                    this = self.as_mut().project();
+                    this.state.set(st);
                 }
-                _ => panic!("Future cannot be polled after completion"),
             }
         }
     }

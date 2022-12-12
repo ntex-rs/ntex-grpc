@@ -485,8 +485,11 @@ impl<'a> CodeGenerator<'a> {
         self.push_indent();
         self.append_field_attributes(fq_message_name, oneof.name());
         self.push_indent();
-        self.buf
-            .push_str(&format!("pub {}: {},\n", to_snake(oneof.name()), name));
+        self.buf.push_str(&format!(
+            "pub {}: Option<{}>,\n",
+            to_snake(oneof.name()),
+            name
+        ));
     }
 
     fn append_oneof(

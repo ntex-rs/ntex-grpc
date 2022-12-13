@@ -1,6 +1,6 @@
 [package]
 name = "ntex-grpc"
-version = "0.2.1"
+version = "0.3.0-alpha.0"
 license = "MIT"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 description = "GRPC Client/Server framework"
@@ -20,15 +20,15 @@ ntex-h2 = "0.1.6"
 ntex-http = "0.1.6"
 ntex-connect = "0.1"
 ntex-io = "0.1"
-ntex-util = "0.1.17"
-ntex-bytes = "0.1.16"
+ntex-util = "0.1.18"
+ntex-bytes = "0.1.17"
 ntex-service = "0.3"
 ntex-rt = "0.4"
 ntex-grpc-derive = "0.2.0"
 
-async-trait = "0.1.0"
 log = "0.4"
 thiserror = "1.0"
+pin-project-lite = "0.2"
 
 [dev-dependencies]
 env_logger = { version = "0.9", default-features = false }

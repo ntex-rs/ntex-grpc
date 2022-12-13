@@ -1,10 +1,9 @@
 use std::{cell::RefCell, convert::TryFrom, str::FromStr};
 
-use async_trait::async_trait;
 use ntex_bytes::{Buf, BufMut, Bytes, BytesMut};
 use ntex_h2::{self as h2, client, frame::StreamId, Stream};
 use ntex_http::{header, HeaderMap, Method, StatusCode};
-use ntex_util::{channel::oneshot, HashMap};
+use ntex_util::{channel::oneshot, HashMap, future::BoxFuture};
 
 use crate::service::MethodDef;
 use crate::{consts, utils::Data, DecodeError, GrpcStatus, Message, ServiceError};
@@ -25,75 +24,76 @@ pub(super) struct Inflight {
     tx: oneshot::Sender<Result<(Option<StatusCode>, Bytes, HeaderMap, HeaderMap), ServiceError>>,
 }
 
-#[async_trait(?Send)]
 impl<T: MethodDef> Transport<T> for Client {
     type Error = ServiceError;
 
-    async fn request(
-        &self,
-        val: &T::Input,
-        ctx: RequestContext,
-    ) -> Result<Response<T>, Self::Error> {
-        let len = val.encoded_len();
-        let mut buf = BytesMut::with_capacity(len + 5);
-        buf.put_u8(0); // compression
-        buf.put_u32(len as u32); // length
-        val.write(&mut buf);
+    type Future<'f> = BoxFuture<'f, Result<Response<T>, Self::Error>>
+    where Self: 'f,
+          T::Input: 'f;
 
-        let mut hdrs = HeaderMap::new();
-        hdrs.append(header::CONTENT_TYPE, consts::HDRV_CT_GRPC);
-        hdrs.append(header::USER_AGENT, consts::HDRV_USER_AGENT);
-        hdrs.insert(header::TE, consts::HDRV_TRAILERS);
-        hdrs.insert(consts::GRPC_ENCODING, consts::IDENTITY);
-        hdrs.insert(consts::GRPC_ACCEPT_ENCODING, consts::IDENTITY);
-        for (key, val) in ctx.headers() {
-            hdrs.insert(key.clone(), val.clone())
-        }
+    fn request<'a>(&'a self, val: &'a T::Input, ctx: RequestContext) -> Self::Future<'a> {
+        Box::pin(async move {
+            let len = val.encoded_len();
+            let mut buf = BytesMut::with_capacity(len + 5);
+            buf.put_u8(0); // compression
+            buf.put_u32(len as u32); // length
+            val.write(&mut buf);
 
-        let stream = self
-            .0
-            .client
-            .send_request(Method::POST, T::PATH, hdrs, false)
-            .await?;
-
-        let s_ref = (*stream).clone();
-        let (tx, rx) = oneshot::channel();
-        self.0.inflight.borrow_mut().insert(
-            stream.id(),
-            Inflight {
-                tx,
-                _stream: stream,
-                status: None,
-                headers: None,
-                data: Data::Empty,
-            },
-        );
-        s_ref.send_payload(buf.freeze(), true).await?;
-
-        match rx.await {
-            Ok(Ok((status, mut data, headers, trailers))) => {
-                match status {
-                    Some(st) => {
-                        if !st.is_success() {
-                            return Err(ServiceError::Response(Some(st), headers, data));
-                        }
-                    }
-                    None => return Err(ServiceError::Response(None, headers, data)),
-                }
-                let _compressed = data.get_u8();
-                let len = data.get_u32();
-                match <T::Output as Message>::read(&mut data.split_to(len as usize)) {
-                    Ok(output) => Ok(Response {
-                        output,
-                        headers,
-                        trailers,
-                    }),
-                    Err(e) => Err(ServiceError::Decode(e)),
-                }
+            let mut hdrs = HeaderMap::new();
+            hdrs.append(header::CONTENT_TYPE, consts::HDRV_CT_GRPC);
+            hdrs.append(header::USER_AGENT, consts::HDRV_USER_AGENT);
+            hdrs.insert(header::TE, consts::HDRV_TRAILERS);
+            hdrs.insert(consts::GRPC_ENCODING, consts::IDENTITY);
+            hdrs.insert(consts::GRPC_ACCEPT_ENCODING, consts::IDENTITY);
+            for (key, val) in ctx.headers() {
+                hdrs.insert(key.clone(), val.clone())
             }
-            Ok(Err(err)) => Err(err),
-            Err(_) => Err(ServiceError::Canceled),
-        }
+
+            let stream = self
+                .0
+                .client
+                .send_request(Method::POST, T::PATH, hdrs, false)
+                .await?;
+
+            let s_ref = (*stream).clone();
+            let (tx, rx) = oneshot::channel();
+            self.0.inflight.borrow_mut().insert(
+                stream.id(),
+                Inflight {
+                    tx,
+                    _stream: stream,
+                    status: None,
+                    headers: None,
+                    data: Data::Empty,
+                },
+            );
+            s_ref.send_payload(buf.freeze(), true).await?;
+
+            match rx.await {
+                Ok(Ok((status, mut data, headers, trailers))) => {
+                    match status {
+                        Some(st) => {
+                            if !st.is_success() {
+                                return Err(ServiceError::Response(Some(st), headers, data));
+                            }
+                        }
+                        None => return Err(ServiceError::Response(None, headers, data)),
+                    }
+                    let _compressed = data.get_u8();
+                    let len = data.get_u32();
+                    match <T::Output as Message>::read(&mut data.split_to(len as usize)) {
+                        Ok(output) => Ok(Response {
+                            output,
+                            headers,
+                            trailers,
+                        }),
+                        Err(e) => Err(ServiceError::Decode(e)),
+                    }
+                }
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err(ServiceError::Canceled),
+            }
+        })
     }
 }
 

@@ -1,5 +1,9 @@
 # Changes
 
+## [0.3.0-alpha.0] - 2022-12-xx
+
+* Use GAT for Transport trait
+
 ## [0.2.1] - 2022-12-04
 
 * Try to extract GrpcError instead of UnexpecetedEof

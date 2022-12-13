@@ -1,6 +1,5 @@
-use std::rc::Rc;
+use std::{future::Future, rc::Rc};
 
-use async_trait::async_trait;
 use ntex_h2::client;
 use ntex_http::error::Error as HttpError;
 use ntex_io::OnDisconnect;
@@ -14,16 +13,17 @@ pub use self::request::{Request, RequestContext, Response};
 
 use crate::service::MethodDef;
 
-#[async_trait(?Send)]
 pub trait Transport<T: MethodDef> {
     /// Errors produced by the transport.
     type Error: From<HttpError>;
 
-    async fn request(
-        &self,
-        args: &T::Input,
-        ctx: RequestContext,
-    ) -> Result<Response<T>, Self::Error>;
+    /// The transport response value.
+    type Future<'f>: Future<Output = Result<Response<T>, Self::Error>>
+    where
+        Self: 'f,
+        T::Input: 'f;
+
+    fn request<'a>(&'a self, args: &'a T::Input, ctx: RequestContext) -> Self::Future<'a>;
 }
 
 /// Client utils methods

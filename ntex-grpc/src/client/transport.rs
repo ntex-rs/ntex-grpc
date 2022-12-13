@@ -1,9 +1,9 @@
-use std::{cell::RefCell, convert::TryFrom, future::Future, str::FromStr};
+use std::{cell::RefCell, convert::TryFrom, str::FromStr};
 
 use ntex_bytes::{Buf, BufMut, Bytes, BytesMut};
 use ntex_h2::{self as h2, client, frame::StreamId, Stream};
 use ntex_http::{header, HeaderMap, Method, StatusCode};
-use ntex_util::{channel::oneshot, HashMap};
+use ntex_util::{channel::oneshot, HashMap, future::BoxFuture};
 
 use crate::service::MethodDef;
 use crate::{consts, utils::Data, DecodeError, GrpcStatus, Message, ServiceError};
@@ -27,12 +27,12 @@ pub(super) struct Inflight {
 impl<T: MethodDef> Transport<T> for Client {
     type Error = ServiceError;
 
-    type Future<'f> = impl Future<Output = Result<Response<T>, Self::Error>> + 'f
+    type Future<'f> = BoxFuture<'f, Result<Response<T>, Self::Error>>
     where Self: 'f,
           T::Input: 'f;
 
     fn request<'a>(&'a self, val: &'a T::Input, ctx: RequestContext) -> Self::Future<'a> {
-        async move {
+        Box::pin(async move {
             let len = val.encoded_len();
             let mut buf = BytesMut::with_capacity(len + 5);
             buf.put_u8(0); // compression
@@ -93,7 +93,7 @@ impl<T: MethodDef> Transport<T> for Client {
                 Ok(Err(err)) => Err(err),
                 Err(_) => Err(ServiceError::Canceled),
             }
-        }
+        })
     }
 }
 

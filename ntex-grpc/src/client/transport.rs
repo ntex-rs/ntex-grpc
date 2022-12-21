@@ -3,7 +3,7 @@ use std::{cell::RefCell, convert::TryFrom, str::FromStr};
 use ntex_bytes::{Buf, BufMut, Bytes, BytesMut};
 use ntex_h2::{self as h2, client, frame::StreamId, Stream};
 use ntex_http::{header, HeaderMap, Method, StatusCode};
-use ntex_util::{channel::oneshot, HashMap, future::BoxFuture};
+use ntex_util::{channel::oneshot, future::BoxFuture, HashMap};
 
 use crate::service::MethodDef;
 use crate::{consts, utils::Data, DecodeError, GrpcStatus, Message, ServiceError};

@@ -9,14 +9,14 @@
 /// DO NOT MODIFY. Auto-generated file
 
 ///  The request message containing the user's name.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct HelloRequest {
     pub name: ::ntex_grpc::ByteString,
     pub msg_id: crate::unique_id::UniqueId,
 }
 
 ///  The response message containing the greetings
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct HelloReply {
     pub message: ::ntex_grpc::ByteString,
 }

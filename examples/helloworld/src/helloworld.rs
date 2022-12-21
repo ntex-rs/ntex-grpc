@@ -9,13 +9,13 @@
 /// DO NOT MODIFY. Auto-generated file
 
 ///  The request message containing the user's name.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct HelloRequest {
     pub name: ::ntex_grpc::ByteString,
 }
 
 ///  The response message containing the greetings
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct HelloReply {
     pub metadata: i64,
     pub reply_type: hello_reply::Type,
@@ -66,7 +66,7 @@ pub mod hello_reply {
         }
     }
 
-    #[derive(Clone, PartialEq, Eq, Debug)]
+    #[derive(Clone, PartialEq, Debug)]
     pub enum Result {
         Success(super::ResponseResult),
         ServiceError(i64),
@@ -74,7 +74,7 @@ pub mod hello_reply {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct ResponseResult {
     pub message: ::ntex_grpc::ByteString,
 }

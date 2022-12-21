@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.3] - 2022-12-xx
+
+* Support f32, f64 #2
+
 ## [0.2.2] - 2022-12-12
 
 * Separate trait impls for generated code

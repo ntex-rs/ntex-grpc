@@ -782,6 +782,9 @@ impl Config {
             let file_name = file_names
                 .get(module)
                 .expect("every module should have a filename");
+            if file_name == "google.protobuf.rs" {
+                continue;
+            }
             let output_path = target.join(file_name);
 
             let previous_content = fs::read(&output_path);
@@ -1101,103 +1104,5 @@ pub fn protoc_include() -> PathBuf {
     match env::var_os("PROTOC_INCLUDE") {
         Some(include) => PathBuf::from(include),
         None => PathBuf::from(env!("PROTOC_INCLUDE")),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    /// An example service generator that generates a trait with methods corresponding to the
-    /// service methods.
-    struct ServiceTraitGenerator;
-    impl ServiceGenerator for ServiceTraitGenerator {
-        fn generate(&mut self, service: Service, buf: &mut String) {
-            // Generate a trait for the service.
-            service.comments.append_with_indent(0, buf);
-            buf.push_str(&format!("trait {} {{\n", &service.name));
-
-            // Generate the service methods.
-            for method in service.methods {
-                method.comments.append_with_indent(1, buf);
-                buf.push_str(&format!(
-                    "    fn {}({}) -> {};\n",
-                    method.name, method.input_type, method.output_type
-                ));
-            }
-
-            // Close out the trait.
-            buf.push_str("}\n");
-        }
-        fn finalize(&mut self, buf: &mut String) {
-            // Needs to be present only once, no matter how many services there are
-            buf.push_str("pub mod utils { }\n");
-        }
-    }
-
-    /// Implements `ServiceGenerator` and provides some state for assertions.
-    struct MockServiceGenerator {
-        state: Rc<RefCell<MockState>>,
-    }
-
-    /// Holds state for `MockServiceGenerator`
-    #[derive(Default)]
-    struct MockState {
-        service_names: Vec<String>,
-        package_names: Vec<String>,
-        finalized: u32,
-    }
-
-    impl MockServiceGenerator {
-        fn new(state: Rc<RefCell<MockState>>) -> Self {
-            Self { state }
-        }
-    }
-
-    impl ServiceGenerator for MockServiceGenerator {
-        fn generate(&mut self, service: Service, _buf: &mut String) {
-            let mut state = self.state.borrow_mut();
-            state.service_names.push(service.name);
-        }
-
-        fn finalize(&mut self, _buf: &mut String) {
-            let mut state = self.state.borrow_mut();
-            state.finalized += 1;
-        }
-
-        fn finalize_package(&mut self, package: &str, _buf: &mut String) {
-            let mut state = self.state.borrow_mut();
-            state.package_names.push(package.to_string());
-        }
-    }
-
-    #[test]
-    fn smoke_test() {
-        let _ = env_logger::try_init();
-        Config::new()
-            .service_generator(Box::new(ServiceTraitGenerator))
-            .compile_protos(&["src/smoke_test.proto"], &["src"])
-            .unwrap();
-    }
-
-    #[test]
-    fn finalize_package() {
-        let _ = env_logger::try_init();
-
-        let state = Rc::new(RefCell::new(MockState::default()));
-        let gen = MockServiceGenerator::new(Rc::clone(&state));
-
-        Config::new()
-            .service_generator(Box::new(gen))
-            .include_file("_protos.rs")
-            .compile_protos(&["src/hello.proto", "src/goodbye.proto"], &["src"])
-            .unwrap();
-
-        let state = state.borrow();
-        assert_eq!(&state.service_names, &["Greeting", "Farewell"]);
-        assert_eq!(&state.package_names, &["helloworld"]);
-        assert_eq!(state.finalized, 3);
     }
 }

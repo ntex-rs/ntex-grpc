@@ -1068,33 +1068,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_unescape_c_escape_string() {
-        assert_eq!(
-            &b"hello world"[..],
-            &unescape_c_escape_string("hello world")[..]
-        );
-
-        assert_eq!(&b"\0"[..], &unescape_c_escape_string(r#"\0"#)[..]);
-
-        assert_eq!(
-            &[0o012, 0o156],
-            &unescape_c_escape_string(r#"\012\156"#)[..]
-        );
-        assert_eq!(&[0x01, 0x02], &unescape_c_escape_string(r#"\x01\x02"#)[..]);
-
-        assert_eq!(
-            &b"\0\x01\x07\x08\x0C\n\r\t\x0B\\\'\"\xFE"[..],
-            &unescape_c_escape_string(r#"\0\001\a\b\f\n\r\t\v\\\'\"\xfe"#)[..]
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "incomplete hex value")]
-    fn test_unescape_c_escape_string_incomplete_hex_value() {
-        unescape_c_escape_string(r#"\x1"#);
-    }
-
-    #[test]
     fn test_strip_enum_prefix() {
         assert_eq!(strip_enum_prefix("Foo", "FooBar"), "Bar");
         assert_eq!(strip_enum_prefix("Foo", "Foobar"), "Foobar");

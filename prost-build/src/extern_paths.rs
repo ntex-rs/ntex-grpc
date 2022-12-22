@@ -33,11 +33,22 @@ impl ExternPaths {
         }
 
         if prost_types {
-            extern_paths.insert(".google.protobuf".to_string(), "::prost_types".to_string())?;
+            extern_paths.insert(
+                ".google.protobuf".to_string(),
+                "::ntex_grpc::google_types".to_string(),
+            )?;
+            extern_paths.insert(
+                ".google.protobuf.Duration".to_string(),
+                "::ntex_grpc::google_types::Duration".to_string(),
+            )?;
+            extern_paths.insert(
+                ".google.protobuf.Timestamp".to_string(),
+                "::ntex_grpc::google_types::Timestamp".to_string(),
+            )?;
             extern_paths.insert(".google.protobuf.BoolValue".to_string(), "bool".to_string())?;
             extern_paths.insert(
                 ".google.protobuf.BytesValue".to_string(),
-                "Vec<u8>".to_string(),
+                "::ntex_grpc::Bytes".into(),
             )?;
             extern_paths.insert(
                 ".google.protobuf.DoubleValue".to_string(),

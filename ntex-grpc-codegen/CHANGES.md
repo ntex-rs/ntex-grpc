@@ -1,8 +1,10 @@
 # Changes
 
-## [0.2.3] - 2022-12-xx
+## [0.2.3] - 2022-12-22
 
 * Support f32, f64 #2
+
+* Support Timestamp and Duration google types #3
 
 ## [0.2.2] - 2022-12-12
 

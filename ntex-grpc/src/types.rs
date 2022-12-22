@@ -384,7 +384,7 @@ impl<T: NativeType> NativeType for Vec<T> {
     }
 }
 
-impl<K: NativeType + Eq + Hash, V: NativeType + Eq, S: BuildHasher + Default> NativeType
+impl<K: NativeType + Eq + Hash, V: NativeType, S: BuildHasher + Default> NativeType
     for HashMap<K, V, S>
 {
     const TYPE: WireType = WireType::LengthDelimited;

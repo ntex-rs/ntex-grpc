@@ -4,6 +4,10 @@
 
 * Use GAT for Transport trait
 
+## [0.2.2] - 2022-12-22
+
+* Add Timestampt and Duration google types #3
+
 ## [0.2.1] - 2022-12-04
 
 * Try to extract GrpcError instead of UnexpecetedEof

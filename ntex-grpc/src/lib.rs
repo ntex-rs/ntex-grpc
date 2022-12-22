@@ -17,6 +17,9 @@ pub use crate::status::GrpcStatus;
 pub use crate::types::{Message, NativeType};
 
 #[doc(hidden)]
+pub mod google_types;
+
+#[doc(hidden)]
 pub mod encoding;
 #[doc(hidden)]
 pub use self::encoding::WireType;

@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.3] - 2022-12-22
+
+* Fix NativeType impl for HashMap
+
 ## [0.2.2] - 2022-12-22
 
 * Add Timestampt and Duration google types #3

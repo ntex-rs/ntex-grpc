@@ -63,17 +63,12 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             impl ::ntex_grpc::Service<::ntex_grpc::server::ServerRequest> for #ty {
                 type Response = ::ntex_grpc::server::ServerResponse;
                 type Error = ::ntex_grpc::server::ServerError;
-                type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>>>>;
+                type Future<'f> = ::ntex_grpc::BoxFuture<'f, Result<Self::Response, Self::Error>>;
 
-                #[inline]
-                fn poll_ready(&self, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
-                    std::task::Poll::Ready(Ok(()))
-                }
-
-                fn call(&self, mut req: ::ntex_grpc::server::ServerRequest) -> Self::Future {
+                fn call(&self, mut req: ::ntex_grpc::server::ServerRequest) -> Self::Future<'_> {
                     use ::ntex_grpc::{ServiceDef, MethodDef};
 
-                    let slf = self.clone();
+                    let slf = self;
                     Box::pin(async move {
                         match #srvpath::method_by_name(&req.name) {
                             #(#methods)*

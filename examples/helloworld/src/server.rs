@@ -29,9 +29,9 @@ impl ServiceFactory<server::ServerRequest> for GreeterServer {
     type Error = server::ServerError;
     type InitError = ();
     type Service = GreeterServer;
-    type Future = Ready<Self::Service, Self::InitError>;
+    type Future<'f> = Ready<Self::Service, Self::InitError>;
 
-    fn new_service(&self, _: ()) -> Self::Future {
+    fn create(&self, _: ()) -> Self::Future<'_> {
         Ready::Ok(GreeterServer)
     }
 }

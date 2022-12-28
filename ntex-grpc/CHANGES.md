@@ -1,8 +1,10 @@
 # Changes
 
-## [0.3.0-alpha.0] - 2022-12-xx
+## [0.3.0-beta.0] - 2022-12-28
 
 * Use GAT for Transport trait
+
+* Migrate to ntex-service 1.0
 
 ## [0.2.3] - 2022-12-22
 

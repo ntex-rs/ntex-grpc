@@ -1,5 +1,9 @@
 # Changes
 
+## [0.3.0] - 2023-01-04
+
+* 0.3 Release
+
 ## [0.3.0-beta.0] - 2022-12-28
 
 * Use GAT for Transport trait

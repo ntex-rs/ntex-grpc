@@ -1,5 +1,11 @@
 # Changes
 
+## [0.2.4] - 2023-01-09
+
+* Handle default values in Vec<T>
+
+* Handle not enough data to decode server message
+
 ## [0.2.3] - 2022-12-22
 
 * Fix NativeType impl for HashMap

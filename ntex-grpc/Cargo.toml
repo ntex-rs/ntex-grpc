@@ -1,6 +1,6 @@
 [package]
 name = "ntex-grpc"
-version = "0.2.3"
+version = "0.2.4"
 license = "MIT"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 description = "GRPC Client/Server framework"
@@ -31,7 +31,7 @@ log = "0.4"
 thiserror = "1.0"
 
 [dev-dependencies]
-env_logger = { version = "0.9", default-features = false }
+env_logger = { version = "0.10", default-features = false }
 openssl = "0.10"
 ntex = { version = "0.5", features = ["openssl", "tokio"] }
 ntex-tls = { version = "0.1", features = ["openssl"] }

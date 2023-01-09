@@ -239,6 +239,24 @@ where
                 let mut data = inflight.data.get();
                 let _compressed = data.get_u8();
                 let len = data.get_u32();
+                if (len as usize) > data.len() {
+                    if msg
+                        .stream()
+                        .send_response(StatusCode::OK, HeaderMap::default(), false)
+                        .is_ok()
+                    {
+                        let mut trailers = HeaderMap::default();
+                        trailers.insert(consts::GRPC_STATUS, GrpcStatus::InvalidArgument.into());
+                        trailers.insert(
+                            consts::GRPC_MESSAGE,
+                            HeaderValue::from_static(
+                                "Cannot decode request message: not enough data provided",
+                            ),
+                        );
+                        msg.stream().send_trailers(trailers);
+                    }
+                    return Either::Right(Ready::Ok(()));
+                }
                 let data = data.split_to(len as usize);
 
                 log::debug!("Call service {} method {}", inflight.service, inflight.name);

@@ -1,5 +1,11 @@
 # Changes
 
+## [0.3.1] - 2023-01-09
+
+* Handle default values in Vec<T>
+
+* Handle not enough data to decode server message
+
 ## [0.3.0] - 2023-01-04
 
 * 0.3 Release

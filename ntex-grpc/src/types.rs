@@ -369,7 +369,7 @@ impl<T: NativeType> NativeType for Vec<T> {
     /// Serialize protobuf field
     fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytesMut) {
         for item in self.iter() {
-            item.serialize(tag, DefaultValue::Default, dst);
+            item.serialize(tag, DefaultValue::Unknown, dst);
         }
     }
 

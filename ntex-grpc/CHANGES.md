@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.5] - 2023-01-10
+
+* Handle default values in HashMap
+
 ## [0.2.4] - 2023-01-09
 
 * Handle default values in Vec<T>

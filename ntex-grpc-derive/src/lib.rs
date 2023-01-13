@@ -45,7 +45,7 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                     headers: req.headers
                 };
 
-                let result = #ty::#fn_name(&slf, ::ntex_grpc::server::FromRequest::from(req)).await;
+                let result = #ty::#fn_name(slf, ::ntex_grpc::server::FromRequest::from(req)).await;
 
                 let response = ::ntex_grpc::server::Response::from(result);
                 let mut buf = ::ntex_grpc::BytesMut::new();

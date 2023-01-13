@@ -902,7 +902,7 @@ impl Config {
             let buf = modules.entry(request.0).or_insert_with(String::new);
             buf.insert_str(
                 0,
-                "#![allow(dead_code, unused_mut, unused_variables, clippy::identity_op, clippy::derivable_impls, clippy::unit_arg)]\n/// DO NOT MODIFY. Auto-generated file\n\n",
+                "#![allow(dead_code, unused_mut, unused_variables, clippy::identity_op, clippy::derivable_impls, clippy::unit_arg, clippy::derive_partial_eq_without_eq)]\n/// DO NOT MODIFY. Auto-generated file\n\n",
             );
             CodeGenerator::generate(self, &extern_paths, request.1, buf);
         }

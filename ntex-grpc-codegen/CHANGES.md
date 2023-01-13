@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.5] - 2023-01-xx
+
+* Add "clippy::derive_partial_eq_without_eq" to generated files
+
 ## [0.2.4] - 2022-12-22
 
 * Support f32, f64 #2

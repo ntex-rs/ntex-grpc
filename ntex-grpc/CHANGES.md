@@ -1,5 +1,9 @@
 # Changes
 
+## [0.3.3] - 2023-01-13
+
+* Handle request's future drop
+
 ## [0.3.2] - 2023-01-10
 
 * Handle default values in HashMap

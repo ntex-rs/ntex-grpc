@@ -1,7 +1,7 @@
 use std::{cell::RefCell, convert::TryFrom, str::FromStr};
 
 use ntex_bytes::{Buf, BufMut, Bytes, BytesMut};
-use ntex_h2::{self as h2, client, frame::StreamId, Stream};
+use ntex_h2::{self as h2, client, frame::Reason, frame::StreamId, Stream, StreamRef};
 use ntex_http::{header, HeaderMap, Method, StatusCode};
 use ntex_util::{channel::oneshot, future::BoxFuture, HashMap};
 
@@ -67,9 +67,10 @@ impl<T: MethodDef> Transport<T> for Client {
                     data: Data::Empty,
                 },
             );
+            let hnd = StreamHnd(&s_ref, &self.0);
             s_ref.send_payload(buf.freeze(), true).await?;
 
-            match rx.await {
+            let result = match rx.await {
                 Ok(Ok((status, mut data, headers, trailers))) => {
                     match status {
                         Some(st) => {
@@ -92,8 +93,19 @@ impl<T: MethodDef> Transport<T> for Client {
                 }
                 Ok(Err(err)) => Err(err),
                 Err(_) => Err(ServiceError::Canceled),
-            }
+            };
+            drop(hnd);
+            result
         })
+    }
+}
+
+struct StreamHnd<'a>(&'a StreamRef, &'a Inner);
+
+impl<'a> Drop for StreamHnd<'a> {
+    fn drop(&mut self) {
+        self.0.reset(Reason::CANCEL);
+        self.1.inflight.borrow_mut().remove(&self.0.id());
     }
 }
 

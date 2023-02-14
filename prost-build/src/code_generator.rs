@@ -541,7 +541,7 @@ impl<'a> CodeGenerator<'a> {
                 field.number(),
             ));
             encoded_len.push_str(&format!(
-                "{}::{}(ref value) => ::ntex_grpc::NativeType::serialized_len(value, {}, ::ntex_grpc::types::DefaultValue::Default),",
+                "{}::{}(ref value) => ::ntex_grpc::NativeType::serialized_len(value, {}, ::ntex_grpc::types::DefaultValue::Unknown),",
                 name,
                 to_upper_camel(field.name()),
                 field.number()

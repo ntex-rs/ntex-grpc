@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.7] - 2023-02-14
+
+* Fix codegen for "oneof" default value serialization
+
 ## [0.2.6] - 2023-02-14
 
 * Fix codegen for "oneof" default value serialization

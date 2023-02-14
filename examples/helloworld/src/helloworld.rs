@@ -367,28 +367,28 @@ mod _priv_impl {
                     ::ntex_grpc::NativeType::serialized_len(
                         value,
                         1,
-                        ::ntex_grpc::types::DefaultValue::Default,
+                        ::ntex_grpc::types::DefaultValue::Unknown,
                     )
                 }
                 hello_reply::Result::ServiceError(ref value) => {
                     ::ntex_grpc::NativeType::serialized_len(
                         value,
                         2,
-                        ::ntex_grpc::types::DefaultValue::Default,
+                        ::ntex_grpc::types::DefaultValue::Unknown,
                     )
                 }
                 hello_reply::Result::InvalidRequest(ref value) => {
                     ::ntex_grpc::NativeType::serialized_len(
                         value,
                         3,
-                        ::ntex_grpc::types::DefaultValue::Default,
+                        ::ntex_grpc::types::DefaultValue::Unknown,
                     )
                 }
                 hello_reply::Result::ErrorMessage(ref value) => {
                     ::ntex_grpc::NativeType::serialized_len(
                         value,
                         4,
-                        ::ntex_grpc::types::DefaultValue::Default,
+                        ::ntex_grpc::types::DefaultValue::Unknown,
                     )
                 }
             }

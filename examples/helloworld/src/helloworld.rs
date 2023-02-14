@@ -4,7 +4,8 @@
     unused_variables,
     clippy::identity_op,
     clippy::derivable_impls,
-    clippy::unit_arg
+    clippy::unit_arg,
+    clippy::derive_partial_eq_without_eq
 )]
 /// DO NOT MODIFY. Auto-generated file
 
@@ -71,6 +72,7 @@ pub mod hello_reply {
         Success(super::ResponseResult),
         ServiceError(i64),
         InvalidRequest(i64),
+        ErrorMessage(::ntex_grpc::ByteString),
     }
 }
 
@@ -158,13 +160,13 @@ mod _priv_impl {
         fn write(&self, dst: &mut ::ntex_grpc::BytesMut) {
             ::ntex_grpc::NativeType::serialize(
                 &self.metadata,
-                4,
+                5,
                 ::ntex_grpc::types::DefaultValue::Default,
                 dst,
             );
             ::ntex_grpc::NativeType::serialize(
                 &self.reply_type,
-                5,
+                6,
                 ::ntex_grpc::types::DefaultValue::Default,
                 dst,
             );
@@ -185,21 +187,21 @@ mod _priv_impl {
             while !src.is_empty() {
                 let (tag, wire_type) = ::ntex_grpc::encoding::decode_key(src)?;
                 match tag {
-                    4 => ::ntex_grpc::NativeType::deserialize(
+                    5 => ::ntex_grpc::NativeType::deserialize(
                         &mut msg.metadata,
                         tag,
                         wire_type,
                         src,
                     )
                     .map_err(|err| err.push(STRUCT_NAME, "metadata"))?,
-                    5 => ::ntex_grpc::NativeType::deserialize(
+                    6 => ::ntex_grpc::NativeType::deserialize(
                         &mut msg.reply_type,
                         tag,
                         wire_type,
                         src,
                     )
                     .map_err(|err| err.push(STRUCT_NAME, "reply_type"))?,
-                    1 | 2 | 3 => {
+                    1 | 2 | 3 | 4 => {
                         ::ntex_grpc::NativeType::deserialize(&mut msg.result, tag, wire_type, src)
                             .map_err(|err| err.push(STRUCT_NAME, "result"))?
                     }
@@ -213,11 +215,11 @@ mod _priv_impl {
         fn encoded_len(&self) -> usize {
             0 + ::ntex_grpc::NativeType::serialized_len(
                 &self.metadata,
-                4,
+                5,
                 ::ntex_grpc::types::DefaultValue::Default,
             ) + ::ntex_grpc::NativeType::serialized_len(
                 &self.reply_type,
-                5,
+                6,
                 ::ntex_grpc::types::DefaultValue::Default,
             ) + ::ntex_grpc::NativeType::serialized_len(
                 &self.result,
@@ -301,14 +303,14 @@ mod _priv_impl {
                 hello_reply::Result::Success(ref value) => ::ntex_grpc::NativeType::serialize(
                     value,
                     1,
-                    ::ntex_grpc::types::DefaultValue::Default,
+                    ::ntex_grpc::types::DefaultValue::Unknown,
                     dst,
                 ),
                 hello_reply::Result::ServiceError(ref value) => {
                     ::ntex_grpc::NativeType::serialize(
                         value,
                         2,
-                        ::ntex_grpc::types::DefaultValue::Default,
+                        ::ntex_grpc::types::DefaultValue::Unknown,
                         dst,
                     )
                 }
@@ -316,7 +318,15 @@ mod _priv_impl {
                     ::ntex_grpc::NativeType::serialize(
                         value,
                         3,
-                        ::ntex_grpc::types::DefaultValue::Default,
+                        ::ntex_grpc::types::DefaultValue::Unknown,
+                        dst,
+                    )
+                }
+                hello_reply::Result::ErrorMessage(ref value) => {
+                    ::ntex_grpc::NativeType::serialize(
+                        value,
+                        4,
+                        ::ntex_grpc::types::DefaultValue::Unknown,
                         dst,
                     )
                 }
@@ -340,6 +350,9 @@ mod _priv_impl {
                 ),
                 3 => hello_reply::Result::InvalidRequest(
                     ::ntex_grpc::NativeType::deserialize_default(3, wire_type, src)?,
+                ),
+                4 => hello_reply::Result::ErrorMessage(
+                    ::ntex_grpc::NativeType::deserialize_default(4, wire_type, src)?,
                 ),
                 _ => unreachable!("invalid Result, tag: {}", tag),
             };
@@ -368,6 +381,13 @@ mod _priv_impl {
                     ::ntex_grpc::NativeType::serialized_len(
                         value,
                         3,
+                        ::ntex_grpc::types::DefaultValue::Default,
+                    )
+                }
+                hello_reply::Result::ErrorMessage(ref value) => {
+                    ::ntex_grpc::NativeType::serialized_len(
+                        value,
+                        4,
                         ::ntex_grpc::types::DefaultValue::Default,
                     )
                 }

@@ -37,8 +37,9 @@ message HelloReply {
     ResponseResult success = 1;
     int64 serviceError = 2;
     int64 invalidRequest = 3;
+    string errorMessage = 4;
   }
-  int64 metadata = 4;
+  int64 metadata = 5;
 
   enum Type {
     UNIVERSAL = 0;
@@ -49,7 +50,7 @@ message HelloReply {
     PRODUCTS = 5;
     VIDEO = 6;
   }
-  Type replyType = 5;
+  Type replyType = 6;
 }
 
 message ResponseResult {

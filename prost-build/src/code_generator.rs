@@ -528,7 +528,7 @@ impl<'a> CodeGenerator<'a> {
         self.depth += 1;
         for (field, idx) in &fields {
             write.push_str(&format!(
-                "{}::{}(ref value) => ::ntex_grpc::NativeType::serialize(value, {}, ::ntex_grpc::types::DefaultValue::Default, dst),",
+                "{}::{}(ref value) => ::ntex_grpc::NativeType::serialize(value, {}, ::ntex_grpc::types::DefaultValue::Unknown, dst),",
                 name,
                 to_upper_camel(field.name()),
                 field.number()

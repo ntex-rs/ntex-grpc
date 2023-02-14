@@ -1,6 +1,10 @@
 # Changes
 
-## [0.2.5] - 2023-01-xx
+## [0.2.6] - 2023-02-14
+
+* Fix codegen for "oneof" default value serialization
+
+## [0.2.5] - 2023-01-13
 
 * Add "clippy::derive_partial_eq_without_eq" to generated files
 

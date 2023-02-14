@@ -12,6 +12,7 @@ pub struct GreeterServer;
 impl GreeterServer {
     #[method(SayHello)]
     async fn say_hello(&self, req: HelloRequest) -> HelloReply {
+        log::trace!("Received request: {:?}", req);
         HelloReply {
             result: Some(helloworld::hello_reply::Result::Success(
                 helloworld::ResponseResult {

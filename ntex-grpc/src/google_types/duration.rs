@@ -4,7 +4,8 @@
     unused_variables,
     clippy::identity_op,
     clippy::derivable_impls,
-    clippy::unit_arg
+    clippy::unit_arg,
+    clippy::derive_partial_eq_without_eq
 )]
 /// DO NOT MODIFY. Auto-generated file
 

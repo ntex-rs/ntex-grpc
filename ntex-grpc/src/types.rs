@@ -526,6 +526,7 @@ varint!(i32, 0i32);
 varint!(i64, 0i64);
 varint!(u32, 0u32);
 varint!(u64, 0u64);
+
 // varint!(i32, sint32,
 // to_uint64(value) {
 //     ((value << 1) ^ (value >> 31)) as u32 as u64

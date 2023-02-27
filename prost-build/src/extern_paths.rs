@@ -45,30 +45,42 @@ impl ExternPaths {
                 ".google.protobuf.Timestamp".to_string(),
                 "::ntex_grpc::google_types::Timestamp".to_string(),
             )?;
-            extern_paths.insert(".google.protobuf.BoolValue".to_string(), "bool".to_string())?;
+            extern_paths.insert(
+                ".google.protobuf.BoolValue".to_string(),
+                "::ntex_grpc::google_types::BoolValue".to_string(),
+            )?;
             extern_paths.insert(
                 ".google.protobuf.BytesValue".to_string(),
-                "::ntex_grpc::Bytes".into(),
+                "::ntex_grpc::google_types::BytesValue".into(),
             )?;
             extern_paths.insert(
                 ".google.protobuf.DoubleValue".to_string(),
-                "f64".to_string(),
+                "::ntex_grpc::google_types::DoubleValue".to_string(),
             )?;
             extern_paths.insert(".google.protobuf.Empty".to_string(), "()".to_string())?;
-            extern_paths.insert(".google.protobuf.FloatValue".to_string(), "f32".to_string())?;
-            extern_paths.insert(".google.protobuf.Int32Value".to_string(), "i32".to_string())?;
-            extern_paths.insert(".google.protobuf.Int64Value".to_string(), "i64".to_string())?;
+            extern_paths.insert(
+                ".google.protobuf.FloatValue".to_string(),
+                "::ntex_grpc::google_types::FloatValue".to_string(),
+            )?;
+            extern_paths.insert(
+                ".google.protobuf.Int32Value".to_string(),
+                "::ntex_grpc::google_types::Int32Value".to_string(),
+            )?;
+            extern_paths.insert(
+                ".google.protobuf.Int64Value".to_string(),
+                "::ntex_grpc::google_types::Int64Value".to_string(),
+            )?;
             extern_paths.insert(
                 ".google.protobuf.StringValue".to_string(),
-                "::ntex_grpc::types::ByteString".to_string(),
+                "::ntex_grpc::google_types::StringValue".to_string(),
             )?;
             extern_paths.insert(
                 ".google.protobuf.UInt32Value".to_string(),
-                "u32".to_string(),
+                "::ntex_grpc::google_types::UInt32Value".to_string(),
             )?;
             extern_paths.insert(
                 ".google.protobuf.UInt64Value".to_string(),
-                "u64".to_string(),
+                "::ntex_grpc::google_types::UInt64Value".to_string(),
             )?;
         }
 

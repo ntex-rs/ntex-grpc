@@ -1,5 +1,9 @@
 # Changes
 
+## [0.3.4] - 2023-02-27
+
+* Add google wrapper types
+
 ## [0.3.3] - 2023-01-13
 
 * Handle request's future drop

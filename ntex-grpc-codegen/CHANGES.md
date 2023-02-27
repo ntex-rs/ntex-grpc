@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.8] - 2023-02-27
+
+* Fix google wrapper types codegen
+
 ## [0.2.7] - 2023-02-14
 
 * Fix codegen for "oneof" default value serialization

@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.9] - 2023-03-29
+
+* Strip enum value name prefix
+
 ## [0.2.8] - 2023-02-27
 
 * Fix google wrapper types codegen

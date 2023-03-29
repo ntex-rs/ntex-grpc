@@ -1,5 +1,6 @@
 use std::{collections::HashMap, collections::HashSet, iter};
 
+use heck::ToSnekCase;
 use itertools::{Either, Itertools};
 use log::debug;
 use multimap::MultiMap;
@@ -317,7 +318,10 @@ impl<'a> CodeGenerator<'a> {
                     {}
                  }}
                  Ok(msg)
-             }}\n\n", to_upper_camel(&message_name), read));
+             }}\n\n",
+            to_upper_camel(&message_name),
+            read
+        ));
         self.priv_buf.push_str(&format!(
             "#[inline]
              fn encoded_len(&self) -> usize {{
@@ -568,7 +572,8 @@ impl<'a> CodeGenerator<'a> {
         self.push_indent();
         self.buf.push_str("}\n");
 
-        self.priv_buf.push_str(&format!("
+        self.priv_buf.push_str(&format!(
+            "
         impl ::ntex_grpc::NativeType for {} {{
             const TYPE: ::ntex_grpc::WireType = ::ntex_grpc::WireType::LengthDelimited;
 
@@ -579,7 +584,9 @@ impl<'a> CodeGenerator<'a> {
             fn encode_value(&self, _: &mut ::ntex_grpc::BytesMut) {{
                 panic!(\"Not supported\")
             }}
-        ", name));
+        ",
+            name
+        ));
 
         self.priv_buf.push_str(&format!(
             "
@@ -715,6 +722,40 @@ impl<'a> CodeGenerator<'a> {
         self.depth += 1;
         self.path.push(2);
 
+        // generate to_str_name()
+        self.push_indent();
+        self.buf.push_str(
+            "/// String value of the enum field names used in the ProtoBuf definition with stripped prefix.\n",
+        );
+        self.push_indent();
+
+        self.buf
+            .push_str("pub fn to_str_name(self) -> &'static str {\n");
+        self.depth += 1;
+
+        self.push_indent();
+        self.buf.push_str("match self {\n");
+        self.depth += 1;
+
+        for variant in variant_mappings.iter() {
+            self.push_indent();
+            self.buf.push_str(&enum_name);
+            self.buf.push_str("::");
+            self.buf.push_str(&variant.generated_variant_name);
+            self.buf.push_str(" => \"");
+            self.buf.push_str(variant.proto_value);
+            self.buf.push_str("\",\n");
+        }
+
+        self.depth -= 1;
+        self.push_indent();
+        self.buf.push_str("}\n"); // End of match
+
+        self.depth -= 1;
+        self.push_indent();
+        self.buf.push_str("}\n\n"); // End of to_str_name()
+
+        // generate to_origin_name()
         self.push_indent();
         self.buf.push_str(
             "/// String value of the enum field names used in the ProtoBuf definition.\n",
@@ -730,8 +771,9 @@ impl<'a> CodeGenerator<'a> {
             "/// (if the ProtoBuf definition does not change) and safe for programmatic use.\n",
         );
         self.push_indent();
+
         self.buf
-            .push_str("pub fn to_str_name(self) -> &'static str {\n");
+            .push_str("pub fn to_origin_name(self) -> &'static str {\n");
         self.depth += 1;
 
         self.push_indent();
@@ -754,7 +796,7 @@ impl<'a> CodeGenerator<'a> {
 
         self.depth -= 1;
         self.push_indent();
-        self.buf.push_str("}\n"); // End of to_str_name()
+        self.buf.push_str("}\n\n"); // End of to_origin_name()
 
         self.path.pop();
         self.depth -= 1;
@@ -1001,10 +1043,12 @@ fn strip_enum_prefix(prefix: &str, name: &str) -> String {
     }
 }
 
+#[derive(Debug)]
 struct EnumVariantMapping<'a> {
     path_idx: usize,
     proto_name: &'a str,
     proto_number: i32,
+    proto_value: &'a str,
     generated_variant_name: String,
 }
 
@@ -1016,6 +1060,8 @@ fn build_enum_value_mappings<'a>(
     let mut numbers = HashSet::new();
     let mut generated_names = HashMap::new();
     let mut mappings = Vec::new();
+    let enum_name_lowercase = generated_enum_name.to_lowercase();
+    let enum_name_snek = generated_enum_name.to_snek_case().to_lowercase();
 
     for (idx, value) in enum_values.iter().enumerate() {
         // Skip duplicate enum values. Protobuf allows this when the
@@ -1037,10 +1083,37 @@ fn build_enum_value_mappings<'a>(
                 generated_variant_name, old_v, value.name());
         }
 
+        let val = if do_strip_enum_prefix {
+            let mut val = value.name();
+            let val_lower = val.to_lowercase();
+
+            if val_lower.starts_with(&enum_name_lowercase) {
+                val.split_at(generated_enum_name.len()).1
+            } else if val_lower.starts_with(&enum_name_snek) {
+                val = val.split_at(enum_name_snek.len()).1;
+                val = val.strip_prefix("_").unwrap_or(val);
+                if val
+                    .chars()
+                    .next()
+                    .map(char::is_alphanumeric)
+                    .unwrap_or(false)
+                {
+                    val
+                } else {
+                    value.name()
+                }
+            } else {
+                val
+            }
+        } else {
+            value.name()
+        };
+
         mappings.push(EnumVariantMapping {
             path_idx: idx,
             proto_name: value.name(),
             proto_number: value.number(),
+            proto_value: val,
             generated_variant_name,
         })
     }

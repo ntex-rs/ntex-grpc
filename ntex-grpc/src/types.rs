@@ -359,9 +359,18 @@ impl<T: NativeType> NativeType for Vec<T> {
         wtype: WireType,
         src: &mut Bytes,
     ) -> Result<(), DecodeError> {
-        let mut value: T = Default::default();
-        value.deserialize(tag, wtype, src)?;
-        self.push(value);
+        if T::TYPE == WireType::Varint {
+            let len = encoding::decode_varint(src)? as usize;
+            for _ in 0..len {
+                let mut value: T = Default::default();
+                value.merge(src)?;
+                self.push(value);
+            }
+        } else {
+            let mut value: T = Default::default();
+            value.deserialize(tag, wtype, src)?;
+            self.push(value);
+        }
         Ok(())
     }
 

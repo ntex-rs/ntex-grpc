@@ -1,5 +1,9 @@
 # Changes
 
+## [0.3.6] - 2023-05-02
+
+* Fix handling Vec of varint types
+
 ## [0.3.5] - 2023-04-06
 
 * Fix panic on error after stream eof

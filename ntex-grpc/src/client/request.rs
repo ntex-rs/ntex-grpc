@@ -187,6 +187,8 @@ pub struct Response<T: MethodDef> {
     pub output: T::Output,
     pub headers: HeaderMap,
     pub trailers: HeaderMap,
+    pub req_size: usize,
+    pub res_size: usize,
 }
 
 impl<T: MethodDef> Response<T> {

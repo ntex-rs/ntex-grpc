@@ -376,8 +376,16 @@ impl<T: NativeType> NativeType for Vec<T> {
 
     /// Serialize protobuf field
     fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytesMut) {
-        for item in self.iter() {
-            item.serialize(tag, DefaultValue::Unknown, dst);
+        if T::TYPE == WireType::Varint {
+            encoding::encode_key(tag, WireType::LengthDelimited, dst);
+            encoding::encode_varint(self.len() as u64, dst);
+            for item in self.iter() {
+                item.encode_value(dst);
+            }
+        } else {
+            for item in self.iter() {
+                item.serialize(tag, DefaultValue::Unknown, dst);
+            }
         }
     }
 
@@ -388,7 +396,12 @@ impl<T: NativeType> NativeType for Vec<T> {
 
     /// Protobuf field length
     fn encoded_len(&self, tag: u32) -> usize {
-        self.iter().map(|value| value.encoded_len(tag)).sum()
+        if T::TYPE == WireType::Varint {
+            self.iter().map(|value| value.value_len()).sum::<usize>()
+                + encoding::encoded_len_varint(self.len() as u64)
+        } else {
+            self.iter().map(|value| value.encoded_len(tag)).sum()
+        }
     }
 }
 
@@ -517,6 +530,11 @@ macro_rules! varint {
             #[inline]
             fn encoded_len(&$slf, tag: u32) -> usize {
                 encoding::key_len(tag) + encoding::encoded_len_varint($to_uint64)
+            }
+
+            #[inline]
+            fn value_len(&$slf) -> usize {
+                encoding::encoded_len_varint($to_uint64)
             }
 
             #[inline]

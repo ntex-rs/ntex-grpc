@@ -1,5 +1,9 @@
 # Changes
 
+## [0.3.7] - 2023-05-03
+
+* Fix handling Vec of varint types for server
+
 ## [0.3.6] - 2023-05-02
 
 * Fix handling Vec of varint types

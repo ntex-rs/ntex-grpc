@@ -38,6 +38,7 @@ impl<T: MethodDef> Transport<T> for Client {
             buf.put_u8(0); // compression
             buf.put_u32(len as u32); // length
             val.write(&mut buf);
+            let req_size = buf.len();
 
             let mut hdrs = HeaderMap::new();
             hdrs.append(header::CONTENT_TYPE, consts::HDRV_CT_GRPC);
@@ -87,6 +88,8 @@ impl<T: MethodDef> Transport<T> for Client {
                             output,
                             headers,
                             trailers,
+                            req_size,
+                            res_size: data.len(),
                         }),
                         Err(e) => Err(ServiceError::Decode(e)),
                     }

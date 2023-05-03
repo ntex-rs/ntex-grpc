@@ -398,6 +398,7 @@ impl<T: NativeType> NativeType for Vec<T> {
     fn encoded_len(&self, tag: u32) -> usize {
         if T::TYPE == WireType::Varint {
             self.iter().map(|value| value.value_len()).sum::<usize>()
+                + encoding::key_len(tag)
                 + encoding::encoded_len_varint(self.len() as u64)
         } else {
             self.iter().map(|value| value.encoded_len(tag)).sum()

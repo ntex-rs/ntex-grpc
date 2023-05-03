@@ -843,6 +843,11 @@ impl<'a> CodeGenerator<'a> {
                  }}
 
                  #[inline]
+                 fn value_len(&self) -> usize {{
+                     ::ntex_grpc::encoding::encoded_len_varint(*self as i32 as u64)
+                 }}
+
+                 #[inline]
                  fn is_default(&self) -> bool {{
                      self == &{}::{}
                  }}

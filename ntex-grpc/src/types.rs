@@ -361,9 +361,10 @@ impl<T: NativeType> NativeType for Vec<T> {
     ) -> Result<(), DecodeError> {
         if T::TYPE == WireType::Varint {
             let len = encoding::decode_varint(src)? as usize;
-            for _ in 0..len {
+            let mut buf = src.split_to(len);
+            while !buf.is_empty() {
                 let mut value: T = Default::default();
-                value.merge(src)?;
+                value.merge(&mut buf)?;
                 self.push(value);
             }
         } else {
@@ -378,7 +379,10 @@ impl<T: NativeType> NativeType for Vec<T> {
     fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytesMut) {
         if T::TYPE == WireType::Varint {
             encoding::encode_key(tag, WireType::LengthDelimited, dst);
-            encoding::encode_varint(self.len() as u64, dst);
+            encoding::encode_varint(
+                self.iter().map(|v| v.value_len()).sum::<usize>() as u64,
+                dst,
+            );
             for item in self.iter() {
                 item.encode_value(dst);
             }

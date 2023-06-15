@@ -3,12 +3,12 @@ use std::{cell::RefCell, future::Future, rc::Rc};
 use ntex_connect::{Address, Connect, ConnectError, Connector as DefaultConnector};
 use ntex_h2::{self as h2, client};
 use ntex_io::IoBoxed;
-use ntex_service::{fn_service, Service};
+use ntex_service::{fn_service, Container, Service};
 use ntex_util::{future::Ready, HashMap};
 
 use crate::client::{transport::Inner, Client, ClientError, ClientInformation};
 
-pub struct Connector<A, T>(Rc<client::Connector<A, T>>);
+pub struct Connector<A: Address, T>(Container<client::Connector<A, T>>);
 
 impl<A, T> Connector<A, T>
 where
@@ -16,7 +16,7 @@ where
 {
     /// Create new grpc connector
     pub fn new(connector: client::Connector<A, T>) -> Connector<A, T> {
-        Connector(Rc::new(connector))
+        Connector(Container::new(connector))
     }
 }
 
@@ -45,7 +45,7 @@ where
     IoBoxed: From<T::Response>,
 {
     fn from(connector: client::Connector<A, T>) -> Self {
-        Self(Rc::new(connector))
+        Self(Container::new(connector))
     }
 }
 

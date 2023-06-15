@@ -8,7 +8,7 @@ mod helloworld;
 use self::helloworld::{GreeterClient, HelloRequest};
 
 fn main() {
-    std::env::set_var("RUST_LOG", "trace");
+    std::env::set_var("RUST_LOG", "ntex_h2=info");
     env_logger::init();
 
     let matches = clap::App::new("helloworld client")
@@ -49,6 +49,8 @@ fn main() {
                             client
                                 .say_hello(&HelloRequest {
                                     name: "world".into(),
+                                    data1: vec![-234234234, 123412414, 45456],
+                                    data2: vec![helloworld::DocumentType::Namespace],
                                 })
                                 .await
                                 .unwrap();
@@ -61,12 +63,12 @@ fn main() {
                     let res = client
                         .say_hello(&HelloRequest {
                             name: "world".into(),
+                            data1: vec![-234234234, 123412414, 45456],
+                            data2: vec![helloworld::DocumentType::Namespace],
                         })
                         .await
                         .unwrap();
-                    println!("RES: {:?}", res);
                     counters.register_request();
-                    break;
                 }
             });
         });

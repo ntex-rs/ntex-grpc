@@ -13,72 +13,77 @@
 #[derive(Clone, PartialEq, Debug)]
 pub struct HelloRequest {
     pub name: ::ntex_grpc::ByteString,
+    pub data1: Vec<i64>,
+    pub data2: Vec<DocumentType>,
 }
 
 ///  The response message containing the greetings
 #[derive(Clone, PartialEq, Debug)]
 pub struct HelloReply {
-    pub metadata: i64,
-    pub reply_type: hello_reply::Type,
-    pub result: Option<hello_reply::Result>,
-}
-
-/// Nested message and enum types in `HelloReply`.
-pub mod hello_reply {
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-    #[repr(i32)]
-    pub enum Type {
-        Universal = 0,
-        Web = 1,
-        Images = 2,
-        Local = 3,
-        News = 4,
-        Products = 5,
-        Video = 6,
-    }
-
-    impl Type {
-        /// String value of the enum field names used in the ProtoBuf definition.
-        ///
-        /// The values are not transformed in any way and thus are considered stable
-        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-        pub fn to_str_name(self) -> &'static str {
-            match self {
-                Type::Universal => "UNIVERSAL",
-                Type::Web => "WEB",
-                Type::Images => "IMAGES",
-                Type::Local => "LOCAL",
-                Type::News => "NEWS",
-                Type::Products => "PRODUCTS",
-                Type::Video => "VIDEO",
-            }
-        }
-        pub fn from_i32(value: i32) -> ::std::option::Option<Self> {
-            match value {
-                0 => Some(Type::Universal),
-                1 => Some(Type::Web),
-                2 => Some(Type::Images),
-                3 => Some(Type::Local),
-                4 => Some(Type::News),
-                5 => Some(Type::Products),
-                6 => Some(Type::Video),
-                _ => ::std::option::Option::None,
-            }
-        }
-    }
-
-    #[derive(Clone, PartialEq, Debug)]
-    pub enum Result {
-        Success(super::ResponseResult),
-        ServiceError(i64),
-        InvalidRequest(i64),
-        ErrorMessage(::ntex_grpc::ByteString),
-    }
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub struct ResponseResult {
+    pub data5: Vec<DocumentType>,
+    pub data6: Vec<i64>,
     pub message: ::ntex_grpc::ByteString,
+    pub tag: u32,
+    pub data1: Vec<u32>,
+    pub data2: Vec<::ntex_grpc::ByteString>,
+    pub data3: ::ntex_grpc::HashMap<::ntex_grpc::ByteString, u32>,
+    pub data4: DocumentType,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(i32)]
+pub enum DocumentType {
+    Broker = 0,
+    Namespace = 1,
+    TopicSpace = 2,
+    CertificateList = 3,
+    PermissionBindingList = 4,
+    ClientGroupList = 5,
+    Quota = 6,
+}
+
+impl DocumentType {
+    /// String value of the enum field names used in the ProtoBuf definition with stripped prefix.
+    pub fn to_str_name(self) -> &'static str {
+        match self {
+            DocumentType::Broker => "BROKER",
+            DocumentType::Namespace => "NAMESPACE",
+            DocumentType::TopicSpace => "TOPIC_SPACE",
+            DocumentType::CertificateList => "CERTIFICATE_LIST",
+            DocumentType::PermissionBindingList => "PERMISSION_BINDING_LIST",
+            DocumentType::ClientGroupList => "CLIENT_GROUP_LIST",
+            DocumentType::Quota => "QUOTA",
+        }
+    }
+
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn to_origin_name(self) -> &'static str {
+        match self {
+            DocumentType::Broker => "BROKER",
+            DocumentType::Namespace => "NAMESPACE",
+            DocumentType::TopicSpace => "TOPIC_SPACE",
+            DocumentType::CertificateList => "CERTIFICATE_LIST",
+            DocumentType::PermissionBindingList => "PERMISSION_BINDING_LIST",
+            DocumentType::ClientGroupList => "CLIENT_GROUP_LIST",
+            DocumentType::Quota => "QUOTA",
+        }
+    }
+
+    pub fn from_i32(value: i32) -> ::std::option::Option<Self> {
+        match value {
+            0 => Some(DocumentType::Broker),
+            1 => Some(DocumentType::Namespace),
+            2 => Some(DocumentType::TopicSpace),
+            3 => Some(DocumentType::CertificateList),
+            4 => Some(DocumentType::PermissionBindingList),
+            5 => Some(DocumentType::ClientGroupList),
+            6 => Some(DocumentType::Quota),
+            _ => ::std::option::Option::None,
+        }
+    }
 }
 
 /// `Greeter` service definition
@@ -117,6 +122,18 @@ mod _priv_impl {
                 ::ntex_grpc::types::DefaultValue::Default,
                 dst,
             );
+            ::ntex_grpc::NativeType::serialize(
+                &self.data1,
+                2,
+                ::ntex_grpc::types::DefaultValue::Default,
+                dst,
+            );
+            ::ntex_grpc::NativeType::serialize(
+                &self.data2,
+                3,
+                ::ntex_grpc::types::DefaultValue::Default,
+                dst,
+            );
         }
 
         #[inline]
@@ -130,6 +147,10 @@ mod _priv_impl {
                 match tag {
                     1 => ::ntex_grpc::NativeType::deserialize(&mut msg.name, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, "name"))?,
+                    2 => ::ntex_grpc::NativeType::deserialize(&mut msg.data1, tag, wire_type, src)
+                        .map_err(|err| err.push(STRUCT_NAME, "data1"))?,
+                    3 => ::ntex_grpc::NativeType::deserialize(&mut msg.data2, tag, wire_type, src)
+                        .map_err(|err| err.push(STRUCT_NAME, "data2"))?,
                     _ => ::ntex_grpc::encoding::skip_field(wire_type, tag, src)?,
                 }
             }
@@ -142,6 +163,14 @@ mod _priv_impl {
                 &self.name,
                 1,
                 ::ntex_grpc::types::DefaultValue::Default,
+            ) + ::ntex_grpc::NativeType::serialized_len(
+                &self.data1,
+                2,
+                ::ntex_grpc::types::DefaultValue::Default,
+            ) + ::ntex_grpc::NativeType::serialized_len(
+                &self.data2,
+                3,
+                ::ntex_grpc::types::DefaultValue::Default,
             )
         }
     }
@@ -151,6 +180,8 @@ mod _priv_impl {
         fn default() -> Self {
             Self {
                 name: ::core::default::Default::default(),
+                data1: ::core::default::Default::default(),
+                data2: ::core::default::Default::default(),
             }
         }
     }
@@ -159,20 +190,50 @@ mod _priv_impl {
         #[inline]
         fn write(&self, dst: &mut ::ntex_grpc::BytesMut) {
             ::ntex_grpc::NativeType::serialize(
-                &self.metadata,
+                &self.data5,
+                1,
+                ::ntex_grpc::types::DefaultValue::Default,
+                dst,
+            );
+            ::ntex_grpc::NativeType::serialize(
+                &self.data6,
+                2,
+                ::ntex_grpc::types::DefaultValue::Default,
+                dst,
+            );
+            ::ntex_grpc::NativeType::serialize(
+                &self.message,
+                3,
+                ::ntex_grpc::types::DefaultValue::Default,
+                dst,
+            );
+            ::ntex_grpc::NativeType::serialize(
+                &self.tag,
+                4,
+                ::ntex_grpc::types::DefaultValue::Default,
+                dst,
+            );
+            ::ntex_grpc::NativeType::serialize(
+                &self.data1,
                 5,
                 ::ntex_grpc::types::DefaultValue::Default,
                 dst,
             );
             ::ntex_grpc::NativeType::serialize(
-                &self.reply_type,
+                &self.data2,
                 6,
                 ::ntex_grpc::types::DefaultValue::Default,
                 dst,
             );
             ::ntex_grpc::NativeType::serialize(
-                &self.result,
-                0,
+                &self.data3,
+                7,
+                ::ntex_grpc::types::DefaultValue::Default,
+                dst,
+            );
+            ::ntex_grpc::NativeType::serialize(
+                &self.data4,
+                8,
                 ::ntex_grpc::types::DefaultValue::Default,
                 dst,
             );
@@ -187,24 +248,24 @@ mod _priv_impl {
             while !src.is_empty() {
                 let (tag, wire_type) = ::ntex_grpc::encoding::decode_key(src)?;
                 match tag {
-                    5 => ::ntex_grpc::NativeType::deserialize(
-                        &mut msg.metadata,
-                        tag,
-                        wire_type,
-                        src,
-                    )
-                    .map_err(|err| err.push(STRUCT_NAME, "metadata"))?,
-                    6 => ::ntex_grpc::NativeType::deserialize(
-                        &mut msg.reply_type,
-                        tag,
-                        wire_type,
-                        src,
-                    )
-                    .map_err(|err| err.push(STRUCT_NAME, "reply_type"))?,
-                    1 | 2 | 3 | 4 => {
-                        ::ntex_grpc::NativeType::deserialize(&mut msg.result, tag, wire_type, src)
-                            .map_err(|err| err.push(STRUCT_NAME, "result"))?
+                    1 => ::ntex_grpc::NativeType::deserialize(&mut msg.data5, tag, wire_type, src)
+                        .map_err(|err| err.push(STRUCT_NAME, "data5"))?,
+                    2 => ::ntex_grpc::NativeType::deserialize(&mut msg.data6, tag, wire_type, src)
+                        .map_err(|err| err.push(STRUCT_NAME, "data6"))?,
+                    3 => {
+                        ::ntex_grpc::NativeType::deserialize(&mut msg.message, tag, wire_type, src)
+                            .map_err(|err| err.push(STRUCT_NAME, "message"))?
                     }
+                    4 => ::ntex_grpc::NativeType::deserialize(&mut msg.tag, tag, wire_type, src)
+                        .map_err(|err| err.push(STRUCT_NAME, "tag"))?,
+                    5 => ::ntex_grpc::NativeType::deserialize(&mut msg.data1, tag, wire_type, src)
+                        .map_err(|err| err.push(STRUCT_NAME, "data1"))?,
+                    6 => ::ntex_grpc::NativeType::deserialize(&mut msg.data2, tag, wire_type, src)
+                        .map_err(|err| err.push(STRUCT_NAME, "data2"))?,
+                    7 => ::ntex_grpc::NativeType::deserialize(&mut msg.data3, tag, wire_type, src)
+                        .map_err(|err| err.push(STRUCT_NAME, "data3"))?,
+                    8 => ::ntex_grpc::NativeType::deserialize(&mut msg.data4, tag, wire_type, src)
+                        .map_err(|err| err.push(STRUCT_NAME, "data4"))?,
                     _ => ::ntex_grpc::encoding::skip_field(wire_type, tag, src)?,
                 }
             }
@@ -214,16 +275,36 @@ mod _priv_impl {
         #[inline]
         fn encoded_len(&self) -> usize {
             0 + ::ntex_grpc::NativeType::serialized_len(
-                &self.metadata,
+                &self.data5,
+                1,
+                ::ntex_grpc::types::DefaultValue::Default,
+            ) + ::ntex_grpc::NativeType::serialized_len(
+                &self.data6,
+                2,
+                ::ntex_grpc::types::DefaultValue::Default,
+            ) + ::ntex_grpc::NativeType::serialized_len(
+                &self.message,
+                3,
+                ::ntex_grpc::types::DefaultValue::Default,
+            ) + ::ntex_grpc::NativeType::serialized_len(
+                &self.tag,
+                4,
+                ::ntex_grpc::types::DefaultValue::Default,
+            ) + ::ntex_grpc::NativeType::serialized_len(
+                &self.data1,
                 5,
                 ::ntex_grpc::types::DefaultValue::Default,
             ) + ::ntex_grpc::NativeType::serialized_len(
-                &self.reply_type,
+                &self.data2,
                 6,
                 ::ntex_grpc::types::DefaultValue::Default,
             ) + ::ntex_grpc::NativeType::serialized_len(
-                &self.result,
-                0,
+                &self.data3,
+                7,
+                ::ntex_grpc::types::DefaultValue::Default,
+            ) + ::ntex_grpc::NativeType::serialized_len(
+                &self.data4,
+                8,
                 ::ntex_grpc::types::DefaultValue::Default,
             )
         }
@@ -233,14 +314,19 @@ mod _priv_impl {
         #[inline]
         fn default() -> Self {
             Self {
-                metadata: ::core::default::Default::default(),
-                reply_type: ::core::default::Default::default(),
-                result: ::core::default::Default::default(),
+                data5: ::core::default::Default::default(),
+                data6: ::core::default::Default::default(),
+                message: ::core::default::Default::default(),
+                tag: ::core::default::Default::default(),
+                data1: ::core::default::Default::default(),
+                data2: ::core::default::Default::default(),
+                data3: ::core::default::Default::default(),
+                data4: ::core::default::Default::default(),
             }
         }
     }
 
-    impl ::ntex_grpc::NativeType for hello_reply::Type {
+    impl ::ntex_grpc::NativeType for DocumentType {
         const TYPE: ::ntex_grpc::WireType = ::ntex_grpc::WireType::Varint;
 
         #[inline]
@@ -265,189 +351,20 @@ mod _priv_impl {
         }
 
         #[inline]
+        fn value_len(&self) -> usize {
+            ::ntex_grpc::encoding::encoded_len_varint(*self as i32 as u64)
+        }
+
+        #[inline]
         fn is_default(&self) -> bool {
-            self == &hello_reply::Type::Universal
+            self == &DocumentType::Broker
         }
     }
 
-    impl ::std::default::Default for hello_reply::Type {
+    impl ::std::default::Default for DocumentType {
         #[inline]
         fn default() -> Self {
-            hello_reply::Type::Universal
-        }
-    }
-
-    impl ::ntex_grpc::NativeType for hello_reply::Result {
-        const TYPE: ::ntex_grpc::WireType = ::ntex_grpc::WireType::LengthDelimited;
-
-        fn merge(
-            &mut self,
-            _: &mut ::ntex_grpc::Bytes,
-        ) -> ::std::result::Result<(), ::ntex_grpc::DecodeError> {
-            panic!("Not supported")
-        }
-
-        fn encode_value(&self, _: &mut ::ntex_grpc::BytesMut) {
-            panic!("Not supported")
-        }
-
-        #[inline]
-        /// Encodes the message to a buffer.
-        fn serialize(
-            &self,
-            _: u32,
-            _: ::ntex_grpc::types::DefaultValue<&Self>,
-            dst: &mut ::ntex_grpc::BytesMut,
-        ) {
-            match *self {
-                hello_reply::Result::Success(ref value) => ::ntex_grpc::NativeType::serialize(
-                    value,
-                    1,
-                    ::ntex_grpc::types::DefaultValue::Unknown,
-                    dst,
-                ),
-                hello_reply::Result::ServiceError(ref value) => {
-                    ::ntex_grpc::NativeType::serialize(
-                        value,
-                        2,
-                        ::ntex_grpc::types::DefaultValue::Unknown,
-                        dst,
-                    )
-                }
-                hello_reply::Result::InvalidRequest(ref value) => {
-                    ::ntex_grpc::NativeType::serialize(
-                        value,
-                        3,
-                        ::ntex_grpc::types::DefaultValue::Unknown,
-                        dst,
-                    )
-                }
-                hello_reply::Result::ErrorMessage(ref value) => {
-                    ::ntex_grpc::NativeType::serialize(
-                        value,
-                        4,
-                        ::ntex_grpc::types::DefaultValue::Unknown,
-                        dst,
-                    )
-                }
-            }
-        }
-
-        #[inline]
-        /// Decodes an instance of the message from a buffer, and merges it into self.
-        fn deserialize(
-            &mut self,
-            tag: u32,
-            wire_type: ::ntex_grpc::WireType,
-            src: &mut ::ntex_grpc::Bytes,
-        ) -> ::std::result::Result<(), ::ntex_grpc::DecodeError> {
-            *self = match tag {
-                1 => hello_reply::Result::Success(::ntex_grpc::NativeType::deserialize_default(
-                    1, wire_type, src,
-                )?),
-                2 => hello_reply::Result::ServiceError(
-                    ::ntex_grpc::NativeType::deserialize_default(2, wire_type, src)?,
-                ),
-                3 => hello_reply::Result::InvalidRequest(
-                    ::ntex_grpc::NativeType::deserialize_default(3, wire_type, src)?,
-                ),
-                4 => hello_reply::Result::ErrorMessage(
-                    ::ntex_grpc::NativeType::deserialize_default(4, wire_type, src)?,
-                ),
-                _ => unreachable!("invalid Result, tag: {}", tag),
-            };
-            Ok(())
-        }
-
-        #[inline]
-        /// Returns the encoded length of the message without a length delimiter.
-        fn serialized_len(&self, _: u32, _: ::ntex_grpc::types::DefaultValue<&Self>) -> usize {
-            match *self {
-                hello_reply::Result::Success(ref value) => {
-                    ::ntex_grpc::NativeType::serialized_len(
-                        value,
-                        1,
-                        ::ntex_grpc::types::DefaultValue::Unknown,
-                    )
-                }
-                hello_reply::Result::ServiceError(ref value) => {
-                    ::ntex_grpc::NativeType::serialized_len(
-                        value,
-                        2,
-                        ::ntex_grpc::types::DefaultValue::Unknown,
-                    )
-                }
-                hello_reply::Result::InvalidRequest(ref value) => {
-                    ::ntex_grpc::NativeType::serialized_len(
-                        value,
-                        3,
-                        ::ntex_grpc::types::DefaultValue::Unknown,
-                    )
-                }
-                hello_reply::Result::ErrorMessage(ref value) => {
-                    ::ntex_grpc::NativeType::serialized_len(
-                        value,
-                        4,
-                        ::ntex_grpc::types::DefaultValue::Unknown,
-                    )
-                }
-            }
-        }
-    }
-
-    impl ::std::default::Default for hello_reply::Result {
-        #[inline]
-        fn default() -> Self {
-            hello_reply::Result::Success(::std::default::Default::default())
-        }
-    }
-
-    impl ::ntex_grpc::Message for ResponseResult {
-        #[inline]
-        fn write(&self, dst: &mut ::ntex_grpc::BytesMut) {
-            ::ntex_grpc::NativeType::serialize(
-                &self.message,
-                1,
-                ::ntex_grpc::types::DefaultValue::Default,
-                dst,
-            );
-        }
-
-        #[inline]
-        fn read(
-            src: &mut ::ntex_grpc::Bytes,
-        ) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {
-            const STRUCT_NAME: &str = "ResponseResult";
-            let mut msg = Self::default();
-            while !src.is_empty() {
-                let (tag, wire_type) = ::ntex_grpc::encoding::decode_key(src)?;
-                match tag {
-                    1 => {
-                        ::ntex_grpc::NativeType::deserialize(&mut msg.message, tag, wire_type, src)
-                            .map_err(|err| err.push(STRUCT_NAME, "message"))?
-                    }
-                    _ => ::ntex_grpc::encoding::skip_field(wire_type, tag, src)?,
-                }
-            }
-            Ok(msg)
-        }
-
-        #[inline]
-        fn encoded_len(&self) -> usize {
-            0 + ::ntex_grpc::NativeType::serialized_len(
-                &self.message,
-                1,
-                ::ntex_grpc::types::DefaultValue::Default,
-            )
-        }
-    }
-
-    impl ::std::default::Default for ResponseResult {
-        #[inline]
-        fn default() -> Self {
-            Self {
-                message: ::core::default::Default::default(),
-            }
+            DocumentType::Broker
         }
     }
 

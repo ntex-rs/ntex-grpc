@@ -65,7 +65,7 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 type Error = ::ntex_grpc::server::ServerError;
                 type Future<'f> = ::ntex_grpc::BoxFuture<'f, Result<Self::Response, Self::Error>>;
 
-                fn call(&self, mut req: ::ntex_grpc::server::ServerRequest) -> Self::Future<'_> {
+                fn call<'a>(&'a self, mut req: ::ntex_grpc::server::ServerRequest, _: ::ntex_grpc::Ctx<'a, Self>) -> Self::Future<'a> {
                     use ::ntex_grpc::{ServiceDef, MethodDef};
 
                     let slf = self;

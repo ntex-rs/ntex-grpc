@@ -4,7 +4,7 @@ use ntex_bytes::{Buf, BufMut, ByteString, BytesMut};
 use ntex_h2::{self as h2, frame::StreamId};
 use ntex_http::{HeaderMap, HeaderValue, StatusCode};
 use ntex_io::{Filter, Io, IoBoxed};
-use ntex_service::{Service, ServiceFactory};
+use ntex_service::{Ctx, Service, ServiceFactory};
 use ntex_util::{future::BoxFuture, future::Either, future::Ready, HashMap};
 
 use crate::{consts, status::GrpcStatus, utils::Data};
@@ -68,7 +68,7 @@ where
     type Error = T::InitError;
     type Future<'f> = BoxFuture<'f, Result<(), Self::Error>>;
 
-    fn call(&self, io: Io<F>) -> Self::Future<'_> {
+    fn call<'a>(&'a self, io: Io<F>, _: Ctx<'a, Self>) -> Self::Future<'a> {
         Box::pin(async move {
             // init server
             let service = self.factory.create(()).await?;
@@ -94,7 +94,7 @@ where
     type Error = T::InitError;
     type Future<'f> = BoxFuture<'f, Result<(), Self::Error>>;
 
-    fn call(&self, io: IoBoxed) -> Self::Future<'_> {
+    fn call<'a>(&'a self, io: IoBoxed, _: Ctx<'a, Self>) -> Self::Future<'a> {
         Box::pin(async move {
             // init server
             let service = self.factory.create(()).await?;
@@ -119,7 +119,11 @@ impl Service<h2::ControlMessage<h2::StreamError>> for ControlService {
     type Error = ();
     type Future<'f> = Ready<Self::Response, Self::Error>;
 
-    fn call(&self, msg: h2::ControlMessage<h2::StreamError>) -> Self::Future<'_> {
+    fn call<'a>(
+        &'a self,
+        msg: h2::ControlMessage<h2::StreamError>,
+        _: Ctx<'a, Self>,
+    ) -> Self::Future<'a> {
         log::trace!("Control message: {:?}", msg);
         Ready::Ok::<_, ()>(msg.ack())
     }
@@ -160,7 +164,7 @@ where
         Ready<Self::Response, Self::Error>,
     >;
 
-    fn call(&self, mut msg: h2::Message) -> Self::Future<'_> {
+    fn call<'a>(&'a self, mut msg: h2::Message, ctx: Ctx<'a, Self>) -> Self::Future<'a> {
         let id = msg.id();
         let mut streams = self.streams.borrow_mut();
 
@@ -273,9 +277,8 @@ where
                         return Either::Right(Ready::Ok(()));
                     }
 
-                    let fut = self.service.call(req);
                     return Either::Left(Box::pin(async move {
-                        match fut.await {
+                        match ctx.call(&self.service, req).await {
                             Ok(res) => {
                                 log::debug!("Response is received {:?}", res);
                                 let mut buf = BytesMut::with_capacity(res.payload.len() + 5);

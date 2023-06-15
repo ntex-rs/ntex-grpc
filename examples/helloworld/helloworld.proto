@@ -29,30 +29,28 @@ service Greeter {
 // The request message containing the user's name.
 message HelloRequest {
   string name = 1;
+  repeated int64 data1 = 2;
+  repeated DocumentType data2 = 3;
 }
 
 // The response message containing the greetings
 message HelloReply {
-  oneof Result {
-    ResponseResult success = 1;
-    int64 serviceError = 2;
-    int64 invalidRequest = 3;
-    string errorMessage = 4;
-  }
-  int64 metadata = 5;
-
-  enum Type {
-    UNIVERSAL = 0;
-    WEB = 1;
-    IMAGES = 2;
-    LOCAL = 3;
-    NEWS = 4;
-    PRODUCTS = 5;
-    VIDEO = 6;
-  }
-  Type replyType = 6;
+  repeated DocumentType data5 = 1;
+  repeated int64 data6 = 2;
+  string message = 3;
+  uint32 tag = 4;
+  repeated uint32 data1 = 5;
+  repeated string data2 = 6;
+  map<string, uint32> data3 = 7;
+  DocumentType data4 = 8;
 }
 
-message ResponseResult {
-  string message = 1;
+enum DocumentType {
+    BROKER = 0;
+    NAMESPACE = 1;
+    TOPIC_SPACE = 2;
+    CERTIFICATE_LIST = 3;
+    PERMISSION_BINDING_LIST = 4;
+    CLIENT_GROUP_LIST = 5;
+    QUOTA = 6;
 }

@@ -1,6 +1,6 @@
 [package]
 name = "ntex-grpc-derive"
-version = "0.4.0"
+version = "0.4.0-beta.0"
 license = "MIT"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 repository = "https://github.com/ntex-rs/ntex-grpc"

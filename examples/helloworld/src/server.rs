@@ -1,4 +1,4 @@
-use ntex::{server::Server, service::ServiceFactory, util::Ready};
+use ntex::{server::Server, service::ServiceFactory, util::HashMap, util::Ready};
 use ntex_grpc::server;
 
 mod helloworld;
@@ -12,15 +12,19 @@ pub struct GreeterServer;
 impl GreeterServer {
     #[method(SayHello)]
     async fn say_hello(&self, req: HelloRequest) -> HelloReply {
-        log::trace!("Received request: {:?}", req);
+        log::trace!("Received request: {:#?}", req);
+        let mut data3 = HashMap::default();
+        data3.insert("1".to_string().into(), 10u32);
         HelloReply {
-            result: Some(helloworld::hello_reply::Result::Success(
-                helloworld::ResponseResult {
-                    message: format!("Hello {}!", req.name).into(),
-                },
-            )),
-            metadata: 10,
-            reply_type: helloworld::hello_reply::Type::Web,
+            // data5: vec![helloworld::DocumentType::Namespace, helloworld::DocumentType::Quota],
+            data5: vec![helloworld::DocumentType::Namespace],
+            message: format!("Hello {}!", req.name).into(),
+            tag: 1,
+            data1: vec![1, 2, 3],
+            data2: vec!["1".to_string().into()],
+            data3,
+            data4: helloworld::DocumentType::Namespace,
+            data6: vec![-234234234, 123412414, 45456],
         }
     }
 }

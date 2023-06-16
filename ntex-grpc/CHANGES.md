@@ -1,5 +1,9 @@
 # Changes
 
+## [0.4.0-beta.0] - 2023-06-17
+
+* Migrate to ntex 0.7
+
 ## [0.3.8] - 2023-05-05
 
 * Fix handling Vec of varint

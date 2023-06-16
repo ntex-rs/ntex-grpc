@@ -26,7 +26,7 @@ pub use self::encoding::WireType;
 #[doc(hidden)]
 pub use ntex_bytes::{ByteString, Bytes, BytesMut};
 #[doc(hidden)]
-pub use ntex_service::{Service, ServiceFactory};
+pub use ntex_service::{Ctx, Service, ServiceFactory};
 #[doc(hidden)]
 pub use ntex_util::{future::BoxFuture, HashMap};
 

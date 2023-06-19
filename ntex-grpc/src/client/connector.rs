@@ -69,7 +69,7 @@ where
     pub fn connect(&self, address: A) -> impl Future<Output = Result<Client, ClientError>> {
         let slf = self.0.clone();
         async move {
-            let con = slf.connect(address).await?;
+            let con = slf.get_ref().connect(address).await?;
             let inner = Rc::new(Inner {
                 client: con.client(),
                 inflight: RefCell::new(HashMap::default()),

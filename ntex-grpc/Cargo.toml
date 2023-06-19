@@ -1,6 +1,6 @@
 [package]
 name = "ntex-grpc"
-version = "0.4.0-beta.1"
+version = "0.4.0-beta.2"
 license = "MIT"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 description = "GRPC Client/Server framework"
@@ -22,7 +22,7 @@ ntex-connect = "0.3.0-beta.1"
 ntex-io = "0.3.0-beta.1"
 ntex-util = "0.3.0-beta.1"
 ntex-bytes = "0.1.18"
-ntex-service = "1.2.0-beta.1"
+ntex-service = "1.2.0-beta.2"
 ntex-rt = "0.4"
 ntex-grpc-derive = "0.4.0-beta.1"
 

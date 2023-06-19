@@ -1,5 +1,9 @@
 # Changes
 
+## [0.4.0-beta.2] - 2023-06-19
+
+* .get_ref() instead of Deref for service container
+
 ## [0.4.0-beta.1] - 2023-06-19
 
 * Use ServiceCtx instead of Ctx

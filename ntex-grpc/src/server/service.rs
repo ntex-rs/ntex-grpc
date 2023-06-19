@@ -4,7 +4,7 @@ use ntex_bytes::{Buf, BufMut, ByteString, BytesMut};
 use ntex_h2::{self as h2, frame::StreamId};
 use ntex_http::{HeaderMap, HeaderValue, StatusCode};
 use ntex_io::{Filter, Io, IoBoxed};
-use ntex_service::{Ctx, Service, ServiceFactory};
+use ntex_service::{Service, ServiceCtx, ServiceFactory};
 use ntex_util::{future::BoxFuture, future::Either, future::Ready, HashMap};
 
 use crate::{consts, status::GrpcStatus, utils::Data};
@@ -68,7 +68,7 @@ where
     type Error = T::InitError;
     type Future<'f> = BoxFuture<'f, Result<(), Self::Error>>;
 
-    fn call<'a>(&'a self, io: Io<F>, _: Ctx<'a, Self>) -> Self::Future<'a> {
+    fn call<'a>(&'a self, io: Io<F>, _: ServiceCtx<'a, Self>) -> Self::Future<'a> {
         Box::pin(async move {
             // init server
             let service = self.factory.create(()).await?;
@@ -94,7 +94,7 @@ where
     type Error = T::InitError;
     type Future<'f> = BoxFuture<'f, Result<(), Self::Error>>;
 
-    fn call<'a>(&'a self, io: IoBoxed, _: Ctx<'a, Self>) -> Self::Future<'a> {
+    fn call<'a>(&'a self, io: IoBoxed, _: ServiceCtx<'a, Self>) -> Self::Future<'a> {
         Box::pin(async move {
             // init server
             let service = self.factory.create(()).await?;
@@ -122,7 +122,7 @@ impl Service<h2::ControlMessage<h2::StreamError>> for ControlService {
     fn call<'a>(
         &'a self,
         msg: h2::ControlMessage<h2::StreamError>,
-        _: Ctx<'a, Self>,
+        _: ServiceCtx<'a, Self>,
     ) -> Self::Future<'a> {
         log::trace!("Control message: {:?}", msg);
         Ready::Ok::<_, ()>(msg.ack())
@@ -164,7 +164,7 @@ where
         Ready<Self::Response, Self::Error>,
     >;
 
-    fn call<'a>(&'a self, mut msg: h2::Message, ctx: Ctx<'a, Self>) -> Self::Future<'a> {
+    fn call<'a>(&'a self, mut msg: h2::Message, ctx: ServiceCtx<'a, Self>) -> Self::Future<'a> {
         let id = msg.id();
         let mut streams = self.streams.borrow_mut();
 

@@ -1,6 +1,6 @@
 [package]
 name = "ntex-grpc"
-version = "0.4.0-beta.2"
+version = "0.4.0"
 license = "MIT"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 description = "GRPC Client/Server framework"
@@ -16,15 +16,15 @@ name = "ntex_grpc"
 path = "src/lib.rs"
 
 [dependencies]
-ntex-h2 = "0.3.0-beta.1"
+ntex-h2 = "0.3.0"
 ntex-http = "0.1.9"
-ntex-connect = "0.3.0-beta.1"
-ntex-io = "0.3.0-beta.1"
-ntex-util = "0.3.0-beta.1"
+ntex-connect = "0.3.0"
+ntex-io = "0.3.0"
+ntex-util = "0.3.0"
 ntex-bytes = "0.1.18"
-ntex-service = "1.2.0-beta.2"
+ntex-service = "1.2.0"
 ntex-rt = "0.4"
-ntex-grpc-derive = "0.4.0-beta.1"
+ntex-grpc-derive = "0.4.0"
 
 log = "0.4"
 thiserror = "1.0"
@@ -32,7 +32,7 @@ pin-project-lite = "0.2"
 
 [dev-dependencies]
 openssl = "0.10"
-ntex = { version = "0.7.0-beta.1", features = ["openssl", "tokio"] }
-ntex-tls = { version = "0.3.0-beta.1", features = ["openssl"] }
-ntex-connect = { version = "0.3.0-beta.1", features = ["openssl", "tokio"] }
+ntex = { version = "0.7.0", features = ["openssl", "tokio"] }
+ntex-tls = { version = "0.3.0", features = ["openssl"] }
+ntex-connect = { version = "0.3.0", features = ["openssl", "tokio"] }
 env_logger = { version = "0.10", default-features = false }

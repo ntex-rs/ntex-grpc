@@ -1,5 +1,9 @@
 # Changes
 
+## [0.4.0] - 2023-06-22
+
+* Release v0.4.0
+
 ## [0.4.0-beta.2] - 2023-06-19
 
 * .get_ref() instead of Deref for service container

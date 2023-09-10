@@ -177,7 +177,11 @@ fn gen_method(method: &Method, service: &Service) -> (String, String) {
     let method_ident = method.name.to_string();
     let def_ident = format!("{}{}Method", service.name, method.proto_name);
     let input_type = method.input_type.to_string();
-    let req_input_type = format!("super::{}", method.input_type);
+    let req_input_type = if method.input_type_extern {
+        format!("{}", method.input_type)
+    } else {
+        format!("super::{}", method.input_type)
+    };
     let output_type = method.output_type.to_string();
     let comments: Vec<_> = method
         .comments

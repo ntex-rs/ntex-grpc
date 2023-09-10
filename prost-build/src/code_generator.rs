@@ -889,6 +889,7 @@ impl<'a> CodeGenerator<'a> {
                 let input_proto_type = method.input_type.take().unwrap();
                 let output_proto_type = method.output_type.take().unwrap();
                 let input_type = self.resolve_ident(&input_proto_type);
+                let input_type_extern = self.is_extern_ident(&input_proto_type);
                 let output_type = self.resolve_ident(&output_proto_type);
                 let client_streaming = method.client_streaming();
                 let server_streaming = method.server_streaming();
@@ -896,14 +897,15 @@ impl<'a> CodeGenerator<'a> {
                 Method {
                     name: to_snake(&name),
                     proto_name: name,
+                    options: method.options.unwrap_or_default(),
                     comments,
                     input_type,
                     output_type,
                     input_proto_type,
                     output_proto_type,
-                    options: method.options.unwrap_or_default(),
                     client_streaming,
                     server_streaming,
+                    input_type_extern,
                 }
             })
             .collect();
@@ -967,6 +969,10 @@ impl<'a> CodeGenerator<'a> {
                 _ => to_rust_type(field.r#type()),
             }
         }
+    }
+
+    fn is_extern_ident(&self, pb_ident: &str) -> bool {
+        self.extern_paths.is_extern_ident(pb_ident)
     }
 
     fn resolve_ident(&self, pb_ident: &str) -> String {

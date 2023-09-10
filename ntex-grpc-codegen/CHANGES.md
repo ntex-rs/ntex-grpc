@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.11] - 2023-09-10
+
+* Fix handling google types as method input type
+
 ## [0.2.9] - 2023-03-29
 
 * Strip enum value name prefix

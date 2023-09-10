@@ -146,6 +146,8 @@ pub struct Method {
     pub client_streaming: bool,
     /// Identifies if server streams multiple server messages.
     pub server_streaming: bool,
+    /// Identifies if input type is external type
+    pub input_type_extern: bool,
 }
 
 #[cfg(test)]

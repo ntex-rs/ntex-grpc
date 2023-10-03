@@ -1,5 +1,5 @@
 mod consts;
-mod error;
+//mod error;
 mod service;
 mod status;
 mod utils;
@@ -9,8 +9,8 @@ pub mod server;
 pub mod types;
 
 pub use crate::encoding::DecodeError;
-pub use crate::error::ServiceError;
-pub use ntex_http::Error as HttpError;
+// pub use crate::error::ServiceError;
+//pub use ntex_http::Error as HttpError;
 
 pub use crate::service::{MethodDef, ServiceDef};
 pub use crate::status::GrpcStatus;

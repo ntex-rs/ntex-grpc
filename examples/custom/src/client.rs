@@ -1,4 +1,5 @@
-use ntex_grpc::client::Connector;
+use ntex_grpc::client::Client;
+use ntex_h2::client as h2;
 
 mod helloworld;
 mod unique_id;
@@ -9,8 +10,9 @@ async fn main() {
     std::env::set_var("RUST_LOG", "trace");
     env_logger::init();
 
-    let connector = Connector::<&'static str, _>::default();
-    let client: GreeterClient<_> = connector.create("127.0.0.1:50051").await.unwrap();
+    let client = GreeterClient::new(Client::new(
+        h2::Client::with_default("127.0.0.1:50051").finish(),
+    ));
 
     let res = client
         .say_hello(&HelloRequest {

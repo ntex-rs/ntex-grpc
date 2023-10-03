@@ -2,7 +2,8 @@
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, thread, time::Duration};
 
 use ntex::{rt::spawn, rt::System};
-use ntex_grpc::client::Connector;
+use ntex_grpc::client::Client;
+use ntex_h2::client as h2;
 
 mod helloworld;
 use self::helloworld::{GreeterClient, HelloRequest};
@@ -38,8 +39,8 @@ fn main() {
             let sys = System::new("client");
 
             let _ = sys.block_on(async move {
-                let connector = Connector::default();
-                let client: GreeterClient<_> = connector.create(addr.clone()).await.unwrap();
+                let client =
+                    GreeterClient::new(Client::new(h2::Client::with_default(addr).finish()));
 
                 for _ in 0..concurrency - 1 {
                     let cnt = counters.clone();
@@ -60,7 +61,7 @@ fn main() {
                 }
 
                 loop {
-                    let res = client
+                    let _res = client
                         .say_hello(&HelloRequest {
                             name: "world".into(),
                             data1: vec![-234234234, 123412414, 45456],

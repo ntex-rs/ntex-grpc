@@ -1,17 +1,15 @@
-use std::{future::Future, rc::Rc};
+use std::future::Future;
 
-use ntex_h2::client;
-use ntex_http::error::Error as HttpError;
-use ntex_io::OnDisconnect;
+use ntex_bytes::Bytes;
+use ntex_h2::{client, OperationError, StreamError};
+use ntex_http::{error::Error as HttpError, HeaderMap, StatusCode};
 
-mod connector;
 mod request;
 mod transport;
 
-pub use self::connector::Connector;
 pub use self::request::{Request, RequestContext, Response};
 
-use crate::service::MethodDef;
+use crate::{encoding::DecodeError, service::MethodDef, status::GrpcStatus};
 
 pub trait Transport<T: MethodDef> {
     /// Errors produced by the transport.
@@ -41,46 +39,62 @@ pub trait ClientInformation<T> {
     fn into_inner(self) -> T;
 }
 
-#[derive(thiserror::Error, Debug)]
-pub enum ClientError {
-    #[error("{0}")]
-    Http(#[from] ntex_h2::client::ClientError),
-}
-
 #[derive(Clone)]
-pub struct Client(Rc<transport::Inner>);
+pub struct Client(client::Client);
 
 impl Client {
     #[inline]
-    /// Gracefully close connection
-    pub fn close(&self) {
-        self.0.client.close()
-    }
-
-    #[inline]
-    /// Check if connection is closed
-    pub fn is_closed(&self) -> bool {
-        self.0.client.is_closed()
-    }
-
-    #[inline]
-    /// Notify when connection get closed
-    pub fn on_disconnect(&self) -> OnDisconnect {
-        self.0.client.on_disconnect()
+    /// Get reference to h2 client
+    pub fn new(client: client::Client) -> Self {
+        Self(client)
     }
 
     #[inline]
     /// Get reference to h2 client
     pub fn get_ref(&self) -> &client::Client {
-        &self.0.client
+        &self.0
     }
 }
 
-impl Drop for Client {
-    fn drop(&mut self) {
-        // one for current client and one for Client::start() call
-        if Rc::strong_count(&self.0) <= 2 {
-            self.0.client.close()
+#[derive(thiserror::Error, Debug)]
+pub enum ClientError {
+    #[error("{0}")]
+    Client(#[from] client::ClientError),
+    #[error("Http error {0:?}")]
+    Http(Option<HttpError>),
+    #[error("{0}")]
+    Decode(#[from] DecodeError),
+    #[error("Http operation error: {0}")]
+    Operation(#[from] OperationError),
+    #[error("Http stream error: {0}")]
+    Stream(#[from] StreamError),
+    #[error("Http response {0:?}, headers: {1:?}, body: {2:?}")]
+    Response(Option<StatusCode>, HeaderMap, Bytes),
+    #[error("Got eof without payload with {0:?}, headers: {1:?}")]
+    UnexpectedEof(Option<StatusCode>, HeaderMap),
+    #[error("Grpc status {0:?}, headers: {1:?}")]
+    GrpcStatus(GrpcStatus, HeaderMap),
+}
+
+impl From<HttpError> for ClientError {
+    fn from(err: HttpError) -> Self {
+        Self::Http(Some(err))
+    }
+}
+
+impl Clone for ClientError {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Client(err) => Self::Client(err.clone()),
+            Self::Http(_) => Self::Http(None),
+            Self::Decode(err) => Self::Decode(err.clone()),
+            Self::Operation(err) => Self::Operation(err.clone()),
+            Self::Stream(err) => Self::Stream(*err),
+            Self::Response(st, hdrs, payload) => {
+                Self::Response(*st, hdrs.clone(), payload.clone())
+            }
+            Self::UnexpectedEof(st, hdrs) => Self::UnexpectedEof(*st, hdrs.clone()),
+            Self::GrpcStatus(st, hdrs) => Self::GrpcStatus(*st, hdrs.clone()),
         }
     }
 }

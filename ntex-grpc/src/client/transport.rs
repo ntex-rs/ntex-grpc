@@ -1,31 +1,17 @@
-use std::{cell::RefCell, convert::TryFrom, str::FromStr};
+use std::{convert::TryFrom, str::FromStr};
 
-use ntex_bytes::{Buf, BufMut, Bytes, BytesMut};
-use ntex_h2::{self as h2, client, frame::Reason, frame::StreamId, Stream, StreamRef};
-use ntex_http::{header, HeaderMap, Method, StatusCode};
-use ntex_util::{channel::oneshot, future::BoxFuture, HashMap};
+use ntex_bytes::{Buf, BufMut, BytesMut};
+use ntex_h2::{self as h2};
+use ntex_http::{header, HeaderMap, Method};
+use ntex_util::future::BoxFuture;
 
-use crate::service::MethodDef;
-use crate::{consts, utils::Data, DecodeError, GrpcStatus, Message, ServiceError};
+use crate::{consts, service::MethodDef, utils::Data, DecodeError, GrpcStatus, Message};
 
 use super::request::{RequestContext, Response};
-use super::{Client, Transport};
-
-pub(super) struct Inner {
-    pub(super) client: client::Client,
-    pub(super) inflight: RefCell<HashMap<StreamId, Inflight>>,
-}
-
-pub(super) struct Inflight {
-    _stream: Stream,
-    data: Data,
-    status: Option<StatusCode>,
-    headers: Option<HeaderMap>,
-    tx: oneshot::Sender<Result<(Option<StatusCode>, Bytes, HeaderMap, HeaderMap), ServiceError>>,
-}
+use super::{Client, ClientError, Transport};
 
 impl<T: MethodDef> Transport<T> for Client {
-    type Error = ServiceError;
+    type Error = ClientError;
 
     type Future<'f> = BoxFuture<'f, Result<Response<T>, Self::Error>>
     where Self: 'f,
@@ -50,168 +36,108 @@ impl<T: MethodDef> Transport<T> for Client {
                 hdrs.insert(key.clone(), val.clone())
             }
 
-            let stream = self
-                .0
-                .client
-                .send_request(Method::POST, T::PATH, hdrs, false)
-                .await?;
+            // send request
+            let (snd_stream, rcv_stream) = self.0.send(Method::POST, T::PATH, hdrs, false).await?;
+            snd_stream.send_payload(buf.freeze(), true).await?;
 
-            let s_ref = (*stream).clone();
-            let (tx, rx) = oneshot::channel();
-            self.0.inflight.borrow_mut().insert(
-                stream.id(),
-                Inflight {
-                    tx,
-                    _stream: stream,
-                    status: None,
-                    headers: None,
-                    data: Data::Empty,
-                },
-            );
-            let hnd = StreamHnd(&s_ref, &self.0);
-            s_ref.send_payload(buf.freeze(), true).await?;
+            // read response
+            let mut status = None;
+            let mut hdrs = HeaderMap::default();
+            let mut trailers = HeaderMap::default();
+            let mut payload = Data::Empty;
 
-            let result = match rx.await {
-                Ok(Ok((status, mut data, headers, trailers))) => {
-                    match status {
-                        Some(st) => {
-                            if !st.is_success() {
-                                return Err(ServiceError::Response(Some(st), headers, data));
-                            }
-                        }
-                        None => return Err(ServiceError::Response(None, headers, data)),
-                    }
-                    let _compressed = data.get_u8();
-                    let len = data.get_u32();
-                    match <T::Output as Message>::read(&mut data.split_to(len as usize)) {
-                        Ok(output) => Ok(Response {
-                            output,
-                            headers,
-                            trailers,
-                            req_size,
-                            res_size: data.len(),
-                        }),
-                        Err(e) => Err(ServiceError::Decode(e)),
-                    }
-                }
-                Ok(Err(err)) => Err(err),
-                Err(_) => Err(ServiceError::Canceled),
-            };
-            drop(hnd);
-            result
-        })
-    }
-}
+            loop {
+                let mut msg = if let Some(msg) = rcv_stream.recv().await {
+                    msg
+                } else {
+                    return Err(ClientError::UnexpectedEof(status, hdrs));
+                };
 
-struct StreamHnd<'a>(&'a StreamRef, &'a Inner);
-
-impl<'a> Drop for StreamHnd<'a> {
-    fn drop(&mut self) {
-        self.0.reset(Reason::CANCEL);
-        self.1.inflight.borrow_mut().remove(&self.0.id());
-    }
-}
-
-impl Inner {
-    pub(super) fn handle_message(&self, mut msg: h2::Message) -> Result<(), ()> {
-        let id = msg.id();
-        let mut inner = self.inflight.borrow_mut();
-
-        if let Some(inflight) = inner.get_mut(&id) {
-            match msg.kind().take() {
-                h2::MessageKind::Headers {
-                    headers,
-                    pseudo,
-                    eof,
-                } => {
-                    if eof {
-                        let tx = inner.remove(&id).unwrap().tx;
-
-                        // check grpc status
-                        match check_grpc_status(&headers) {
-                            Some(Ok(status)) => {
-                                if status != GrpcStatus::Ok {
-                                    let _ =
-                                        tx.send(Err(ServiceError::GrpcStatus(status, headers)));
-                                    return Err(());
-                                }
-                            }
-                            Some(Err(())) => {
-                                let _ = tx.send(Err(ServiceError::Decode(DecodeError::new(
-                                    "Cannot parse grpc status",
-                                ))));
-                                return Err(());
-                            }
-                            None => {}
-                        }
-
-                        let _ = tx.send(Err(ServiceError::UnexpectedEof(pseudo.status, headers)));
-                        return Err(());
-                    } else {
-                        inflight.status = pseudo.status;
-                        inflight.headers = Some(headers);
-                    }
-                }
-                h2::MessageKind::Data(data, _cap) => {
-                    inflight.data.push(data);
-                }
-                h2::MessageKind::Eof(data) => {
-                    let mut inflight = inner.remove(&id).unwrap();
-                    let tx = inflight.tx;
-
-                    let result = match data {
-                        h2::StreamEof::Data(data) => {
-                            inflight.data.push(data);
-                            Ok((
-                                inflight.status,
-                                inflight.data.get(),
-                                inflight.headers.unwrap_or_default(),
-                                HeaderMap::default(),
-                            ))
-                        }
-                        h2::StreamEof::Trailers(hdrs) => {
+                match msg.kind().take() {
+                    h2::MessageKind::Headers {
+                        headers,
+                        pseudo,
+                        eof,
+                    } => {
+                        if eof {
                             // check grpc status
-                            match check_grpc_status(&hdrs) {
+                            match check_grpc_status(&headers) {
                                 Some(Ok(status)) => {
                                     if status != GrpcStatus::Ok {
-                                        let _ =
-                                            tx.send(Err(ServiceError::GrpcStatus(status, hdrs)));
-                                        return Err(());
+                                        return Err(ClientError::GrpcStatus(status, headers));
                                     }
                                 }
                                 Some(Err(())) => {
-                                    let _ = tx.send(Err(ServiceError::Decode(DecodeError::new(
+                                    return Err(ClientError::Decode(DecodeError::new(
                                         "Cannot parse grpc status",
-                                    ))));
-                                    return Err(());
+                                    )));
                                 }
                                 None => {}
                             }
 
-                            Ok((
-                                inflight.status,
-                                inflight.data.get(),
-                                inflight.headers.unwrap_or_default(),
-                                hdrs,
-                            ))
+                            return Err(ClientError::UnexpectedEof(pseudo.status, headers));
+                        } else {
+                            hdrs = headers;
+                            status = pseudo.status;
                         }
-                        h2::StreamEof::Error(err) => Err(ServiceError::Stream(err)),
-                    };
-                    let _ = tx.send(result);
+                        continue;
+                    }
+                    h2::MessageKind::Data(data, _cap) => {
+                        payload.push(data);
+                        continue;
+                    }
+                    h2::MessageKind::Eof(data) => {
+                        match data {
+                            h2::StreamEof::Data(data) => {
+                                payload.push(data);
+                            }
+                            h2::StreamEof::Trailers(hdrs) => {
+                                // check grpc status
+                                match check_grpc_status(&hdrs) {
+                                    Some(Ok(status)) => {
+                                        if status != GrpcStatus::Ok {
+                                            return Err(ClientError::GrpcStatus(status, hdrs));
+                                        }
+                                    }
+                                    Some(Err(())) => {
+                                        return Err(ClientError::Decode(DecodeError::new(
+                                            "Cannot parse grpc status",
+                                        )));
+                                    }
+                                    None => {}
+                                }
+                                trailers = hdrs;
+                            }
+                            h2::StreamEof::Error(err) => return Err(ClientError::Stream(err)),
+                        };
+                    }
+                    h2::MessageKind::Disconnect(err) => return Err(ClientError::Operation(err)),
+                    h2::MessageKind::Empty => {}
                 }
-                h2::MessageKind::Disconnect(err) => {
-                    let _ = inner
-                        .remove(&id)
-                        .unwrap()
-                        .tx
-                        .send(Err(ServiceError::Operation(err)));
+
+                let mut data = payload.get();
+                match status {
+                    Some(st) => {
+                        if !st.is_success() {
+                            return Err(ClientError::Response(Some(st), hdrs, data));
+                        }
+                    }
+                    None => return Err(ClientError::Response(None, hdrs, data)),
                 }
-                h2::MessageKind::Empty => {
-                    inner.remove(&id);
-                }
+                let _compressed = data.get_u8();
+                let len = data.get_u32();
+                return match <T::Output as Message>::read(&mut data.split_to(len as usize)) {
+                    Ok(output) => Ok(Response {
+                        output,
+                        trailers,
+                        req_size,
+                        headers: hdrs,
+                        res_size: data.len(),
+                    }),
+                    Err(e) => Err(ClientError::Decode(e)),
+                };
             }
-        }
-        Ok(())
+        })
     }
 }
 

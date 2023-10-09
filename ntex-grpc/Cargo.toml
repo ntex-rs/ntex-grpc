@@ -16,8 +16,8 @@ name = "ntex_grpc"
 path = "src/lib.rs"
 
 [dependencies]
-ntex-h2 = "0.4.0"
-ntex-http = "0.1.9"
+ntex-h2 = "0.4.1"
+ntex-http = "0.1.10"
 ntex-connect = "0.3.2"
 ntex-io = "0.3.4"
 ntex-util = "0.3.2"

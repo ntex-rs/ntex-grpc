@@ -164,11 +164,12 @@ where
         Ready<Self::Response, Self::Error>,
     >;
 
-    fn call<'a>(&'a self, mut msg: h2::Message, ctx: ServiceCtx<'a, Self>) -> Self::Future<'a> {
+    fn call<'a>(&'a self, msg: h2::Message, ctx: ServiceCtx<'a, Self>) -> Self::Future<'a> {
         let id = msg.id();
         let mut streams = self.streams.borrow_mut();
+        let h2::Message { stream, kind } = msg;
 
-        match msg.kind().take() {
+        match kind {
             h2::MessageKind::Headers {
                 headers,
                 pseudo,
@@ -179,18 +180,14 @@ where
                     path.split_to(n)
                 } else {
                     // not found
-                    let _ = msg.stream().send_response(
-                        StatusCode::NOT_FOUND,
-                        HeaderMap::default(),
-                        true,
-                    );
+                    let _ =
+                        stream.send_response(StatusCode::NOT_FOUND, HeaderMap::default(), true);
                     return Either::Right(Ready::Ok(()));
                 };
 
                 // stream eof, cannot do anything
                 if eof {
-                    if msg
-                        .stream()
+                    if stream
                         .send_response(StatusCode::OK, HeaderMap::default(), false)
                         .is_ok()
                     {
@@ -200,7 +197,7 @@ where
                             consts::GRPC_MESSAGE,
                             HeaderValue::from_static("Cannot decode request message"),
                         );
-                        msg.stream().send_trailers(trailers);
+                        stream.send_trailers(trailers);
                     }
                     return Either::Right(Ready::Ok(()));
                 }
@@ -213,7 +210,7 @@ where
                 };
 
                 let _ = streams.insert(
-                    msg.id(),
+                    stream.id(),
                     Inflight {
                         headers,
                         data: Data::Empty,
@@ -223,7 +220,7 @@ where
                 );
             }
             h2::MessageKind::Data(data, _cap) => {
-                if let Some(inflight) = streams.get_mut(&msg.id()) {
+                if let Some(inflight) = streams.get_mut(&stream.id()) {
                     inflight.data.push(data);
                 }
             }
@@ -243,8 +240,7 @@ where
                     let _compressed = data.get_u8();
                     let len = data.get_u32();
                     if (len as usize) > data.len() {
-                        if msg
-                            .stream()
+                        if stream
                             .send_response(StatusCode::OK, HeaderMap::default(), false)
                             .is_ok()
                         {
@@ -257,7 +253,7 @@ where
                                     "Cannot decode request message: not enough data provided",
                                 ),
                             );
-                            msg.stream().send_trailers(trailers);
+                            stream.send_trailers(trailers);
                         }
                         return Either::Right(Ready::Ok(()));
                     }
@@ -269,8 +265,7 @@ where
                         name: inflight.name,
                         headers: inflight.headers,
                     };
-                    if msg
-                        .stream()
+                    if stream
                         .send_response(StatusCode::OK, HeaderMap::default(), false)
                         .is_err()
                     {
@@ -286,7 +281,7 @@ where
                                 buf.put_u32(res.payload.len() as u32); // length
                                 buf.extend_from_slice(&res.payload);
 
-                                let _ = msg.stream().send_payload(buf.freeze(), false).await;
+                                let _ = stream.send_payload(buf.freeze(), false).await;
 
                                 let mut trailers = HeaderMap::default();
                                 trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
@@ -294,7 +289,7 @@ where
                                     trailers.append(name, val);
                                 }
 
-                                msg.stream().send_trailers(trailers);
+                                stream.send_trailers(trailers);
                             }
                             Err(err) => {
                                 let error = format!("Failure during service call: {}", err);
@@ -304,7 +299,7 @@ where
                                 if let Ok(val) = HeaderValue::from_str(&error) {
                                     trailers.insert(consts::GRPC_MESSAGE, val);
                                 }
-                                msg.stream().send_trailers(trailers);
+                                stream.send_trailers(trailers);
                             }
                         };
 
@@ -312,7 +307,7 @@ where
                     }));
                 }
             }
-            h2::MessageKind::Disconnect(_) | h2::MessageKind::Empty => {
+            h2::MessageKind::Disconnect(_) => {
                 streams.remove(&id);
             }
         }

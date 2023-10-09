@@ -47,13 +47,13 @@ impl<T: MethodDef> Transport<T> for Client {
             let mut payload = Data::Empty;
 
             loop {
-                let mut msg = if let Some(msg) = rcv_stream.recv().await {
+                let msg = if let Some(msg) = rcv_stream.recv().await {
                     msg
                 } else {
                     return Err(ClientError::UnexpectedEof(status, hdrs));
                 };
 
-                match msg.kind().take() {
+                match msg.kind {
                     h2::MessageKind::Headers {
                         headers,
                         pseudo,
@@ -112,7 +112,6 @@ impl<T: MethodDef> Transport<T> for Client {
                         };
                     }
                     h2::MessageKind::Disconnect(err) => return Err(ClientError::Operation(err)),
-                    h2::MessageKind::Empty => {}
                 }
 
                 let mut data = payload.get();

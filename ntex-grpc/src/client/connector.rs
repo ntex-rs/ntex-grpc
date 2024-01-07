@@ -56,34 +56,29 @@ where
     IoBoxed: From<T::Response>,
 {
     /// Connect and create client instance
-    pub fn create<C: ClientInformation<Client>>(
+    pub async fn create<C: ClientInformation<Client>>(
         &self,
         address: A,
-    ) -> impl Future<Output = Result<C, ClientError>> {
-        let fut = self.connect(address);
-
-        async move { Ok(C::create(fut.await?)) }
+    ) -> Result<C, ClientError> {
+        Ok(C::create(self.connect(address).await?))
     }
 
     /// Connect to http2 server
-    pub fn connect(&self, address: A) -> impl Future<Output = Result<Client, ClientError>> {
-        let slf = self.0.clone();
-        async move {
-            let con = slf.get_ref().connect(address).await?;
-            let inner = Rc::new(Inner {
-                client: con.client(),
-                inflight: RefCell::new(HashMap::default()),
-            });
+    pub async fn connect(&self, address: A) -> Result<Client, ClientError> {
+        let con = self.0.get_ref().connect(address).await?;
+        let inner = Rc::new(Inner {
+            client: con.client(),
+            inflight: RefCell::new(HashMap::default()),
+        });
 
-            let tr = inner.clone();
-            ntex_rt::spawn(async move {
-                let _ = con
-                    .start(fn_service(move |msg: h2::Message| {
-                        Ready::from(tr.handle_message(msg))
-                    }))
-                    .await;
-            });
-            Ok(Client(inner))
-        }
+        let tr = inner.clone();
+        ntex_rt::spawn(async move {
+            let _ = con
+                .start(fn_service(move |msg: h2::Message| {
+                    Ready::from(tr.handle_message(msg))
+                }))
+                .await;
+        });
+        Ok(Client(inner))
     }
 }

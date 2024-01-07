@@ -1,5 +1,9 @@
 # Changes
 
+## [0.6.0-b.0] - 2024-01-07
+
+* Use "async fn" in trait for Service definition
+
 ## [0.5.0] - 2023-10-09
 
 * Migrate to ntex-h2 0.4

@@ -15,13 +15,11 @@ pub trait Transport<T: MethodDef> {
     /// Errors produced by the transport.
     type Error: From<HttpError>;
 
-    /// The transport response value.
-    type Future<'f>: Future<Output = Result<Response<T>, Self::Error>>
-    where
-        Self: 'f,
-        T::Input: 'f;
-
-    fn request<'a>(&'a self, args: &'a T::Input, ctx: RequestContext) -> Self::Future<'a>;
+    fn request(
+        &self,
+        args: &T::Input,
+        ctx: RequestContext,
+    ) -> impl Future<Output = Result<Response<T>, Self::Error>>;
 }
 
 /// Client utils methods

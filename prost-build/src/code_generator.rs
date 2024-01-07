@@ -233,9 +233,7 @@ impl<'a> CodeGenerator<'a> {
                 .as_ref()
                 .and_then(|type_name| map_types.get(type_name))
             {
-                Some(&(ref key, ref value)) => {
-                    self.append_map_field(&fq_message_name, field, key, value)
-                }
+                Some((key, value)) => self.append_map_field(&fq_message_name, field, key, value),
                 None => self.append_field(&fq_message_name, field),
             }
 
@@ -261,10 +259,7 @@ impl<'a> CodeGenerator<'a> {
                 "
                {} => ::ntex_grpc::NativeType::deserialize(&mut msg.{}, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, \"{}\"))?,",
-                fields
-                    .iter()
-                    .map(|&(ref field, _)| field.number())
-                    .join("| "),
+                fields.iter().map(|(field, _)| field.number()).join("| "),
                 to_snake(oneof.name()),
                 to_snake(oneof.name()),
             ));
@@ -1102,7 +1097,7 @@ fn build_enum_value_mappings<'a>(
                 val.split_at(generated_enum_name.len()).1
             } else if val_lower.starts_with(&enum_name_snek) {
                 val = val.split_at(enum_name_snek.len()).1;
-                val = val.strip_prefix("_").unwrap_or(val);
+                val = val.strip_prefix('_').unwrap_or(val);
                 if val
                     .chars()
                     .next()

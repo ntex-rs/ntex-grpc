@@ -1,7 +1,8 @@
 use std::task::{Context, Poll};
-use std::{convert::TryFrom, fmt, future::Future, ops, pin::Pin, rc::Rc};
+use std::{convert::TryFrom, fmt, future::Future, mem, ops, pin::Pin, rc::Rc};
 
 use ntex_http::{error::Error as HttpError, HeaderMap, HeaderName, HeaderValue};
+use ntex_util::future::BoxFuture;
 
 use crate::client::Transport;
 use crate::service::MethodDef;
@@ -87,23 +88,19 @@ pin_project_lite::pin_project! {
     }
 }
 
-pin_project_lite::pin_project! {
-    #[project = StateProject]
-    enum State<'a, T, M>
-    where
-        T: Transport<M>,
-        T: 'a,
-        M: MethodDef,
-    {
-        Call {
-            #[pin]
-            fut: T::Future<'a>,
-        },
-        Request {
-            input: &'a M::Input,
-            ctx: Option<RequestContext>,
-        },
-    }
+enum State<'a, T, M>
+where
+    T: Transport<M> + 'a,
+    M: MethodDef,
+{
+    Call {
+        fut: BoxFuture<'a, Result<Response<M>, T::Error>>,
+    },
+    Request {
+        input: &'a M::Input,
+        ctx: Option<RequestContext>,
+    },
+    None,
 }
 
 impl<'a, T, M> Request<'a, T, M>
@@ -166,18 +163,17 @@ where
     type Output = Result<Response<M>, T::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut this = self.as_mut().project();
-
         loop {
-            match this.state.project() {
-                StateProject::Call { fut } => return fut.poll(cx),
-                StateProject::Request { input, ref mut ctx } => {
-                    let st = State::Call {
-                        fut: this.transport.request(input, ctx.take().unwrap()),
-                    };
-                    this = self.as_mut().project();
-                    this.state.set(st);
-                }
+            if let State::Call { ref mut fut } = self.state {
+                return Pin::new(fut).poll(cx);
+            }
+
+            if let State::Request { input, ref mut ctx } =
+                mem::replace(&mut self.state, State::None)
+            {
+                self.state = State::Call {
+                    fut: Box::pin(self.transport.request(input, ctx.take().unwrap())),
+                };
             }
         }
     }

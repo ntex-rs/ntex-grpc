@@ -38,7 +38,7 @@ fn main() {
             println!("Starting thread: {}", t);
             let sys = System::new("client");
 
-            let _ = sys.block_on(async move {
+            sys.block_on(async move {
                 let client =
                     GreeterClient::new(Client::new(h2::Client::with_default(addr).finish()));
 
@@ -105,7 +105,7 @@ fn start_report_thread(
                     threads,
                     conns,
                     Duration::from_nanos(latency / req_count as u64),
-                    Duration::from_nanos(latency_max as u64)
+                    Duration::from_nanos(latency_max)
                 );
             }
         }

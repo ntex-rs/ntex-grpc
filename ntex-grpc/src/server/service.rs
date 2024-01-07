@@ -5,7 +5,7 @@ use ntex_h2::{self as h2, frame::StreamId};
 use ntex_http::{HeaderMap, HeaderValue, StatusCode};
 use ntex_io::{Filter, Io, IoBoxed};
 use ntex_service::{Service, ServiceCtx, ServiceFactory};
-use ntex_util::{future::BoxFuture, future::Either, future::Ready, HashMap};
+use ntex_util::HashMap;
 
 use crate::{consts, status::GrpcStatus, utils::Data};
 
@@ -48,10 +48,9 @@ where
     type Error = T::InitError;
     type Service = GrpcService<T>;
     type InitError = ();
-    type Future<'f> = Ready<Self::Service, Self::InitError>;
 
-    fn create(&self, _: ()) -> Self::Future<'_> {
-        Ready::Ok(self.make_server())
+    async fn create(&self, _: ()) -> Result<Self::Service, Self::InitError> {
+        Ok(self.make_server())
     }
 }
 
@@ -66,23 +65,20 @@ where
 {
     type Response = ();
     type Error = T::InitError;
-    type Future<'f> = BoxFuture<'f, Result<(), Self::Error>>;
 
-    fn call<'a>(&'a self, io: Io<F>, _: ServiceCtx<'a, Self>) -> Self::Future<'a> {
-        Box::pin(async move {
-            // init server
-            let service = self.factory.create(()).await?;
+    async fn call(&self, io: Io<F>, _: ServiceCtx<'_, Self>) -> Result<(), Self::Error> {
+        // init server
+        let service = self.factory.create(()).await?;
 
-            let _ = h2::server::handle_one(
-                io.into(),
-                h2::Config::server(),
-                ControlService,
-                PublishService::new(service),
-            )
-            .await;
+        let _ = h2::server::handle_one(
+            io.into(),
+            h2::Config::server(),
+            ControlService,
+            PublishService::new(service),
+        )
+        .await;
 
-            Ok(())
-        })
+        Ok(())
     }
 }
 
@@ -92,23 +88,20 @@ where
 {
     type Response = ();
     type Error = T::InitError;
-    type Future<'f> = BoxFuture<'f, Result<(), Self::Error>>;
 
-    fn call<'a>(&'a self, io: IoBoxed, _: ServiceCtx<'a, Self>) -> Self::Future<'a> {
-        Box::pin(async move {
-            // init server
-            let service = self.factory.create(()).await?;
+    async fn call(&self, io: IoBoxed, _: ServiceCtx<'_, Self>) -> Result<(), Self::Error> {
+        // init server
+        let service = self.factory.create(()).await?;
 
-            let _ = h2::server::handle_one(
-                io,
-                h2::Config::server(),
-                ControlService,
-                PublishService::new(service),
-            )
-            .await;
+        let _ = h2::server::handle_one(
+            io,
+            h2::Config::server(),
+            ControlService,
+            PublishService::new(service),
+        )
+        .await;
 
-            Ok(())
-        })
+        Ok(())
     }
 }
 
@@ -117,15 +110,14 @@ struct ControlService;
 impl Service<h2::ControlMessage<h2::StreamError>> for ControlService {
     type Response = h2::ControlResult;
     type Error = ();
-    type Future<'f> = Ready<Self::Response, Self::Error>;
 
-    fn call<'a>(
-        &'a self,
+    async fn call(
+        &self,
         msg: h2::ControlMessage<h2::StreamError>,
-        _: ServiceCtx<'a, Self>,
-    ) -> Self::Future<'a> {
+        _: ServiceCtx<'_, Self>,
+    ) -> Result<Self::Response, Self::Error> {
         log::trace!("Control message: {:?}", msg);
-        Ready::Ok::<_, ()>(msg.ack())
+        Ok::<_, ()>(msg.ack())
     }
 }
 
@@ -159,12 +151,12 @@ where
 {
     type Response = ();
     type Error = h2::StreamError;
-    type Future<'f> = Either<
-        BoxFuture<'f, Result<Self::Response, Self::Error>>,
-        Ready<Self::Response, Self::Error>,
-    >;
 
-    fn call<'a>(&'a self, msg: h2::Message, ctx: ServiceCtx<'a, Self>) -> Self::Future<'a> {
+    async fn call(
+        &self,
+        msg: h2::Message,
+        ctx: ServiceCtx<'_, Self>,
+    ) -> Result<Self::Response, Self::Error> {
         let id = msg.id();
         let mut streams = self.streams.borrow_mut();
         let h2::Message { stream, kind } = msg;
@@ -182,7 +174,7 @@ where
                     // not found
                     let _ =
                         stream.send_response(StatusCode::NOT_FOUND, HeaderMap::default(), true);
-                    return Either::Right(Ready::Ok(()));
+                    return Ok(());
                 };
 
                 // stream eof, cannot do anything
@@ -199,7 +191,7 @@ where
                         );
                         stream.send_trailers(trailers);
                     }
-                    return Either::Right(Ready::Ok(()));
+                    return Ok(());
                 }
 
                 let mut path = path.split_off(1);
@@ -233,7 +225,7 @@ where
                                 inflight.headers.insert(name.clone(), val.clone());
                             }
                         }
-                        h2::StreamEof::Error(err) => return Either::Right(Ready::Err(err)),
+                        h2::StreamEof::Error(err) => return Err(err),
                     }
 
                     let mut data = inflight.data.get();
@@ -255,7 +247,7 @@ where
                             );
                             stream.send_trailers(trailers);
                         }
-                        return Either::Right(Ready::Ok(()));
+                        return Ok(());
                     }
                     let data = data.split_to(len as usize);
 
@@ -269,48 +261,47 @@ where
                         .send_response(StatusCode::OK, HeaderMap::default(), false)
                         .is_err()
                     {
-                        return Either::Right(Ready::Ok(()));
+                        return Ok(());
                     }
+                    drop(streams);
 
-                    return Either::Left(Box::pin(async move {
-                        match ctx.call(&self.service, req).await {
-                            Ok(res) => {
-                                log::debug!("Response is received {:?}", res);
-                                let mut buf = BytesMut::with_capacity(res.payload.len() + 5);
-                                buf.put_u8(0); // compression
-                                buf.put_u32(res.payload.len() as u32); // length
-                                buf.extend_from_slice(&res.payload);
+                    match ctx.call(&self.service, req).await {
+                        Ok(res) => {
+                            log::debug!("Response is received {:?}", res);
+                            let mut buf = BytesMut::with_capacity(res.payload.len() + 5);
+                            buf.put_u8(0); // compression
+                            buf.put_u32(res.payload.len() as u32); // length
+                            buf.extend_from_slice(&res.payload);
 
-                                let _ = stream.send_payload(buf.freeze(), false).await;
+                            let _ = stream.send_payload(buf.freeze(), false).await;
 
-                                let mut trailers = HeaderMap::default();
-                                trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
-                                for (name, val) in res.headers {
-                                    trailers.append(name, val);
-                                }
-
-                                stream.send_trailers(trailers);
+                            let mut trailers = HeaderMap::default();
+                            trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
+                            for (name, val) in res.headers {
+                                trailers.append(name, val);
                             }
-                            Err(err) => {
-                                let error = format!("Failure during service call: {}", err);
-                                log::debug!("{}", error);
-                                let mut trailers = HeaderMap::default();
-                                trailers.insert(consts::GRPC_STATUS, GrpcStatus::Aborted.into());
-                                if let Ok(val) = HeaderValue::from_str(&error) {
-                                    trailers.insert(consts::GRPC_MESSAGE, val);
-                                }
-                                stream.send_trailers(trailers);
-                            }
-                        };
 
-                        Ok(())
-                    }));
+                            stream.send_trailers(trailers);
+                        }
+                        Err(err) => {
+                            let error = format!("Failure during service call: {}", err);
+                            log::debug!("{}", error);
+                            let mut trailers = HeaderMap::default();
+                            trailers.insert(consts::GRPC_STATUS, GrpcStatus::Aborted.into());
+                            if let Ok(val) = HeaderValue::from_str(&error) {
+                                trailers.insert(consts::GRPC_MESSAGE, val);
+                            }
+                            stream.send_trailers(trailers);
+                        }
+                    };
+
+                    return Ok(());
                 }
             }
             h2::MessageKind::Disconnect(_) => {
                 streams.remove(&id);
             }
         }
-        Either::Right(Ready::Ok(()))
+        Ok(())
     }
 }

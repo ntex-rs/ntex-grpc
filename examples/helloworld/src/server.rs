@@ -1,4 +1,4 @@
-use ntex::{server::Server, service::ServiceFactory, util::HashMap, util::Ready};
+use ntex::{server::Server, service::ServiceFactory, util::HashMap};
 use ntex_grpc::server;
 
 mod helloworld;
@@ -34,10 +34,9 @@ impl ServiceFactory<server::ServerRequest> for GreeterServer {
     type Error = server::ServerError;
     type InitError = ();
     type Service = GreeterServer;
-    type Future<'f> = Ready<Self::Service, Self::InitError>;
 
-    fn create(&self, _: ()) -> Self::Future<'_> {
-        Ready::Ok(GreeterServer)
+    async fn create(&self, _: ()) -> Result<Self::Service, Self::InitError> {
+        Ok(GreeterServer)
     }
 }
 

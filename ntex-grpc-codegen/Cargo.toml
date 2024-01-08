@@ -1,7 +1,7 @@
 [package]
 name = "ntex-grpc-codegen"
 version = "0.2.11"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 description = "GRPC Client/Server framework (codegen)"
 documentation = "https://docs.rs/ntex-grpc-codegen"

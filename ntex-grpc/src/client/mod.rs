@@ -1,4 +1,4 @@
-use std::future::Future;
+#![allow(async_fn_in_trait)]
 
 use ntex_bytes::Bytes;
 use ntex_h2::{client, OperationError, StreamError};
@@ -15,11 +15,11 @@ pub trait Transport<T: MethodDef> {
     /// Errors produced by the transport.
     type Error: From<HttpError>;
 
-    fn request(
+    async fn request(
         &self,
         args: &T::Input,
         ctx: RequestContext,
-    ) -> impl Future<Output = Result<Response<T>, Self::Error>>;
+    ) -> Result<Response<T>, Self::Error>;
 }
 
 /// Client utils methods

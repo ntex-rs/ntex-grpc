@@ -1,4 +1,4 @@
-use std::{cell::RefCell, future::Future, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 use ntex_connect::{Address, Connect, ConnectError, Connector as DefaultConnector};
 use ntex_h2::{self as h2, client};

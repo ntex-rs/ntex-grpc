@@ -1,6 +1,6 @@
 use std::{collections::HashMap, convert::TryFrom, fmt, hash::BuildHasher, hash::Hash, mem};
 
-use ntex_bytes::{ByteString, Bytes, BytesMut};
+use ntex_bytes::{Buf, BufMut, ByteString, Bytes, BytesMut};
 
 pub use crate::encoding::WireType;
 use crate::encoding::{self, DecodeError};
@@ -101,6 +101,7 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
         src: &mut Bytes,
     ) -> Result<(), DecodeError> {
         encoding::check_wire_type(Self::TYPE, wtype)?;
+
         if Self::TYPE == WireType::Varint {
             self.merge(src)
         } else {
@@ -559,21 +560,66 @@ varint!(i64, 0i64);
 varint!(u32, 0u32);
 varint!(u64, 0u64);
 
-// varint!(i32, sint32,
-// to_uint64(value) {
-//     ((value << 1) ^ (value >> 31)) as u32 as u64
-// },
-// from_uint64(value) {
-//     let value = value as u32;
-//     ((value >> 1) as i32) ^ (-((value & 1) as i32))
-// });
-// varint!(i64, sint64,
-// to_uint64(value) {
-//     ((value << 1) ^ (value >> 63)) as u64
-// },
-// from_uint64(value) {
-//     ((value >> 1) as i64) ^ (-((value & 1) as i64))
-// });
+/// Macro which emits a module containing a set of encoding functions for a
+/// fixed width numeric type.
+macro_rules! fixed_width {
+    ($ty:ty,
+     $width:expr,
+     $wire_type:expr,
+     $default:expr,
+     $put:expr,
+     $get:expr) => {
+        impl NativeType for $ty {
+            const TYPE: WireType = $wire_type;
+
+            #[inline]
+            fn is_default(&self) -> bool {
+                *self == $default
+            }
+
+            #[inline]
+            fn encode_value(&self, dst: &mut BytesMut) {
+                $put(dst, *self);
+            }
+
+            #[inline]
+            fn encoded_len(&self, tag: u32) -> usize {
+                encoding::key_len(tag) + $width
+            }
+
+            #[inline]
+            fn value_len(&self) -> usize {
+                $width
+            }
+
+            #[inline]
+            fn merge(&mut self, src: &mut Bytes) -> Result<(), DecodeError> {
+                if src.len() < $width {
+                    return Err(DecodeError::new("Buffer underflow"));
+                }
+                *self = $get(src);
+                Ok(())
+            }
+        }
+    };
+}
+
+fixed_width!(
+    f32,
+    4,
+    WireType::ThirtyTwoBit,
+    0f32,
+    BufMut::put_f32_le,
+    Buf::get_f32_le
+);
+fixed_width!(
+    f64,
+    8,
+    WireType::SixtyFourBit,
+    0f64,
+    BufMut::put_f64_le,
+    Buf::get_f64_le
+);
 
 #[cfg(test)]
 mod tests {

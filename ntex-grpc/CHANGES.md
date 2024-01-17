@@ -1,5 +1,9 @@
 # Changes
 
+## [0.6.1] - 2024-01-17
+
+* Add support for f32 and f64 types #4
+
 ## [0.6.0] - 2024-01-09
 
 * Release

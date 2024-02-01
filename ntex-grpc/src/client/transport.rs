@@ -123,7 +123,13 @@ impl<T: MethodDef> Transport<T> for Client {
             }
             let _compressed = data.get_u8();
             let len = data.get_u32();
-            return match <T::Output as Message>::read(&mut data.split_to(len as usize)) {
+            let mut block = if let Some(b) = data.split_to_checked(len as usize) {
+                b
+            } else {
+                return Err(ClientError::UnexpectedEof(None, hdrs));
+            };
+
+            return match <T::Output as Message>::read(&mut block) {
                 Ok(output) => Ok(Response {
                     output,
                     trailers,

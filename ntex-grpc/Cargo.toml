@@ -1,6 +1,6 @@
 [package]
 name = "ntex-grpc"
-version = "0.6.1"
+version = "0.6.2"
 license = "MIT OR Apache-2.0"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 description = "GRPC Client/Server framework"
@@ -21,7 +21,7 @@ ntex-http = "0.1"
 ntex-connect = "1.0"
 ntex-io = "1.0"
 ntex-util = "1.0"
-ntex-bytes = "0.1"
+ntex-bytes = "0.1.24"
 ntex-service = "2.0"
 ntex-rt = "0.4"
 ntex-grpc-derive = "0.6"

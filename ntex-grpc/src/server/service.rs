@@ -1,7 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use ntex_bytes::{Buf, BufMut, ByteString, BytesMut};
-use ntex_h2::{self as h2, frame::StreamId};
+use ntex_h2::{self as h2, frame::Reason, frame::StreamId};
 use ntex_http::{HeaderMap, HeaderValue, StatusCode};
 use ntex_io::{Filter, Io, IoBoxed};
 use ntex_service::{Service, ServiceCtx, ServiceFactory};
@@ -249,7 +249,9 @@ where
                         }
                         return Ok(());
                     }
-                    let data = data.split_to(len as usize);
+                    let data = data
+                        .split_to_checked(len as usize)
+                        .ok_or_else(|| h2::StreamError::Reset(Reason::PROTOCOL_ERROR))?;
 
                     log::debug!("Call service {} method {}", inflight.service, inflight.name);
                     let req = ServerRequest {

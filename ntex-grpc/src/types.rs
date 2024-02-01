@@ -106,16 +106,14 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
             self.merge(src)
         } else {
             let len = encoding::decode_varint(src)? as usize;
-            if len > src.len() {
-                Err(DecodeError::new(format!(
+            let mut buf = src.split_to_checked(len).ok_or_else(|| {
+                DecodeError::new(format!(
                     "Not enough data, message size {} buffer size {}",
                     len,
                     src.len()
-                )))
-            } else {
-                let mut buf = src.split_to(len);
-                self.merge(&mut buf)
-            }
+                ))
+            })?;
+            self.merge(&mut buf)
         }
     }
 
@@ -268,7 +266,7 @@ impl<T: NativeType> NativeType for Option<T> {
     /// Deserialize from the input
     fn merge(&mut self, _: &mut Bytes) -> Result<(), DecodeError> {
         Err(DecodeError::new(
-            "Cannot directly call deserialize for Vec<T>",
+            "Cannot directly call deserialize for Option<T>",
         ))
     }
 
@@ -362,7 +360,9 @@ impl<T: NativeType> NativeType for Vec<T> {
     ) -> Result<(), DecodeError> {
         if T::TYPE == WireType::Varint {
             let len = encoding::decode_varint(src)? as usize;
-            let mut buf = src.split_to(len);
+            let mut buf = src
+                .split_to_checked(len)
+                .ok_or_else(DecodeError::incomplete)?;
             while !buf.is_empty() {
                 let mut value: T = Default::default();
                 value.merge(&mut buf)?;
@@ -402,9 +402,10 @@ impl<T: NativeType> NativeType for Vec<T> {
     /// Protobuf field length
     fn encoded_len(&self, tag: u32) -> usize {
         if T::TYPE == WireType::Varint {
+            let len = self.iter().map(|value| value.value_len()).sum::<usize>();
             self.iter().map(|value| value.value_len()).sum::<usize>()
                 + encoding::key_len(tag)
-                + encoding::encoded_len_varint(self.len() as u64)
+                + encoding::encoded_len_varint(len as u64)
         } else {
             self.iter().map(|value| value.encoded_len(tag)).sum()
         }
@@ -441,28 +442,26 @@ impl<K: NativeType + Eq + Hash, V: NativeType, S: BuildHasher + Default> NativeT
         encoding::check_wire_type(Self::TYPE, wtype)?;
 
         let len = encoding::decode_varint(src)? as usize;
-        if len > src.len() {
-            Err(DecodeError::new(format!(
+        let mut buf = src.split_to_checked(len).ok_or_else(|| {
+            DecodeError::new(format!(
                 "Not enough data for HashMap, message size {}, buf size {}",
                 len,
                 src.len()
-            )))
-        } else {
-            let mut buf = src.split_to(len);
-            let mut key = Default::default();
-            let mut val = Default::default();
+            ))
+        })?;
+        let mut key = Default::default();
+        let mut val = Default::default();
 
-            while !buf.is_empty() {
-                let (tag, wire_type) = encoding::decode_key(&mut buf)?;
-                match tag {
-                    1 => NativeType::deserialize(&mut key, 1, wire_type, &mut buf)?,
-                    2 => NativeType::deserialize(&mut val, 2, wire_type, &mut buf)?,
-                    _ => return Err(DecodeError::new("Map deserialization error")),
-                }
+        while !buf.is_empty() {
+            let (tag, wire_type) = encoding::decode_key(&mut buf)?;
+            match tag {
+                1 => NativeType::deserialize(&mut key, 1, wire_type, &mut buf)?,
+                2 => NativeType::deserialize(&mut val, 2, wire_type, &mut buf)?,
+                _ => return Err(DecodeError::new("Map deserialization error")),
             }
-            self.insert(key, val);
-            Ok(())
         }
+        self.insert(key, val);
+        Ok(())
     }
 
     /// Serialize protobuf field

@@ -1,5 +1,11 @@
 # Changes
 
+## [0.6.2] - 2024-02-01
+
+* Handle broken protobuf frames
+
+* Fix Vec<_> encoding
+
 ## [0.6.1] - 2024-01-17
 
 * Add support for f32 and f64 types #4

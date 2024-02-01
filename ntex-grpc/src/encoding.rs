@@ -274,11 +274,8 @@ pub fn skip_field(wire_type: WireType, tag: u32, buf: &mut Bytes) -> Result<(), 
         WireType::EndGroup => return Err(DecodeError::new("unexpected end group tag")),
     };
 
-    if len > buf.len() as u64 {
-        return Err(DecodeError::new("buffer underflow"));
-    }
-
-    buf.split_to(len as usize);
+    buf.split_to_checked(len as usize)
+        .ok_or_else(DecodeError::incomplete)?;
     Ok(())
 }
 
@@ -320,6 +317,10 @@ impl DecodeError {
     pub fn push(mut self, message: &'static str, field: &'static str) -> Self {
         self.inner.stack.push((message, field));
         self
+    }
+
+    pub(crate) fn incomplete() -> Self {
+        Self::new("Not enough data")
     }
 }
 

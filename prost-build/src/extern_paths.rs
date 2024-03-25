@@ -105,7 +105,7 @@ impl ExternPaths {
         // protoc should always give fully qualified identifiers.
         assert_eq!(".", &pb_ident[..1]);
 
-        self.extern_paths.get(pb_ident).is_some()
+        self.extern_paths.contains_key(pb_ident)
     }
 
     pub fn resolve_ident(&self, pb_ident: &str) -> Option<String> {

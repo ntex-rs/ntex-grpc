@@ -251,7 +251,7 @@ where
                     }
                     let data = data
                         .split_to_checked(len as usize)
-                        .ok_or_else(|| h2::StreamError::Reset(Reason::PROTOCOL_ERROR))?;
+                        .ok_or(h2::StreamError::Reset(Reason::PROTOCOL_ERROR))?;
 
                     log::debug!("Call service {} method {}", inflight.service, inflight.name);
                     let req = ServerRequest {

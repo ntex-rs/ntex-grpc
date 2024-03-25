@@ -1,5 +1,9 @@
 # Changes
 
+## [0.6.3] - 2024-03-25
+
+* Remove ntex-connect dependency
+
 ## [0.6.2] - 2024-02-01
 
 * Handle broken protobuf frames

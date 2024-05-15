@@ -1,0 +1,24 @@
+syntax = "proto3";
+package counts;
+
+service CountsSearch {
+  rpc Search (SearchRequest) returns (SearchResponse);
+}
+
+message SearchRequest {
+  string query = 1;
+}
+
+message SearchResponse {
+  repeated Counts results = 1;
+}
+
+message Count {
+  double value = 1;
+  uint64 offset = 2;
+  uint64 count = 3;
+}
+
+message Counts {
+  repeated Count counts = 1;
+}

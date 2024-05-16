@@ -152,14 +152,15 @@ where
     type Response = ();
     type Error = h2::StreamError;
 
+    #[allow(clippy::await_holding_refcell_ref)]
     async fn call(
         &self,
         msg: h2::Message,
         ctx: ServiceCtx<'_, Self>,
     ) -> Result<Self::Response, Self::Error> {
         let id = msg.id();
-        let mut streams = self.streams.borrow_mut();
         let h2::Message { stream, kind } = msg;
+        let mut streams = self.streams.borrow_mut();
 
         match kind {
             h2::MessageKind::Headers {

@@ -9,7 +9,7 @@ repository = "https://github.com/ntex-rs/ntex-grpc"
 readme = "README.md"
 keywords = ["grpc"]
 categories = ["asynchronous", "network-programming"]
-edition = "2018"
+edition = "2021"
 
 [[bin]]
 name = "ntex-grpc"
@@ -19,4 +19,4 @@ path = "src/main.rs"
 clap = { version = "3.2", features = ["derive"] }
 ntex-prost-build = "0.11.11"
 log = "0.4"
-env_logger = "0.10"
+env_logger = "0.11"

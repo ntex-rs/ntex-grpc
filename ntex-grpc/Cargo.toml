@@ -1,6 +1,6 @@
 [package]
 name = "ntex-grpc"
-version = "0.6.3"
+version = "0.6.4"
 license = "MIT OR Apache-2.0"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 description = "GRPC Client/Server framework"
@@ -9,7 +9,7 @@ repository = "https://github.com/ntex-rs/ntex-grpc"
 readme = "README.md"
 keywords = ["grpc"]
 categories = ["asynchronous", "network-programming"]
-edition = "2018"
+edition = "2021"
 
 [lib]
 name = "ntex_grpc"
@@ -30,5 +30,5 @@ pin-project-lite = "0.2"
 
 [dev-dependencies]
 openssl = "0.10"
-ntex = { version = "1.0", features = ["openssl", "tokio"] }
-env_logger = { version = "0.10", default-features = false }
+ntex = { version = "1.2", features = ["openssl", "tokio"] }
+env_logger = { version = "0.11", default-features = false }

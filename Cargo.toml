@@ -7,6 +7,7 @@ members = [
   "examples/custom",
   "examples/helloworld"
 ]
+resolver = "2"
 
 [patch.crates-io]
 ntex-grpc = { path = "./ntex-grpc" }

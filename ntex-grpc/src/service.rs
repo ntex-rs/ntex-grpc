@@ -1,3 +1,4 @@
+#![allow(clippy::declare_interior_mutable_const)]
 use ntex_bytes::{ByteString, Bytes, BytesMut};
 
 use crate::{encoding::DecodeError, types::Message};

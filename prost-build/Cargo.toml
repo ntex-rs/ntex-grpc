@@ -10,7 +10,7 @@ repository = "https://github.com/ntex-rs/ntex-grpc"
 documentation = "https://docs.rs/ntex-prost-build"
 readme = "README.md"
 description = "A Protocol Buffers implementation for the Rust Language."
-edition = "2018"
+edition = "2021"
 
 [features]
 default = []
@@ -33,4 +33,4 @@ cfg-if = "1"
 cmake = "0.1"
 
 [dev-dependencies]
-env_logger = { version = "0.10", default-features = false }
+env_logger = { version = "0.11", default-features = false }

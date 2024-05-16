@@ -1,5 +1,9 @@
 # Changes
 
+## [0.6.4] - 2024-05-16
+
+* Fix f32/f64 encoding
+
 ## [0.6.3] - 2024-03-25
 
 * Remove ntex-connect dependency

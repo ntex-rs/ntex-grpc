@@ -49,7 +49,7 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
     /// Encode field tag and length
     fn encode_type(&self, tag: u32, dst: &mut BytesMut) {
         encoding::encode_key(tag, Self::TYPE, dst);
-        if Self::TYPE != WireType::Varint {
+        if !matches!(Self::TYPE, WireType::Varint | WireType::SixtyFourBit) {
             encoding::encode_varint(self.value_len() as u64, dst);
         }
     }
@@ -102,7 +102,7 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
     ) -> Result<(), DecodeError> {
         encoding::check_wire_type(Self::TYPE, wtype)?;
 
-        if Self::TYPE == WireType::Varint {
+        if matches!(Self::TYPE, WireType::Varint | WireType::SixtyFourBit) {
             self.merge(src)
         } else {
             let len = encoding::decode_varint(src)? as usize;
@@ -626,6 +626,7 @@ mod tests {
 
     #[derive(Clone, PartialEq, Debug, Default)]
     pub struct TestMessage {
+        f: f64,
         props: HashMap<String, u32>,
         b: bool,
         opt: Option<String>,
@@ -633,9 +634,10 @@ mod tests {
 
     impl Message for TestMessage {
         fn write(&self, dst: &mut BytesMut) {
-            NativeType::serialize(&self.props, 1, DefaultValue::Default, dst);
-            NativeType::serialize(&self.b, 2, DefaultValue::Default, dst);
-            NativeType::serialize(&self.opt, 3, DefaultValue::Default, dst);
+            NativeType::serialize(&self.f, 1, DefaultValue::Default, dst);
+            NativeType::serialize(&self.props, 2, DefaultValue::Default, dst);
+            NativeType::serialize(&self.b, 3, DefaultValue::Default, dst);
+            NativeType::serialize(&self.opt, 4, DefaultValue::Default, dst);
         }
 
         #[inline]
@@ -644,9 +646,10 @@ mod tests {
             while !src.is_empty() {
                 let (tag, wire_type) = encoding::decode_key(src)?;
                 match tag {
-                    1 => NativeType::deserialize(&mut msg.props, tag, wire_type, src)?,
-                    2 => NativeType::deserialize(&mut msg.b, tag, wire_type, src)?,
-                    3 => NativeType::deserialize(&mut msg.opt, tag, wire_type, src)?,
+                    1 => NativeType::deserialize(&mut msg.f, tag, wire_type, src)?,
+                    2 => NativeType::deserialize(&mut msg.props, tag, wire_type, src)?,
+                    3 => NativeType::deserialize(&mut msg.b, tag, wire_type, src)?,
+                    4 => NativeType::deserialize(&mut msg.opt, tag, wire_type, src)?,
                     _ => encoding::skip_field(wire_type, tag, src)?,
                 }
             }
@@ -655,9 +658,10 @@ mod tests {
 
         #[inline]
         fn encoded_len(&self) -> usize {
-            0 + NativeType::serialized_len(&self.props, 1, DefaultValue::Default)
-                + NativeType::serialized_len(&self.b, 2, DefaultValue::Default)
-                + NativeType::serialized_len(&self.opt, 3, DefaultValue::Default)
+            0 + NativeType::serialized_len(&self.f, 1, DefaultValue::Default)
+                + NativeType::serialized_len(&self.props, 2, DefaultValue::Default)
+                + NativeType::serialized_len(&self.b, 3, DefaultValue::Default)
+                + NativeType::serialized_len(&self.opt, 4, DefaultValue::Default)
         }
     }
 
@@ -665,6 +669,7 @@ mod tests {
     fn test_hashmap_default_values() {
         let mut msg = TestMessage::default();
 
+        msg.f = 382.8263;
         msg.b = true;
         msg.props.insert("test1".to_string(), 1);
         msg.props.insert("test2".to_string(), 0);
@@ -672,16 +677,16 @@ mod tests {
 
         let mut buf = BytesMut::new();
         msg.write(&mut buf);
-        assert_eq!(Message::encoded_len(&msg), 24);
-        assert_eq!(buf.len(), 24);
+        assert_eq!(Message::encoded_len(&msg), 33);
+        assert_eq!(buf.len(), 33);
 
         let mut buf2 = BytesMut::new();
         msg.serialize(1, DefaultValue::Default, &mut buf2);
-        assert_eq!(NativeType::encoded_len(&msg, 1), 26);
-        assert_eq!(buf2.len(), 26);
+        assert_eq!(NativeType::encoded_len(&msg, 1), 35);
+        assert_eq!(buf2.len(), 35);
 
         let msg2 = TestMessage::read(&mut buf.freeze()).unwrap();
-        assert_eq!(Message::encoded_len(&msg2), 24);
+        assert_eq!(Message::encoded_len(&msg2), 33);
         assert_eq!(msg, msg2);
 
         let mut buf2 = buf2.freeze();

@@ -1,5 +1,9 @@
 # Changes
 
+## [0.7.0] - 2024-05-28
+
+* Upgrade to ntex v2.0
+
 ## [0.6.4] - 2024-05-16
 
 * Fix f32/f64 encoding

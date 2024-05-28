@@ -1,6 +1,6 @@
 [package]
 name = "helloworld"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 
 [[bin]]
@@ -12,9 +12,9 @@ name = "server"
 path = "src/server.rs"
 
 [dependencies]
-ntex = "1.2"
-ntex-grpc = "0.6"
-ntex-h2 = "0.5"
+ntex = "2"
+ntex-grpc = "0.7"
+ntex-h2 = "1"
 
 clap = "2"
 log = "0.4"
@@ -22,4 +22,4 @@ env_logger = "0.11"
 num_cpus = "1"
 
 [dev-dependencies]
-ntex = { version = "1.2", features = ["openssl", "tokio"] }
+ntex = { version = "2", features = ["openssl", "tokio"] }

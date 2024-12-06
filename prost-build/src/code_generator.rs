@@ -23,6 +23,7 @@ enum Syntax {
 
 pub struct CodeGenerator<'a> {
     config: &'a mut Config,
+    name: String,
     package: String,
     source_info: SourceCodeInfo,
     syntax: Syntax,
@@ -45,6 +46,16 @@ impl<'a> CodeGenerator<'a> {
         file: FileDescriptorProto,
         buf: &mut String,
     ) {
+        let name = file
+            .name
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or("")
+            .strip_suffix(".proto")
+            .unwrap_or("")
+            .replace(".", "_")
+            .replace("/", "_");
+
         let mut source_info = file
             .source_code_info
             .expect("no source code info in request");
@@ -63,15 +74,16 @@ impl<'a> CodeGenerator<'a> {
         };
 
         let mut code_gen = CodeGenerator {
+            name,
             config,
-            package: file.package.unwrap_or_default(),
             source_info,
             syntax,
             extern_paths,
+            buf,
             depth: 0,
             path: Vec::new(),
-            buf,
             priv_buf: String::new(),
+            package: file.package.unwrap_or_default(),
         };
 
         debug!(
@@ -113,7 +125,9 @@ impl<'a> CodeGenerator<'a> {
 
         code_gen.buf.push_str("\n\n\n");
 
-        code_gen.buf.push_str("mod _priv_impl {\n");
+        code_gen
+            .buf
+            .push_str(&format!("mod _priv_impl_{} {{\n", code_gen.name));
         code_gen.buf.push_str("use super::*;\n\n");
         code_gen.buf.push_str(&code_gen.priv_buf);
         code_gen.buf.push('}');

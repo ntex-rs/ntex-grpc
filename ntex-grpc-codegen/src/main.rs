@@ -74,7 +74,7 @@ fn main() -> io::Result<()> {
             args.proto, fname
         );
 
-        let mut fmt_args = vec!["--edition", "2018"];
+        let mut fmt_args = vec!["--edition", "2021"];
 
         let rustfmt_path = args.rustfmt_path.map(|s| s.to_string_lossy().to_string());
         if let Some(ref cfg_path) = rustfmt_path {

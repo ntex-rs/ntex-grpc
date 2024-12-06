@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.12] - 2024-12-06
+
+* Fix codegen #17
+
 ## [0.2.11] - 2023-09-10
 
 * Fix handling google types as method input type

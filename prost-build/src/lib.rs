@@ -782,11 +782,10 @@ impl Config {
             let file_name = file_names
                 .get(module)
                 .expect("every module should have a filename");
-            if file_name == "google.protobuf.rs" {
+            if file_name == "google.protobuf.rs" || file_name == "google_protobuf.rs" {
                 continue;
             }
             let output_path = target.join(file_name);
-
             let previous_content = fs::read(&output_path);
 
             if previous_content
@@ -899,11 +898,16 @@ impl Config {
                 packages.insert(request.0.clone(), request.1.package().to_string());
             }
 
-            let buf = modules.entry(request.0).or_insert_with(String::new);
-            buf.insert_str(
-                0,
-                "#![allow(dead_code, unused_mut, unused_variables, clippy::identity_op, clippy::derivable_impls, clippy::unit_arg, clippy::derive_partial_eq_without_eq, clippy::manual_range_patterns)]\n/// DO NOT MODIFY. Auto-generated file\n\n",
-            );
+            if !modules.contains_key(&request.0) {
+                let mut buf = String::new();
+                buf.insert_str(
+                    0,
+                    "#![allow(dead_code, unused_mut, unused_variables, clippy::identity_op, clippy::derivable_impls, clippy::unit_arg, clippy::derive_partial_eq_without_eq, clippy::manual_range_patterns)]\n/// DO NOT MODIFY. Auto-generated file\n\n",
+                );
+                modules.insert(request.0.clone(), buf);
+            }
+            let buf = modules.get_mut(&request.0).unwrap();
+
             CodeGenerator::generate(self, &extern_paths, request.1, buf);
         }
 
@@ -1008,6 +1012,8 @@ impl Module {
         if !root.ends_with(".rs") {
             root.push_str(".rs");
         }
+        let mut root = root[0..root.len() - 3].replace(".", "_");
+        root.push_str(".rs");
 
         root
     }

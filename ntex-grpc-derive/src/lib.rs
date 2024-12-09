@@ -48,16 +48,12 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
                 let result = #ty::#fn_name(self, ::ntex_grpc::server::FromRequest::from(req)).await;
 
-                match method.server_result(result) {
-                    Ok(res) => {
-                        let response = ::ntex_grpc::server::Response::from(res);
-                        let mut buf = ::ntex_grpc::BytesMut::new();
-                        method.encode(response.message, &mut buf);
+                let res = method.server_result(result);
+                let response = ::ntex_grpc::server::Response::from(res);
+                let mut buf = ::ntex_grpc::BytesMut::new();
+                method.encode(response.message, &mut buf);
 
-                        Ok(::ntex_grpc::server::ServerResponse::with_headers(buf.freeze(), response.headers))
-                    }
-                    Err(e) => Err(e)
-                }
+                Ok(::ntex_grpc::server::ServerResponse::with_headers(buf.freeze(), response.headers))
             }
         });
     }

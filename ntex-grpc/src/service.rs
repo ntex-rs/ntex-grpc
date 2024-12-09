@@ -1,7 +1,6 @@
 use ntex_bytes::{ByteString, Bytes, BytesMut};
 
-use crate::server::{MethodResult, ServerError};
-use crate::{encoding::DecodeError, types::Message};
+use crate::{encoding::DecodeError, server::MethodResult, types::Message};
 
 /// Trait for service method definition
 pub trait ServiceDef {
@@ -34,10 +33,7 @@ pub trait MethodDef {
 
     #[doc(hidden)]
     #[inline]
-    fn server_result<T: MethodResult<Self::Output>>(
-        &self,
-        val: T,
-    ) -> Result<Self::Output, ServerError> {
+    fn server_result<T: MethodResult<Self::Output>>(&self, val: T) -> Self::Output {
         val.into()
     }
 }

@@ -41,20 +41,22 @@ impl From<DecodeError> for ServerError {
 }
 
 pub trait MethodResult<T> {
-    fn into(self) -> Result<T, ServerError>;
+    fn into(self) -> T;
 }
 
 impl<T> MethodResult<T> for T {
-    fn into(self) -> Result<T, ServerError> {
-        Ok(self)
+    #[inline]
+    fn into(self) -> T {
+        self
     }
 }
 
-impl<T, E: GrpcError> MethodResult<T> for Result<T, E> {
-    fn into(self) -> Result<T, ServerError> {
+impl<T, E: Into<T>> MethodResult<T> for Result<T, E> {
+    #[inline]
+    fn into(self) -> T {
         match self {
-            Ok(res) => Ok(res),
-            Err(e) => Err(ServerError::new(e.status(), e.message(), e.headers())),
+            Ok(res) => res,
+            Err(e) => e.into(),
         }
     }
 }

@@ -1,4 +1,4 @@
-use ntex::{http::header::HeaderValue, server::Server, service::ServiceFactory, util::HashMap};
+use ntex::{server::Server, service::ServiceFactory, util::HashMap};
 use ntex_grpc::server;
 
 mod helloworld;
@@ -11,13 +11,9 @@ pub struct GreeterServer;
 /// Custom error
 struct HelloError;
 
-impl server::GrpcError for HelloError {
-    fn status(&self) -> server::GrpcStatus {
-        server::GrpcStatus::NotFound
-    }
-
-    fn message(&self) -> HeaderValue {
-        HeaderValue::from_static("Not found error")
+impl From<HelloError> for HelloReply {
+    fn from(_: HelloError) -> Self {
+        HelloReply::default()
     }
 }
 

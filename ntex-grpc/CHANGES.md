@@ -1,5 +1,9 @@
 # Changes
 
+## [0.7.1] - 2024-12-10
+
+* Refactor server error handling
+
 ## [0.7.0] - 2024-05-28
 
 * Upgrade to ntex v2.0

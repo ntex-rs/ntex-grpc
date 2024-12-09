@@ -23,6 +23,8 @@ pub use self::encoding::WireType;
 #[doc(hidden)]
 pub use ntex_bytes::{ByteString, Bytes, BytesMut};
 #[doc(hidden)]
+pub use ntex_http::HeaderValue;
+#[doc(hidden)]
 pub use ntex_service::{Service, ServiceCtx, ServiceFactory};
 #[doc(hidden)]
 pub use ntex_util::HashMap;

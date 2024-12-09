@@ -69,8 +69,20 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
                     match #srvpath::method_by_name(&req.name) {
                         #(#methods)*
-                        Some(_) => Err(::ntex_grpc::server::ServerError::NotImplemented(req.name)),
-                        None => Err(::ntex_grpc::server::ServerError::NotFound(req.name)),
+                        Some(_) => Err(::ntex_grpc::server::ServerError::new(
+                            ::ntex_grpc::GrpcStatus::Unimplemented,
+                            ::ntex_grpc::HeaderValue::from_shared(
+                                ::ntex_grpc::ByteString::from(format!("Service method is not implemented: {0}", req.name)).into_bytes()
+                            ).unwrap(),
+                            None
+                        )),
+                        None => Err(::ntex_grpc::server::ServerError::new(
+                            ::ntex_grpc::GrpcStatus::NotFound,
+                            ::ntex_grpc::HeaderValue::from_shared(
+                                ::ntex_grpc::ByteString::from(format!("Service method is not found: {0}", req.name)).into_bytes()
+                            ).unwrap(),
+                            None
+                        ))
                     }
                 }
             }

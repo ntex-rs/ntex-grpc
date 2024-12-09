@@ -3,19 +3,11 @@ use std::ops;
 use ntex_bytes::{ByteString, Bytes};
 use ntex_http::{HeaderMap, HeaderName, HeaderValue};
 
+mod error;
 mod service;
 
+pub use self::error::{GrpcError, ServerError};
 pub use self::service::{GrpcServer, GrpcService};
-
-#[derive(thiserror::Error, Clone, Debug)]
-pub enum ServerError {
-    #[error("{0}")]
-    Decode(#[from] crate::DecodeError),
-    #[error("Service method is not found: {0}")]
-    NotFound(ByteString),
-    #[error("Service method is not implemented: {0}")]
-    NotImplemented(ByteString),
-}
 
 #[derive(Debug)]
 pub struct ServerRequest {

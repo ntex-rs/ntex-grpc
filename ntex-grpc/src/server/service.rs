@@ -287,13 +287,10 @@ where
                             stream.send_trailers(trailers);
                         }
                         Err(err) => {
-                            let error = format!("Failure during service call: {}", err);
-                            log::debug!("{}", error);
-                            let mut trailers = HeaderMap::default();
-                            trailers.insert(consts::GRPC_STATUS, GrpcStatus::Aborted.into());
-                            if let Ok(val) = HeaderValue::from_str(&error) {
-                                trailers.insert(consts::GRPC_MESSAGE, val);
-                            }
+                            log::debug!("Failure during service call: {:?}", err.message);
+                            let mut trailers = err.headers;
+                            trailers.insert(consts::GRPC_STATUS, err.status.into());
+                            trailers.insert(consts::GRPC_MESSAGE, err.message);
                             stream.send_trailers(trailers);
                         }
                     };

@@ -1,4 +1,4 @@
-use ntex::{server::Server, service::ServiceFactory, util::HashMap};
+use ntex::{http::header::HeaderValue, server::Server, service::ServiceFactory, util::HashMap};
 use ntex_grpc::server;
 
 mod helloworld;
@@ -8,14 +8,27 @@ use crate::helloworld::{HelloReply, HelloRequest};
 #[derive(Clone)]
 pub struct GreeterServer;
 
+/// Custom error
+struct HelloError;
+
+impl server::GrpcError for HelloError {
+    fn status(&self) -> server::GrpcStatus {
+        server::GrpcStatus::NotFound
+    }
+
+    fn message(&self) -> HeaderValue {
+        HeaderValue::from_static("Not found error")
+    }
+}
+
 #[server(crate::helloworld::Greeter)]
 impl GreeterServer {
     #[method(SayHello)]
-    async fn say_hello(&self, req: HelloRequest) -> HelloReply {
+    async fn say_hello(&self, req: HelloRequest) -> Result<HelloReply, HelloError> {
         log::trace!("Received request: {:#?}", req);
         let mut data3 = HashMap::default();
         data3.insert("1".to_string().into(), 10u32);
-        HelloReply {
+        Ok(HelloReply {
             // data5: vec![helloworld::DocumentType::Namespace, helloworld::DocumentType::Quota],
             data5: vec![helloworld::DocumentType::Namespace],
             message: format!("Hello {}!", req.name).into(),
@@ -25,7 +38,7 @@ impl GreeterServer {
             data3,
             data4: helloworld::DocumentType::Namespace,
             data6: vec![-234234234, 123412414, 45456],
-        }
+        })
     }
 }
 

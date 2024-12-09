@@ -5,7 +5,8 @@
     clippy::identity_op,
     clippy::derivable_impls,
     clippy::unit_arg,
-    clippy::derive_partial_eq_without_eq
+    clippy::derive_partial_eq_without_eq,
+    clippy::manual_range_patterns
 )]
 /// DO NOT MODIFY. Auto-generated file
 
@@ -35,10 +36,7 @@ pub struct HelloReply {
 pub enum DocumentType {
     Broker = 0,
     Namespace = 1,
-    TopicSpace = 2,
-    CertificateList = 3,
-    PermissionBindingList = 4,
-    ClientGroupList = 5,
+    TestDoc = 2,
     Quota = 6,
 }
 
@@ -48,10 +46,7 @@ impl DocumentType {
         match self {
             DocumentType::Broker => "BROKER",
             DocumentType::Namespace => "NAMESPACE",
-            DocumentType::TopicSpace => "TOPIC_SPACE",
-            DocumentType::CertificateList => "CERTIFICATE_LIST",
-            DocumentType::PermissionBindingList => "PERMISSION_BINDING_LIST",
-            DocumentType::ClientGroupList => "CLIENT_GROUP_LIST",
+            DocumentType::TestDoc => "TEST_DOC",
             DocumentType::Quota => "QUOTA",
         }
     }
@@ -64,10 +59,7 @@ impl DocumentType {
         match self {
             DocumentType::Broker => "BROKER",
             DocumentType::Namespace => "NAMESPACE",
-            DocumentType::TopicSpace => "TOPIC_SPACE",
-            DocumentType::CertificateList => "CERTIFICATE_LIST",
-            DocumentType::PermissionBindingList => "PERMISSION_BINDING_LIST",
-            DocumentType::ClientGroupList => "CLIENT_GROUP_LIST",
+            DocumentType::TestDoc => "TEST_DOC",
             DocumentType::Quota => "QUOTA",
         }
     }
@@ -76,10 +68,7 @@ impl DocumentType {
         match value {
             0 => Some(DocumentType::Broker),
             1 => Some(DocumentType::Namespace),
-            2 => Some(DocumentType::TopicSpace),
-            3 => Some(DocumentType::CertificateList),
-            4 => Some(DocumentType::PermissionBindingList),
-            5 => Some(DocumentType::ClientGroupList),
+            2 => Some(DocumentType::TestDoc),
             6 => Some(DocumentType::Quota),
             _ => ::std::option::Option::None,
         }
@@ -110,7 +99,7 @@ impl ::ntex_grpc::MethodDef for GreeterSayHelloMethod {
     type Output = HelloReply;
 }
 
-mod _priv_impl {
+mod _priv_impl_helloworld {
     use super::*;
 
     impl ::ntex_grpc::Message for HelloRequest {

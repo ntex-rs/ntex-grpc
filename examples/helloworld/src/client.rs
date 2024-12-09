@@ -45,7 +45,7 @@ fn main() {
                 for _ in 0..concurrency - 1 {
                     let cnt = counters.clone();
                     let client = client.clone();
-                    spawn(async move {
+                    let _ = spawn(async move {
                         loop {
                             client
                                 .say_hello(&HelloRequest {

@@ -48,9 +48,6 @@ message HelloReply {
 enum DocumentType {
     BROKER = 0;
     NAMESPACE = 1;
-    TOPIC_SPACE = 2;
-    CERTIFICATE_LIST = 3;
-    PERMISSION_BINDING_LIST = 4;
-    CLIENT_GROUP_LIST = 5;
+    TEST_DOC = 2;
     QUOTA = 6;
 }

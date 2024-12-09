@@ -39,6 +39,7 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     for (m_name, fn_name, span) in srv.methods {
         methods.push(quote::quote_spanned! {span=>
             Some(#methods_path::#m_name(method)) => {
+                use ::ntex_grpc::MethodDef;
                 let req = ::ntex_grpc::server::Request {
                     message: method.decode(&mut req.payload)?,
                     name: req.name,
@@ -47,11 +48,16 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
                 let result = #ty::#fn_name(self, ::ntex_grpc::server::FromRequest::from(req)).await;
 
-                let response = ::ntex_grpc::server::Response::from(result);
-                let mut buf = ::ntex_grpc::BytesMut::new();
-                method.encode(response.message, &mut buf);
+                match method.server_result(result) {
+                    Ok(res) => {
+                        let response = ::ntex_grpc::server::Response::from(res);
+                        let mut buf = ::ntex_grpc::BytesMut::new();
+                        method.encode(response.message, &mut buf);
 
-                Ok(::ntex_grpc::server::ServerResponse::with_headers(buf.freeze(), response.headers))
+                        Ok(::ntex_grpc::server::ServerResponse::with_headers(buf.freeze(), response.headers))
+                    }
+                    Err(e) => Err(e)
+                }
             }
         });
     }

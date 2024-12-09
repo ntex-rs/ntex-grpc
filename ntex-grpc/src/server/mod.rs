@@ -8,6 +8,7 @@ mod service;
 
 pub use self::error::{GrpcError, ServerError};
 pub use self::service::{GrpcServer, GrpcService};
+pub use crate::GrpcStatus;
 
 #[derive(Debug)]
 pub struct ServerRequest {

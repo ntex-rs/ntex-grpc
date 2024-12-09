@@ -2,16 +2,6 @@ use ntex_http::{HeaderMap, HeaderValue};
 
 use crate::{DecodeError, GrpcStatus};
 
-pub trait GrpcError {
-    fn status(&self) -> GrpcStatus;
-
-    fn message(&self) -> HeaderValue;
-
-    fn headers(&self) -> Option<HeaderMap> {
-        None
-    }
-}
-
 #[derive(thiserror::Error, Clone, Debug)]
 #[error("{status:?}: {message:?}")]
 pub struct ServerError {

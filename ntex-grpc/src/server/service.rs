@@ -1,15 +1,26 @@
 use std::{cell::RefCell, rc::Rc};
 
 use ntex_bytes::{Buf, BufMut, ByteString, BytesMut};
-use ntex_h2::{self as h2, frame::Reason, frame::StreamId};
+use ntex_h2::{self as h2, frame::Reason, frame::StreamId, StreamRef};
 use ntex_http::{HeaderMap, HeaderValue, StatusCode};
 use ntex_io::{Filter, Io, IoBoxed};
 use ntex_service::{Service, ServiceCtx, ServiceFactory};
-use ntex_util::HashMap;
+use ntex_util::{time::timeout_checked, time::Millis, HashMap};
 
 use crate::{consts, status::GrpcStatus, utils::Data};
 
 use super::{ServerError, ServerRequest, ServerResponse};
+
+const ERR_DECODE: HeaderValue =
+    HeaderValue::from_static("Cannot decode request message: not enough data provided");
+const ERR_DATA_DECODE: HeaderValue =
+    HeaderValue::from_static("Cannot decode request message: not enough data provided");
+const ERR_DECODE_TIMEOUT: HeaderValue =
+    HeaderValue::from_static("Cannot decode grpc-timeout header");
+const ERR_DEADLINE: HeaderValue = HeaderValue::from_static("Deadline exceeded");
+
+const MILLIS_IN_HOUR: u64 = 60 * 60 * 1000;
+const MILLIS_IN_MINUTE: u64 = 60 * 1000;
 
 /// Grpc server
 pub struct GrpcServer<T> {
@@ -184,13 +195,7 @@ where
                         .send_response(StatusCode::OK, HeaderMap::default(), false)
                         .is_ok()
                     {
-                        let mut trailers = HeaderMap::default();
-                        trailers.insert(consts::GRPC_STATUS, GrpcStatus::InvalidArgument.into());
-                        trailers.insert(
-                            consts::GRPC_MESSAGE,
-                            HeaderValue::from_static("Cannot decode request message"),
-                        );
-                        stream.send_trailers(trailers);
+                        send_error(&stream, GrpcStatus::InvalidArgument, ERR_DECODE);
                     }
                     return Ok(());
                 }
@@ -237,16 +242,7 @@ where
                             .send_response(StatusCode::OK, HeaderMap::default(), false)
                             .is_ok()
                         {
-                            let mut trailers = HeaderMap::default();
-                            trailers
-                                .insert(consts::GRPC_STATUS, GrpcStatus::InvalidArgument.into());
-                            trailers.insert(
-                                consts::GRPC_MESSAGE,
-                                HeaderValue::from_static(
-                                    "Cannot decode request message: not enough data provided",
-                                ),
-                            );
-                            stream.send_trailers(trailers);
+                            send_error(&stream, GrpcStatus::InvalidArgument, ERR_DATA_DECODE);
                         }
                         return Ok(());
                     }
@@ -268,8 +264,20 @@ where
                     }
                     drop(streams);
 
-                    match ctx.call(&self.service, req).await {
-                        Ok(res) => {
+                    // GRPC Timeout
+                    let to = if let Some(to) = req.headers.get(consts::GRPC_TIMEOUT) {
+                        if let Ok(to) = try_parse_grpc_timeout(to) {
+                            to
+                        } else {
+                            send_error(&stream, GrpcStatus::InvalidArgument, ERR_DECODE_TIMEOUT);
+                            return Ok(());
+                        }
+                    } else {
+                        Millis::ZERO
+                    };
+
+                    match timeout_checked(to, ctx.call(&self.service, req)).await {
+                        Ok(Ok(res)) => {
                             log::debug!("Response is received {:?}", res);
                             let mut buf = BytesMut::with_capacity(res.payload.len() + 5);
                             buf.put_u8(0); // compression
@@ -286,12 +294,16 @@ where
 
                             stream.send_trailers(trailers);
                         }
-                        Err(err) => {
+                        Ok(Err(err)) => {
                             log::debug!("Failure during service call: {:?}", err.message);
                             let mut trailers = err.headers;
                             trailers.insert(consts::GRPC_STATUS, err.status.into());
                             trailers.insert(consts::GRPC_MESSAGE, err.message);
                             stream.send_trailers(trailers);
+                        }
+                        Err(_) => {
+                            log::debug!("Deadline exceeded failure during service call");
+                            send_error(&stream, GrpcStatus::DeadlineExceeded, ERR_DEADLINE);
                         }
                     };
 
@@ -304,4 +316,47 @@ where
         }
         Ok(())
     }
+}
+
+fn send_error(stream: &StreamRef, st: GrpcStatus, msg: HeaderValue) {
+    let mut trailers = HeaderMap::default();
+    trailers.insert(consts::GRPC_STATUS, st.into());
+    trailers.insert(consts::GRPC_MESSAGE, msg);
+    stream.send_trailers(trailers);
+}
+
+/// Tries to parse the `grpc-timeout` header if it is present.
+///
+/// Follows the [gRPC over HTTP2 spec](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md).
+fn try_parse_grpc_timeout(val: &HeaderValue) -> Result<Millis, ()> {
+    let (timeout_value, timeout_unit) = val
+        .to_str()
+        .map_err(|_| ())
+        .and_then(|s| if s.is_empty() { Err(()) } else { Ok(s) })?
+        .split_at(val.len() - 1);
+
+    // gRPC spec specifies `TimeoutValue` will be at most 8 digits
+    // Caping this at 8 digits also prevents integer overflow from ever occurring
+    if timeout_value.len() > 8 {
+        return Err(());
+    }
+
+    let timeout_value: u64 = timeout_value.parse().map_err(|_| ())?;
+    let duration = match timeout_unit {
+        // Hours
+        "H" => Millis(u32::try_from(timeout_value * MILLIS_IN_HOUR).unwrap_or(u32::MAX)),
+        // Minutes
+        "M" => Millis(u32::try_from(timeout_value * MILLIS_IN_MINUTE).unwrap_or(u32::MAX)),
+        // Seconds
+        "S" => Millis(u32::try_from(timeout_value * 1000).unwrap_or(u32::MAX)),
+        // Milliseconds
+        "m" => Millis(u32::try_from(timeout_value).unwrap_or(u32::MAX)),
+        // Microseconds
+        "u" => Millis(u32::try_from(timeout_value / 1000).unwrap_or(u32::MAX)),
+        // Nanoseconds
+        "n" => Millis(u32::try_from(timeout_value / 1000000).unwrap_or(u32::MAX)),
+        _ => return Err(()),
+    };
+
+    Ok(duration)
 }

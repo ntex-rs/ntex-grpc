@@ -1,5 +1,9 @@
 # Changes
 
+## [0.7.2] - 2025-01-27
+
+* Add grpc timeout support
+
 ## [0.7.1] - 2024-12-10
 
 * Refactor server error handling

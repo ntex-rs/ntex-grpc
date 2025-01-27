@@ -902,7 +902,7 @@ impl Config {
                 let mut buf = String::new();
                 buf.insert_str(
                     0,
-                    "#![allow(dead_code, unused_mut, unused_variables, clippy::identity_op, clippy::derivable_impls, clippy::unit_arg, clippy::derive_partial_eq_without_eq, clippy::manual_range_patterns)]\n/// DO NOT MODIFY. Auto-generated file\n\n",
+                    "#![allow(dead_code, unused_mut, unused_variables, clippy::identity_op, clippy::derivable_impls, clippy::unit_arg, clippy::derive_partial_eq_without_eq, clippy::manual_range_patterns)]\n//! DO NOT MODIFY. Auto-generated file\n\n",
                 );
                 modules.insert(request.0.clone(), buf);
             }

@@ -7,7 +7,7 @@
     clippy::unit_arg,
     clippy::derive_partial_eq_without_eq
 )]
-/// DO NOT MODIFY. Auto-generated file
+//! DO NOT MODIFY. Auto-generated file
 
 ///  A Duration represents a signed, fixed-length span of time represented
 ///  as a count of seconds and fractions of seconds at nanosecond

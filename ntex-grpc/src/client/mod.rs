@@ -70,6 +70,8 @@ pub enum ClientError {
     Response(Option<StatusCode>, HeaderMap, Bytes),
     #[error("Got eof without payload with {0:?}, headers: {1:?}")]
     UnexpectedEof(Option<StatusCode>, HeaderMap),
+    #[error("Deadline exceeded, headers: {0:?}")]
+    DeadlineExceeded(HeaderMap),
     #[error("Grpc status {0:?}, headers: {1:?}")]
     GrpcStatus(GrpcStatus, HeaderMap),
 }
@@ -92,6 +94,7 @@ impl Clone for ClientError {
                 Self::Response(*st, hdrs.clone(), payload.clone())
             }
             Self::UnexpectedEof(st, hdrs) => Self::UnexpectedEof(*st, hdrs.clone()),
+            Self::DeadlineExceeded(hdrs) => Self::DeadlineExceeded(hdrs.clone()),
             Self::GrpcStatus(st, hdrs) => Self::GrpcStatus(*st, hdrs.clone()),
         }
     }

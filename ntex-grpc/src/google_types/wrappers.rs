@@ -7,7 +7,7 @@
     clippy::unit_arg,
     clippy::derive_partial_eq_without_eq
 )]
-/// DO NOT MODIFY. Auto-generated file
+//! DO NOT MODIFY. Auto-generated file
 
 // ///  Wrapper message for `double`.
 // ///

@@ -39,7 +39,8 @@ fn push_indent(buf: &mut String, depth: u8) {
         buf.push_str("    ");
     }
 }
-impl<'a> CodeGenerator<'a> {
+
+impl CodeGenerator<'_> {
     pub fn generate(
         config: &mut Config,
         extern_paths: &ExternPaths,
@@ -997,7 +998,7 @@ impl<'a> CodeGenerator<'a> {
         // If no package is specified the start of the package name will be '.'
         // and split will return an empty string ("") which breaks resolution
         // The fix to this is to ignore the first item if it is empty.
-        if local_path.peek().map_or(false, |s| s.is_empty()) {
+        if local_path.peek().is_some_and(|s| s.is_empty()) {
             local_path.next();
         }
 

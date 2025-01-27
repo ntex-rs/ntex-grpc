@@ -1,17 +1,17 @@
 use std::task::{Context, Poll};
-use std::{convert::TryFrom, fmt, future::Future, mem, ops, pin::Pin, rc::Rc};
+use std::{cell::Cell, convert::TryFrom, fmt, future::Future, mem, ops, pin::Pin, rc::Rc, time};
 
 use ntex_http::{error::Error as HttpError, HeaderMap, HeaderName, HeaderValue};
 use ntex_util::future::BoxFuture;
 
-use crate::client::Transport;
-use crate::service::MethodDef;
+use crate::{client::Transport, consts, service::MethodDef};
 
 pub struct RequestContext(Rc<RequestContextInner>);
 
 struct RequestContextInner {
     err: Option<HttpError>,
     headers: Vec<(HeaderName, HeaderValue)>,
+    timeout: Cell<Option<time::Duration>>,
 }
 
 impl RequestContext {
@@ -20,7 +20,13 @@ impl RequestContext {
         Self(Rc::new(RequestContextInner {
             err: None,
             headers: Vec::new(),
+            timeout: Cell::new(None),
         }))
+    }
+
+    /// Get request timeout
+    pub fn get_timeout(&self) -> Option<time::Duration> {
+        self.0.timeout.get()
     }
 
     /// Append a header to existing headers.
@@ -71,6 +77,7 @@ fn ctx(slf: &mut RequestContext) -> Option<&mut RequestContextInner> {
         slf.0 = Rc::new(RequestContextInner {
             err: None,
             headers: slf.0.headers.clone(),
+            timeout: slf.0.timeout.clone(),
         });
         Some(Rc::get_mut(&mut slf.0).unwrap())
     }
@@ -142,6 +149,54 @@ where
         }
         self
     }
+
+    /// Set the max duration the request is allowed to take.
+    ///
+    /// The duration will be formatted according to [the spec] and use the most precise
+    /// possible.
+    ///
+    /// [the spec]: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
+    pub fn timeout(&mut self, timeout: time::Duration) -> &mut Self {
+        if let Some(ctx) = parts(&mut self.state) {
+            ctx.0.timeout.set(Some(timeout));
+            ctx.header(consts::GRPC_TIMEOUT, duration_to_grpc_timeout(timeout));
+        }
+        self
+    }
+}
+
+fn duration_to_grpc_timeout(duration: time::Duration) -> String {
+    fn try_format<T: Into<u128>>(
+        duration: time::Duration,
+        unit: char,
+        convert: impl FnOnce(time::Duration) -> T,
+    ) -> Option<String> {
+        // The gRPC spec specifies that the timeout most be at most 8 digits. So this is the largest a
+        // value can be before we need to use a bigger unit.
+        let max_size: u128 = 99_999_999; // exactly 8 digits
+
+        let value = convert(duration).into();
+        if value > max_size {
+            None
+        } else {
+            Some(format!("{}{}", value, unit))
+        }
+    }
+
+    // pick the most precise unit that is less than or equal to 8 digits as per the gRPC spec
+    try_format(duration, 'n', |d| d.as_nanos())
+        .or_else(|| try_format(duration, 'u', |d| d.as_micros()))
+        .or_else(|| try_format(duration, 'm', |d| d.as_millis()))
+        .or_else(|| try_format(duration, 'S', |d| d.as_secs()))
+        .or_else(|| try_format(duration, 'M', |d| d.as_secs() / 60))
+        .or_else(|| {
+            try_format(duration, 'H', |d| {
+                let minutes = d.as_secs() / 60;
+                minutes / 60
+            })
+        })
+        // duration has to be more than 11_415 years for this to happen
+        .expect("duration is unrealistically large")
 }
 
 #[inline]
@@ -233,5 +288,25 @@ where
             .field("headers", &self.headers)
             .field("translers", &self.headers)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duration_to_grpc_timeout_less_than_second() {
+        let timeout = Duration::from_millis(500);
+        let value = duration_to_grpc_timeout(timeout);
+        assert_eq!(value, format!("{}u", timeout.as_micros()));
+
+        let timeout = Duration::from_secs(30);
+        let value = duration_to_grpc_timeout(timeout);
+        assert_eq!(value, format!("{}u", timeout.as_micros()));
+
+        let one_hour = Duration::from_secs(60 * 60);
+        let value = duration_to_grpc_timeout(one_hour);
+        assert_eq!(value, format!("{}m", one_hour.as_millis()));
     }
 }

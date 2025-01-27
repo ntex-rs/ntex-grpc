@@ -8,7 +8,7 @@
     clippy::derive_partial_eq_without_eq,
     clippy::manual_range_patterns
 )]
-/// DO NOT MODIFY. Auto-generated file
+//! DO NOT MODIFY. Auto-generated file
 
 ///  The request message containing the user's name.
 #[derive(Clone, PartialEq, Debug)]
@@ -363,7 +363,7 @@ mod _priv_impl_helloworld {
 
         #[inline]
         fn method_by_name(name: &str) -> Option<Self::Methods> {
-            use ::ntex_grpc::MethodDef;
+            use ntex_grpc::MethodDef;
             match name {
                 GreeterSayHelloMethod::NAME => {
                     Some(GreeterMethods::SayHello(GreeterSayHelloMethod))

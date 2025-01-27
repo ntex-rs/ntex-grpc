@@ -6,7 +6,7 @@
     clippy::derivable_impls,
     clippy::unit_arg
 )]
-/// DO NOT MODIFY. Auto-generated file
+//! DO NOT MODIFY. Auto-generated file
 
 ///  A Timestamp represents a point in time independent of any time zone or local
 ///  calendar, encoded as a count of seconds and fractions of seconds at

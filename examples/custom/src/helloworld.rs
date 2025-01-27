@@ -6,7 +6,7 @@
     clippy::derivable_impls,
     clippy::unit_arg
 )]
-/// DO NOT MODIFY. Auto-generated file
+//! DO NOT MODIFY. Auto-generated file
 
 ///  The request message containing the user's name.
 #[derive(Clone, PartialEq, Debug)]
@@ -165,7 +165,7 @@ mod _priv_impl {
 
         #[inline]
         fn method_by_name(name: &str) -> Option<Self::Methods> {
-            use ::ntex_grpc::MethodDef;
+            use ntex_grpc::MethodDef;
             match name {
                 GreeterSayHelloMethod::NAME => {
                     Some(GreeterMethods::SayHello(GreeterSayHelloMethod))

@@ -92,18 +92,16 @@ impl<T: MethodDef> Transport<T> for Client {
                         h2::StreamEof::Trailers(hdrs) => {
                             // check grpc status
                             match check_grpc_status(&hdrs) {
-                                Some(Ok(status)) => {
-                                    if status != GrpcStatus::Ok {
-                                        return Err(ClientError::GrpcStatus(status, hdrs));
-                                    }
+                                Some(Ok(GrpcStatus::Ok)) => Ok(()),
+                                Some(Ok(GrpcStatus::DeadlineExceeded)) => {
+                                    return Err(ClientError::DeadlineExceeded(hdrs))
                                 }
-                                Some(Err(())) => {
-                                    return Err(ClientError::Decode(DecodeError::new(
-                                        "Cannot parse grpc status",
-                                    )));
-                                }
-                                None => {}
-                            }
+                                Some(Ok(st)) => return Err(ClientError::GrpcStatus(st, hdrs)),
+                                Some(Err(())) => Err(ClientError::Decode(DecodeError::new(
+                                    "Cannot parse grpc status",
+                                ))),
+                                None => Ok(()),
+                            }?;
                             trailers = hdrs;
                         }
                         h2::StreamEof::Error(err) => return Err(ClientError::Stream(err)),

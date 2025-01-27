@@ -156,10 +156,14 @@ where
     /// possible.
     ///
     /// [the spec]: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
-    pub fn timeout(&mut self, timeout: time::Duration) -> &mut Self {
+    pub fn timeout<U>(&mut self, timeout: U) -> &mut Self
+    where
+        time::Duration: From<U>,
+    {
         if let Some(ctx) = parts(&mut self.state) {
-            ctx.0.timeout.set(Some(timeout));
-            ctx.header(consts::GRPC_TIMEOUT, duration_to_grpc_timeout(timeout));
+            let to = timeout.into();
+            ctx.0.timeout.set(Some(to));
+            ctx.header(consts::GRPC_TIMEOUT, duration_to_grpc_timeout(to));
         }
         self
     }

@@ -29,6 +29,22 @@ impl RequestContext {
         self.0.timeout.get()
     }
 
+    /// Set the max duration the request is allowed to take.
+    ///
+    /// The duration will be formatted according to [the spec] and use the most precise
+    /// possible.
+    ///
+    /// [the spec]: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
+    pub fn timeout<U>(&mut self, timeout: U) -> &mut Self
+    where
+        time::Duration: From<U>,
+    {
+        let to = timeout.into();
+        self.0.timeout.set(Some(to));
+        self.header(consts::GRPC_TIMEOUT, duration_to_grpc_timeout(to));
+        self
+    }
+
     /// Append a header to existing headers.
     pub fn header<K, V>(&mut self, key: K, value: V) -> &mut Self
     where

@@ -1,4 +1,9 @@
-#![allow(deprecated, clippy::never_loop, clippy::expect_fun_call)]
+#![allow(
+    deprecated,
+    clippy::never_loop,
+    clippy::expect_fun_call,
+    clippy::let_underscore_future
+)]
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, thread, time::Duration};
 
 use ntex::{rt::spawn, rt::System};

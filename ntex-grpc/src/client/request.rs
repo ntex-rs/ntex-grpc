@@ -8,10 +8,18 @@ use crate::{client::Transport, consts, service::MethodDef};
 
 pub struct RequestContext(Rc<RequestContextInner>);
 
+bitflags::bitflags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    struct Flags: u8 {
+        const DISCONNECT_ON_DROP = 0b0000_0001;
+    }
+}
+
 struct RequestContextInner {
     err: Option<HttpError>,
     headers: Vec<(HeaderName, HeaderValue)>,
     timeout: Cell<Option<time::Duration>>,
+    flags: Cell<Flags>,
 }
 
 impl RequestContext {
@@ -21,6 +29,7 @@ impl RequestContext {
             err: None,
             headers: Vec::new(),
             timeout: Cell::new(None),
+            flags: Cell::new(Flags::empty()),
         }))
     }
 
@@ -42,6 +51,14 @@ impl RequestContext {
         let to = timeout.into();
         self.0.timeout.set(Some(to));
         self.header(consts::GRPC_TIMEOUT, duration_to_grpc_timeout(to));
+        self
+    }
+
+    /// Disconnect connection on request drop
+    pub fn disconnect_on_drop(&mut self) -> &mut Self {
+        let mut flags = self.0.flags.get();
+        flags.insert(Flags::DISCONNECT_ON_DROP);
+        self.0.flags.set(flags);
         self
     }
 
@@ -67,6 +84,10 @@ impl RequestContext {
 
     pub(crate) fn headers(&self) -> &[(HeaderName, HeaderValue)] {
         &self.0.headers
+    }
+
+    pub(crate) fn get_disconnect_on_drop(&self) -> bool {
+        self.0.flags.get().contains(Flags::DISCONNECT_ON_DROP)
     }
 }
 
@@ -94,6 +115,7 @@ fn ctx(slf: &mut RequestContext) -> Option<&mut RequestContextInner> {
             err: None,
             headers: slf.0.headers.clone(),
             timeout: slf.0.timeout.clone(),
+            flags: slf.0.flags.clone(),
         });
         Some(Rc::get_mut(&mut slf.0).unwrap())
     }

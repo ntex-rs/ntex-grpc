@@ -36,6 +36,9 @@ impl<T: MethodDef> Transport<T> for Client {
 
         // send request
         let (snd_stream, rcv_stream) = self.0.send(Method::POST, T::PATH, hdrs, false).await?;
+        if ctx.get_disconnect_on_drop() {
+            snd_stream.disconnect_on_drop();
+        }
         snd_stream.send_payload(buf.freeze(), true).await?;
 
         // read response

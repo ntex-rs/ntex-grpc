@@ -1,5 +1,9 @@
 # Changes
 
+## [0.7.3] - 2025-01-30
+
+* Add "disconnect on drop" support for client
+
 ## [0.7.2] - 2025-01-27
 
 * Add grpc timeout support

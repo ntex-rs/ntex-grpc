@@ -4,12 +4,36 @@ use ntex_bytes::{Buf, BufMut, BytesMut};
 use ntex_h2::{self as h2};
 use ntex_http::{header, HeaderMap, Method};
 
+use super::{request::RequestContext, request::Response, Client, ClientError, Transport};
 use crate::{consts, service::MethodDef, utils::Data, DecodeError, GrpcStatus, Message};
 
-use super::request::{RequestContext, Response};
-use super::{Client, ClientError, Transport};
-
 impl<T: MethodDef> Transport<T> for Client {
+    type Error = ClientError;
+
+    #[inline]
+    async fn request(
+        &self,
+        val: &T::Input,
+        ctx: RequestContext,
+    ) -> Result<Response<T>, Self::Error> {
+        Transport::request(&self.0, val, ctx).await
+    }
+}
+
+impl<T: MethodDef> Transport<T> for h2::client::Client {
+    type Error = ClientError;
+
+    #[inline]
+    async fn request(
+        &self,
+        val: &T::Input,
+        ctx: RequestContext,
+    ) -> Result<Response<T>, Self::Error> {
+        Transport::request(&self.client().await?, val, ctx).await
+    }
+}
+
+impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
     type Error = ClientError;
 
     async fn request(
@@ -35,7 +59,7 @@ impl<T: MethodDef> Transport<T> for Client {
         }
 
         // send request
-        let (snd_stream, rcv_stream) = self.0.send(Method::POST, T::PATH, hdrs, false).await?;
+        let (snd_stream, rcv_stream) = self.send(Method::POST, T::PATH, hdrs, false).await?;
         if ctx.get_disconnect_on_drop() {
             snd_stream.disconnect_on_drop();
         }

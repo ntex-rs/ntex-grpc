@@ -4,6 +4,8 @@
 
 * Export google types
 
+* Add default client transport for h2::Client and h2::SimpleClient
+
 ## [0.7.3] - 2025-01-30
 
 * Add "disconnect on drop" support for client

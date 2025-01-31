@@ -13,7 +13,6 @@ pub use crate::service::{MethodDef, ServiceDef};
 pub use crate::status::GrpcStatus;
 pub use crate::types::{Message, NativeType};
 
-#[doc(hidden)]
 pub mod google_types;
 
 #[doc(hidden)]

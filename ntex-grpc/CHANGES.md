@@ -1,5 +1,9 @@
 # Changes
 
+## [0.7.4] - 2025-01-31
+
+* Export google types
+
 ## [0.7.3] - 2025-01-30
 
 * Add "disconnect on drop" support for client

@@ -87,6 +87,9 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
                     if eof {
                         // check grpc status
                         match check_grpc_status(&headers) {
+                            Some(Ok(GrpcStatus::DeadlineExceeded)) => {
+                                return Err(ClientError::DeadlineExceeded(hdrs))
+                            }
                             Some(Ok(status)) => {
                                 if status != GrpcStatus::Ok {
                                     return Err(ClientError::GrpcStatus(status, headers));

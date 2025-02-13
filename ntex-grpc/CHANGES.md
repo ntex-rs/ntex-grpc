@@ -1,5 +1,9 @@
 # Changes
 
+## [0.7.5] - 2025-02-13
+
+* Handle DeadlineExceeded status
+
 ## [0.7.4] - 2025-01-31
 
 * Export google types

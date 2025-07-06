@@ -36,14 +36,12 @@ fn env_protoc_include() -> Option<PathBuf> {
 
     if !protoc_include.exists() {
         panic!(
-            "PROTOC_INCLUDE environment variable points to non-existent directory ({:?})",
-            protoc_include
+            "PROTOC_INCLUDE environment variable points to non-existent directory ({protoc_include:?})"
         );
     }
     if !protoc_include.is_dir() {
         panic!(
-            "PROTOC_INCLUDE environment variable points to a non-directory file ({:?})",
-            protoc_include
+            "PROTOC_INCLUDE environment variable points to a non-directory file ({protoc_include:?})"
         );
     }
 

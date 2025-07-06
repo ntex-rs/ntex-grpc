@@ -40,7 +40,7 @@ fn main() {
         let counters = perf_counters.clone();
 
         thread::spawn(move || {
-            println!("Starting thread: {}", t);
+            println!("Starting thread: {t}");
             let sys = System::new("client");
 
             sys.block_on(async move {
@@ -85,7 +85,7 @@ fn main() {
 
 fn parse_u64_default(input: Option<&str>, default: u64) -> u64 {
     input
-        .map(|v| v.parse().expect(&format!("not a valid number: {}", v)))
+        .map(|v| v.parse().expect(&format!("not a valid number: {v}")))
         .unwrap_or(default)
 }
 
@@ -105,10 +105,8 @@ fn start_report_thread(
                 let latency = counters.pull_latency_ns();
                 let latency_max = counters.pull_latency_max_ns();
                 println!(
-                    "rate: {}, threads: {}, connections: {}, latency: {:?}, latency max: {:?}",
+                    "rate: {}, threads: {threads}, connections: {conns}, latency: {:?}, latency max: {:?}",
                     req_count / report_rate_secs,
-                    threads,
-                    conns,
                     Duration::from_nanos(latency / req_count as u64),
                     Duration::from_nanos(latency_max)
                 );

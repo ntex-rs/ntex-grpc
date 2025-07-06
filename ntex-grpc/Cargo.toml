@@ -17,7 +17,7 @@ name = "ntex_grpc"
 path = "src/lib.rs"
 
 [dependencies]
-ntex-h2 = "1.8"
+ntex-h2 = "1.11"
 ntex-http = "0.1"
 ntex-io = "2"
 ntex-util = "2"
@@ -27,10 +27,10 @@ ntex-grpc-derive = "0.7"
 
 bitflags = "2"
 log = "0.4"
-thiserror = "1"
+thiserror = "2"
 pin-project-lite = "0.2"
 
 [dev-dependencies]
 openssl = "0.10"
 env_logger = "0.11"
-ntex = { version = "2", features = ["openssl", "tokio"] }
+ntex = { version = "2.12", features = ["openssl", "neon"] }

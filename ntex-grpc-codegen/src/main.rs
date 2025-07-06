@@ -52,14 +52,14 @@ fn main() -> io::Result<()> {
         if let Some((s1, s2)) = map.split_once('=') {
             cfg.map_field_type(s1, s2);
         } else {
-            println!("Cannot parse type mapping: {:?}", map);
+            println!("Cannot parse type mapping: {map:?}");
         }
     }
 
     cfg.default_package_filename(args.out.clone());
 
     if let Err(e) = cfg.compile_protos(&args.proto, &args.include_dir) {
-        println!("{}", e);
+        println!("{e}");
     } else {
         // run rustfmt
         let fname = if let Some(mut out_dir) = args.out_dir.clone() {
@@ -70,8 +70,8 @@ fn main() -> io::Result<()> {
         };
 
         println!(
-            "GRPC {:?} package successfully processed. Generated {:?} file",
-            args.proto, fname
+            "GRPC {:?} package successfully processed. Generated {fname:?} file",
+            args.proto
         );
 
         let mut fmt_args = vec!["--edition", "2021"];
@@ -86,7 +86,7 @@ fn main() -> io::Result<()> {
 
         let fmt_result = Command::new("rustfmt").args(&fmt_args).output();
         if let Err(e) = fmt_result {
-            println!("{}", e);
+            println!("{e}");
         }
     }
 

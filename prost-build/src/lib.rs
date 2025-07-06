@@ -681,9 +681,7 @@ impl Config {
         let mut target_is_env = false;
         let target: PathBuf = self.out_dir.clone().map(Ok).unwrap_or_else(|| {
             env::var_os("OUT_DIR")
-                .ok_or_else(|| {
-                    Error::new(ErrorKind::Other, "OUT_DIR environment variable is not set")
-                })
+                .ok_or_else(|| Error::other("OUT_DIR environment variable is not set"))
                 .map(|val| {
                     target_is_env = true;
                     Into::into(val)
@@ -701,8 +699,7 @@ impl Config {
             path.clone()
         } else {
             if self.skip_protoc_run {
-                return Err(Error::new(
-                    ErrorKind::Other,
+                return Err(Error::other(
                     "file_descriptor_set_path is required with skip_protoc_run",
                 ));
             }
@@ -736,15 +733,15 @@ impl Config {
             let output = cmd.output().map_err(|error| {
                 Error::new(
                     error.kind(),
-                    format!("failed to invoke protoc (hint: https://docs.rs/prost-build/#sourcing-protoc): {}", error),
+                    format!("failed to invoke protoc (hint: https://docs.rs/prost-build/#sourcing-protoc): {error}"),
                 )
             })?;
 
             if !output.status.success() {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    format!("protoc failed: {}", String::from_utf8_lossy(&output.stderr)),
-                ));
+                return Err(Error::other(format!(
+                    "protoc failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )));
             }
         }
 
@@ -752,7 +749,7 @@ impl Config {
         let file_descriptor_set = FileDescriptorSet::decode(&*buf).map_err(|error| {
             Error::new(
                 ErrorKind::InvalidInput,
-                format!("invalid FileDescriptorSet: {}", error),
+                format!("invalid FileDescriptorSet: {error}"),
             )
         })?;
 
@@ -837,7 +834,7 @@ impl Config {
                     .collect();
                 entries = _temp;
             }
-            self.write_line(outfile, depth, &format!("pub mod {} {{", modident))?;
+            self.write_line(outfile, depth, &format!("pub mod {modident} {{"))?;
             let subwritten = self.write_includes(
                 matching
                     .iter()
@@ -852,16 +849,12 @@ impl Config {
             if subwritten != matching.len() {
                 let modname = matching[0].to_partial_file_name(..=depth);
                 if basepath.is_some() {
-                    self.write_line(
-                        outfile,
-                        depth + 1,
-                        &format!("include!(\"{}.rs\");", modname),
-                    )?;
+                    self.write_line(outfile, depth + 1, &format!("include!(\"{modname}.rs\");"))?;
                 } else {
                     self.write_line(
                         outfile,
                         depth + 1,
-                        &format!("include!(concat!(env!(\"OUT_DIR\"), \"/{}.rs\"));", modname),
+                        &format!("include!(concat!(env!(\"OUT_DIR\"), \"/{modname}.rs\"));"),
                     )?;
                 }
                 written += 1;

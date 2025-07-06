@@ -4,7 +4,9 @@
     unused_variables,
     clippy::identity_op,
     clippy::derivable_impls,
-    clippy::unit_arg
+    clippy::unit_arg,
+    clippy::derive_partial_eq_without_eq,
+    clippy::manual_range_patterns
 )]
 //! DO NOT MODIFY. Auto-generated file
 
@@ -45,7 +47,7 @@ impl ::ntex_grpc::MethodDef for GreeterSayHelloMethod {
     type Output = HelloReply;
 }
 
-mod _priv_impl {
+mod _priv_impl_helloworld {
     use super::*;
 
     impl ::ntex_grpc::Message for HelloRequest {
@@ -165,7 +167,7 @@ mod _priv_impl {
 
         #[inline]
         fn method_by_name(name: &str) -> Option<Self::Methods> {
-            use ntex_grpc::MethodDef;
+            use ::ntex_grpc::MethodDef;
             match name {
                 GreeterSayHelloMethod::NAME => {
                     Some(GreeterMethods::SayHello(GreeterSayHelloMethod))

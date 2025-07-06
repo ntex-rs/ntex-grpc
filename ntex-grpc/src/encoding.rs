@@ -31,8 +31,7 @@ impl TryFrom<u64> for WireType {
             4 => Ok(WireType::EndGroup),
             5 => Ok(WireType::ThirtyTwoBit),
             _ => Err(DecodeError::new(format!(
-                "invalid wire type value: {}",
-                value
+                "invalid wire type value: {value}"
             ))),
         }
     }
@@ -221,7 +220,7 @@ pub fn encode_key(tag: u32, wire_type: WireType, buf: &mut BytesMut) {
 pub fn decode_key(buf: &mut Bytes) -> Result<(u32, WireType), DecodeError> {
     let key = decode_varint(buf)?;
     if key > u64::from(u32::MAX) {
-        return Err(DecodeError::new(format!("invalid key value: {}", key)));
+        return Err(DecodeError::new(format!("invalid key value: {key}")));
     }
     let wire_type = WireType::try_from(key & 0x07)?;
     let tag = key as u32 >> 3;
@@ -246,8 +245,7 @@ pub fn key_len(tag: u32) -> usize {
 pub fn check_wire_type(expected: WireType, actual: WireType) -> Result<(), DecodeError> {
     if expected != actual {
         return Err(DecodeError::new(format!(
-            "invalid wire type: {:?} (expected {:?})",
-            actual, expected
+            "invalid wire type: {actual:?} (expected {expected:?})",
         )));
     }
     Ok(())
@@ -337,7 +335,7 @@ impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("failed to decode Protobuf message: ")?;
         for &(message, field) in &self.inner.stack {
-            write!(f, "{}.{}: ", message, field)?;
+            write!(f, "{message}.{field}: ")?;
         }
         f.write_str(&self.inner.description)
     }

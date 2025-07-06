@@ -22,5 +22,5 @@ async fn main() {
         .await
         .unwrap();
 
-    println!("RES: {:?}", res);
+    println!("RES: {res:?}");
 }

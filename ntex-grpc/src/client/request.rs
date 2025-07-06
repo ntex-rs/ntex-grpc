@@ -221,7 +221,7 @@ fn duration_to_grpc_timeout(duration: time::Duration) -> String {
         if value > max_size {
             None
         } else {
-            Some(format!("{}{}", value, unit))
+            Some(format!("{value}{unit}"))
         }
     }
 

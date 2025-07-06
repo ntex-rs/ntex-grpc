@@ -71,7 +71,7 @@ impl CodeGenerator<'_> {
         let syntax = match file.syntax.as_ref().map(String::as_str) {
             None | Some("proto2") => Syntax::Proto2,
             Some("proto3") => Syntax::Proto3,
-            Some(s) => panic!("unknown syntax: {}", s),
+            Some(s) => panic!("unknown syntax: {s}"),
         };
 
         let mut code_gen = CodeGenerator {
@@ -218,29 +218,24 @@ impl CodeGenerator<'_> {
         self.depth += 1;
         self.path.push(2);
         for (field, idx) in fields {
+            let field_no = field.number();
+            let field_name = to_snake(field.name());
+
             self.path.push(idx as i32);
 
             has_fields = true;
             write.push_str(&format!(
-                "::ntex_grpc::NativeType::serialize(&self.{}, {}, ::ntex_grpc::types::DefaultValue::Default, dst);",
-                to_snake(field.name()),
-                field.number()
+                "::ntex_grpc::NativeType::serialize(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::Default, dst);",
             ));
             read.push_str(&format!(
-                "{} => ::ntex_grpc::NativeType::deserialize(&mut msg.{}, tag, wire_type, src)
-                    .map_err(|err| err.push(STRUCT_NAME, \"{}\"))?,",
-                field.number(),
-                to_snake(field.name()),
-                to_snake(field.name()),
+                "{field_no} => ::ntex_grpc::NativeType::deserialize(&mut msg.{field_name}, tag, wire_type, src)
+                    .map_err(|err| err.push(STRUCT_NAME, \"{field_name}\"))?,",
             ));
             encoded_len.push_str(&format!(
-                " + ::ntex_grpc::NativeType::serialized_len(&self.{}, {}, ::ntex_grpc::types::DefaultValue::Default)",
-                to_snake(field.name()),
-                field.number()
+                " + ::ntex_grpc::NativeType::serialized_len(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::Default)",
             ));
             default.push_str(&format!(
-                "{}: ::core::default::Default::default(),\n",
-                to_snake(field.name())
+                "{field_name}: ::core::default::Default::default(),\n",
             ));
 
             match field
@@ -301,18 +296,16 @@ impl CodeGenerator<'_> {
         self.priv_buf.push_str(&format!(
             "#[inline]
               fn write(&self, dst: &mut ::ntex_grpc::BytesMut) {{
-                {}
-             }}\n\n",
-            write
+                {write}
+             }}\n\n"
         ));
 
         let read = if has_fields {
             format!(
                 "match tag {{
-                 {}
+                 {read}
                  _ => ::ntex_grpc::encoding::skip_field(wire_type, tag, src)?,
-             }}",
-                read
+             }}"
             )
         } else {
             "::ntex_grpc::encoding::skip_field(wire_type, tag, src)?;".to_string()
@@ -325,19 +318,17 @@ impl CodeGenerator<'_> {
                  let mut msg = Self::default();
                  while !src.is_empty() {{
                     let (tag, wire_type) = ::ntex_grpc::encoding::decode_key(src)?;
-                    {}
+                    {read}
                  }}
                  Ok(msg)
              }}\n\n",
-            to_upper_camel(&message_name),
-            read
+            to_upper_camel(&message_name)
         ));
         self.priv_buf.push_str(&format!(
             "#[inline]
              fn encoded_len(&self) -> usize {{
-                 0 {}
-             }}\n\n",
-            encoded_len
+                 0 {encoded_len}
+             }}\n\n"
         ));
         self.priv_buf.push_str("}\n\n");
 
@@ -346,12 +337,11 @@ impl CodeGenerator<'_> {
             "impl ::std::default::Default for {} {{
                  #[inline]
                  fn default() -> Self {{
-                     Self {{ {} }}
+                     Self {{ {default} }}
                  }}
              }}\n\n
         ",
-            to_upper_camel(&message_name),
-            default
+            to_upper_camel(&message_name)
         ));
         // ==========================================
 
@@ -541,24 +531,17 @@ impl CodeGenerator<'_> {
         self.path.push(2);
         self.depth += 1;
         for (field, idx) in &fields {
+            let field_no = field.number();
+            let field_name = to_upper_camel(field.name());
+
             write.push_str(&format!(
-                "{}::{}(ref value) => ::ntex_grpc::NativeType::serialize(value, {}, ::ntex_grpc::types::DefaultValue::Unknown, dst),",
-                name,
-                to_upper_camel(field.name()),
-                field.number()
+                "{name}::{field_name}(ref value) => ::ntex_grpc::NativeType::serialize(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown, dst),",
             ));
             read.push_str(&format!(
-                "{} => {}::{}(::ntex_grpc::NativeType::deserialize_default({}, wire_type, src)?),\n",
-                field.number(),
-                name,
-                to_upper_camel(field.name()),
-                field.number(),
+                "{field_no} => {name}::{field_name}(::ntex_grpc::NativeType::deserialize_default({field_no}, wire_type, src)?),\n",
             ));
             encoded_len.push_str(&format!(
-                "{}::{}(ref value) => ::ntex_grpc::NativeType::serialized_len(value, {}, ::ntex_grpc::types::DefaultValue::Unknown),",
-                name,
-                to_upper_camel(field.name()),
-                field.number()
+                "{name}::{field_name}(ref value) => ::ntex_grpc::NativeType::serialized_len(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown),",
             ));
 
             self.path.push(*idx as i32);
@@ -571,10 +554,9 @@ impl CodeGenerator<'_> {
             self.push_indent();
             let ty = self.resolve_type(field, fq_message_name);
 
-            debug!("    oneof: {:?}, type: {:?}", field.name(), ty,);
+            debug!("    oneof: {:?}, type: {ty:?}", field.name());
 
-            self.buf
-                .push_str(&format!("{}({}),\n", to_upper_camel(field.name()), ty));
+            self.buf.push_str(&format!("{field_name}({ty}),\n"));
         }
         self.depth -= 1;
         self.path.pop();
@@ -584,7 +566,7 @@ impl CodeGenerator<'_> {
 
         self.priv_buf.push_str(&format!(
             "
-        impl ::ntex_grpc::NativeType for {} {{
+        impl ::ntex_grpc::NativeType for {name} {{
             const TYPE: ::ntex_grpc::WireType = ::ntex_grpc::WireType::LengthDelimited;
 
             fn merge(&mut self, _: &mut ::ntex_grpc::Bytes) -> ::std::result::Result<(), ::ntex_grpc::DecodeError> {{
@@ -594,18 +576,15 @@ impl CodeGenerator<'_> {
             fn encode_value(&self, _: &mut ::ntex_grpc::BytesMut) {{
                 panic!(\"Not supported\")
             }}
-        ",
-            name
-        ));
+        "));
 
         self.priv_buf.push_str(&format!(
             "
             #[inline]
             /// Encodes the message to a buffer.
             fn serialize(&self, _: u32, _: ::ntex_grpc::types::DefaultValue<&Self>, dst: &mut ::ntex_grpc::BytesMut) {{
-                match *self {{ {} }}
+                match *self {{ {write} }}
             }}\n",
-            write
         ));
         self.priv_buf.push_str(&format!("
             #[inline]
@@ -617,29 +596,27 @@ impl CodeGenerator<'_> {
                 }};
                 Ok(())
             }}\n", read.trim_end(), to_upper_camel(oneof.name())));
+
         self.priv_buf.push_str(&format!(
             "
             #[inline]
             /// Returns the encoded length of the message without a length delimiter.
             fn serialized_len(&self, _: u32, _: ::ntex_grpc::types::DefaultValue<&Self>) -> usize {{
                 match *self {{
-                    {}
+                    {encoded_len}
                 }}
             }}
-        }}\n\n",
-            encoded_len
-        ));
+        }}\n\n"));
+
+        let val = to_upper_camel(fields[0].0.name());
         self.priv_buf.push_str(&format!(
             "
-        impl ::std::default::Default for {} {{
+        impl ::std::default::Default for {name} {{
             #[inline]
             fn default() -> Self {{
-                {}::{}(::std::default::Default::default())
+                {name}::{val}(::std::default::Default::default())
             }}
-        }}\n\n",
-            name,
-            name,
-            to_upper_camel(fields[0].0.name()),
+        }}\n\n"
         ));
     }
 

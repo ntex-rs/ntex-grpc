@@ -44,10 +44,7 @@ fn generate_client(service: &Service, buf: &mut String, priv_buf: &mut String) {
         .map(|m| {
             let name = m.proto_name.to_string();
             let m_name = format!("{}{}Method", service.proto_name, m.proto_name);
-            format!(
-                "{}::NAME => Some({}::{}({})),",
-                m_name, service_methods_name, name, m_name
-            )
+            format!("{m_name}::NAME => Some({service_methods_name}::{name}({m_name})),")
         })
         .collect();
     service_methods_match.push("_ => None".to_string());
@@ -75,7 +72,7 @@ fn generate_client(service: &Service, buf: &mut String, priv_buf: &mut String) {
         .leading
         .clone()
         .into_iter()
-        .map(|s| format!("///{}", s))
+        .map(|s| format!("///{s}"))
         .collect();
     let comments = comments.join("");
 
@@ -103,20 +100,20 @@ fn generate_client(service: &Service, buf: &mut String, priv_buf: &mut String) {
     buf.push_str(&stream);
 
     let impl_stream = format!(
-        "impl ::ntex_grpc::ServiceDef for {} {{
-            const NAME: &'static str = \"{}\";
-            type Methods = {};
+        "impl ::ntex_grpc::ServiceDef for {service_ident} {{
+            const NAME: &'static str = \"{service_name}\";
+            type Methods = {service_methods_name};
 
             #[inline]
             fn method_by_name(name: &str) -> Option<Self::Methods> {{
                 use ::ntex_grpc::MethodDef;
                 match name {{
-                    {}
+                    {service_methods_match}
                 }}
             }}
         }}
 
-        impl<T> {}<T> {{
+        impl<T> {client_ident}<T> {{
             #[inline]
             /// Create new client instance
             pub fn new(transport: T) -> Self {{
@@ -124,7 +121,7 @@ fn generate_client(service: &Service, buf: &mut String, priv_buf: &mut String) {
             }}
         }}
 
-        impl<T> ::ntex_grpc::client::ClientInformation<T> for {}<T> {{
+        impl<T> ::ntex_grpc::client::ClientInformation<T> for {client_ident}<T> {{
             #[inline]
             /// Create new client instance
             fn create(transport: T) -> Self {{
@@ -150,14 +147,7 @@ fn generate_client(service: &Service, buf: &mut String, priv_buf: &mut String) {
             }}
         }}
 
-        {}",
-        service_ident,
-        service_name,
-        service_methods_name,
-        service_methods_match,
-        client_ident,
-        client_ident,
-        priv_methods,
+        {priv_methods}"
     );
     priv_buf.push_str(&impl_stream);
 }
@@ -188,31 +178,27 @@ fn gen_method(method: &Method, service: &Service) -> (String, String) {
         .leading
         .clone()
         .into_iter()
-        .map(|s| format!("///{}", s))
+        .map(|s| format!("///{s}"))
         .collect();
     let comments = comments.join("");
 
     (
         format!(
             "#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-        pub struct {};
+        pub struct {def_ident};
 
-        impl ::ntex_grpc::MethodDef for {} {{
-            const NAME: &'static str = \"{}\";
-            const PATH: ::ntex_grpc::ByteString = ::ntex_grpc::ByteString::from_static(\"{}\");
-            type Input = {};
-            type Output = {};
-        }}",
-            def_ident, def_ident, proto_name, path, input_type, output_type,
-        ),
+        impl ::ntex_grpc::MethodDef for {def_ident} {{
+            const NAME: &'static str = \"{proto_name}\";
+            const PATH: ::ntex_grpc::ByteString = ::ntex_grpc::ByteString::from_static(\"{path}\");
+            type Input = {input_type};
+            type Output = {output_type};
+        }}"),
         format!(
-            "impl<T: ::ntex_grpc::client::Transport<{}>> {}<T> {{
-            {}
-            pub fn {}<'a>(&'a self, req: &'a {}) -> ::ntex_grpc::client::Request<'a, T, {}> {{
+            "impl<T: ::ntex_grpc::client::Transport<{def_ident}>> {service_ident}<T> {{
+            {comments}
+            pub fn {method_ident}<'a>(&'a self, req: &'a {req_input_type}) -> ::ntex_grpc::client::Request<'a, T, {def_ident}> {{
                 ::ntex_grpc::client::Request::new(&self.0, req)
             }}
-        }}",
-            def_ident, service_ident, comments, method_ident, req_input_type, def_ident
-        ),
+        }}"),
     )
 }

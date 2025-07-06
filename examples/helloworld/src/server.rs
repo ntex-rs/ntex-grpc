@@ -21,7 +21,7 @@ impl From<HelloError> for HelloReply {
 impl GreeterServer {
     #[method(SayHello)]
     async fn say_hello(&self, req: HelloRequest) -> Result<HelloReply, HelloError> {
-        log::trace!("Received request: {:#?}", req);
+        log::trace!("Received request: {req:#?}");
         let mut data3 = HashMap::default();
         data3.insert("1".to_string().into(), 10u32);
         Ok(HelloReply {
@@ -67,7 +67,7 @@ async fn main() -> std::io::Result<()> {
 
     // bind to socket
     Server::build()
-        .bind("helloworld", format!("0.0.0.0:{}", port), move |_| {
+        .bind("helloworld", format!("0.0.0.0:{port}"), move |_| {
             // create service
             server::GrpcServer::new(GreeterServer)
         })?
@@ -80,7 +80,7 @@ fn parse_usize_default(input: Option<&str>, default: usize) -> usize {
     input
         .map(|v| {
             v.parse()
-                .unwrap_or_else(|_| panic!("not a valid number: {}", v))
+                .unwrap_or_else(|_| panic!("not a valid number: {v}"))
         })
         .unwrap_or(default)
 }

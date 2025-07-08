@@ -1,6 +1,6 @@
 /// protobuf encoding utils
 /// cloned from https://github.com/hyperium/tonic/
-use std::{borrow::Cow, cmp::min, convert::TryFrom, fmt};
+use std::{borrow::Cow, cmp::min, convert::TryFrom, fmt, rc::Rc};
 
 use ntex_bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -280,7 +280,7 @@ pub fn skip_field(wire_type: WireType, tag: u32, buf: &mut Bytes) -> Result<(), 
 /// A Protobuf message decoding error.
 #[derive(Clone, PartialEq, Eq)]
 pub struct DecodeError {
-    inner: Box<Inner>,
+    inner: Rc<Inner>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -301,7 +301,7 @@ impl DecodeError {
     #[cold]
     pub fn new(description: impl Into<Cow<'static, str>>) -> DecodeError {
         DecodeError {
-            inner: Box::new(Inner {
+            inner: Rc::new(Inner {
                 description: description.into(),
                 stack: Vec::new(),
             }),
@@ -313,7 +313,16 @@ impl DecodeError {
     /// Meant to be used only by `Message` implementations.
     #[doc(hidden)]
     pub fn push(mut self, message: &'static str, field: &'static str) -> Self {
-        self.inner.stack.push((message, field));
+        let inner = if let Some(inner) = Rc::get_mut(&mut self.inner) {
+            inner
+        } else {
+            self.inner = Rc::new(Inner {
+                description: self.inner.description.clone(),
+                stack: self.inner.stack.clone(),
+            });
+            Rc::get_mut(&mut self.inner).unwrap()
+        };
+        inner.stack.push((message, field));
         self
     }
 

@@ -1,5 +1,11 @@
 # Changes
 
+## [0.7.6] - 2025-07-08
+
+* Better error handling
+
+* Make DecodeError clonable
+
 ## [0.7.5] - 2025-02-13
 
 * Handle DeadlineExceeded status

@@ -99,7 +99,7 @@ impl Clone for RequestContext {
 
 fn log_error<T: Into<HttpError>>(err: T) -> HttpError {
     let e = err.into();
-    log::error!("Error in Grpc Request {}", e);
+    log::error!("Error in Grpc Request {e}");
     e
 }
 

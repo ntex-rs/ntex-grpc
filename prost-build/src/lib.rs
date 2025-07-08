@@ -789,9 +789,9 @@ impl Config {
                 .map(|previous_content| previous_content == content.as_bytes())
                 .unwrap_or(false)
             {
-                trace!("unchanged: {:?}", file_name);
+                trace!("unchanged: {file_name:?}");
             } else {
-                trace!("writing: {:?}", file_name);
+                trace!("writing: {file_name:?}");
                 fs::write(output_path, content)?;
             }
         }

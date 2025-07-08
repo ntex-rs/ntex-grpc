@@ -59,7 +59,7 @@ pub enum ClientError {
     #[error("{0}")]
     Client(#[from] client::ClientError),
     #[error("Http error {0:?}")]
-    Http(Option<HttpError>),
+    Http(#[from] HttpError),
     #[error("{0}")]
     Decode(#[from] DecodeError),
     #[error("Http operation error: {0}")]
@@ -76,17 +76,11 @@ pub enum ClientError {
     GrpcStatus(GrpcStatus, HeaderMap),
 }
 
-impl From<HttpError> for ClientError {
-    fn from(err: HttpError) -> Self {
-        Self::Http(Some(err))
-    }
-}
-
 impl Clone for ClientError {
     fn clone(&self) -> Self {
         match self {
             Self::Client(err) => Self::Client(err.clone()),
-            Self::Http(_) => Self::Http(None),
+            Self::Http(err) => Self::Http(err.clone()),
             Self::Decode(err) => Self::Decode(err.clone()),
             Self::Operation(err) => Self::Operation(err.clone()),
             Self::Stream(err) => Self::Stream(*err),

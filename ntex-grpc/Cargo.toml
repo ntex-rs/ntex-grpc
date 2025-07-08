@@ -1,6 +1,6 @@
 [package]
 name = "ntex-grpc"
-version = "0.7.5"
+version = "0.7.6"
 license = "MIT OR Apache-2.0"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 description = "GRPC Client/Server framework"
@@ -17,8 +17,8 @@ name = "ntex_grpc"
 path = "src/lib.rs"
 
 [dependencies]
-ntex-h2 = "1.11"
-ntex-http = "0.1"
+ntex-h2 = "1.12"
+ntex-http = "0.1.14"
 ntex-io = "2"
 ntex-util = "2"
 ntex-bytes = "0.1"
@@ -33,4 +33,4 @@ pin-project-lite = "0.2"
 [dev-dependencies]
 openssl = "0.10"
 env_logger = "0.11"
-ntex = { version = "2.12", features = ["openssl", "neon"] }
+ntex = { version = "2.15", features = ["openssl", "neon"] }

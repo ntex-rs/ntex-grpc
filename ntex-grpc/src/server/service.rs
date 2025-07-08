@@ -127,7 +127,7 @@ impl Service<h2::ControlMessage<h2::StreamError>> for ControlService {
         msg: h2::ControlMessage<h2::StreamError>,
         _: ServiceCtx<'_, Self>,
     ) -> Result<Self::Response, Self::Error> {
-        log::trace!("Control message: {:?}", msg);
+        log::trace!("Control message: {msg:?}");
         Ok::<_, ()>(msg.ack())
     }
 }
@@ -278,7 +278,7 @@ where
 
                     match timeout_checked(to, ctx.call(&self.service, req)).await {
                         Ok(Ok(res)) => {
-                            log::debug!("Response is received {:?}", res);
+                            log::debug!("Response is received {res:?}");
                             let mut buf = BytesMut::with_capacity(res.payload.len() + 5);
                             buf.put_u8(0); // compression
                             buf.put_u32(res.payload.len() as u32); // length

@@ -55,6 +55,7 @@ impl CodeGenerator<'_> {
             .strip_suffix(".proto")
             .unwrap_or("")
             .replace(".", "_")
+            .replace("-", "_")
             .replace("/", "_");
 
         let mut source_info = file

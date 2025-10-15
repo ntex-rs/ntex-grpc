@@ -17,6 +17,6 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "3.2", features = ["derive"] }
-ntex-prost-build = "0.11.14"
+ntex-prost-build = "0.11.16"
 log = "0.4"
 env_logger = "0.11"

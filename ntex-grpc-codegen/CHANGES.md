@@ -1,5 +1,9 @@
 # Changes
 
+## [0.2.13] - 2025-10-15
+
+* Handle "-" in proto file name
+
 ## [0.2.12] - 2024-12-06
 
 * Fix codegen #17

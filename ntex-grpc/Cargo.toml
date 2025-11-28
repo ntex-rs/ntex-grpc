@@ -1,6 +1,6 @@
 [package]
 name = "ntex-grpc"
-version = "0.7.6"
+version = "1.0.0-pre.0"
 license = "MIT OR Apache-2.0"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 description = "GRPC Client/Server framework"
@@ -9,20 +9,20 @@ repository = "https://github.com/ntex-rs/ntex-grpc"
 readme = "README.md"
 keywords = ["grpc"]
 categories = ["asynchronous", "network-programming"]
-edition = "2021"
-rust-version = "1.75"
+edition = "2024"
+rust-version = "1.85"
 
 [lib]
 name = "ntex_grpc"
 path = "src/lib.rs"
 
 [dependencies]
-ntex-h2 = "1.12"
-ntex-http = "0.1.14"
-ntex-io = "2"
-ntex-util = "2"
-ntex-bytes = "0.1"
-ntex-service = "3"
+ntex-h2 = "3.0.0-pre.0"
+ntex-http = "1"
+ntex-io = "3.0.0-pre.1"
+ntex-util = "3"
+ntex-bytes = "1"
+ntex-service = "3.6.2"
 ntex-grpc-derive = "0.7"
 
 bitflags = "2"
@@ -33,4 +33,4 @@ pin-project-lite = "0.2"
 [dev-dependencies]
 openssl = "0.10"
 env_logger = "0.11"
-ntex = { version = "2.15", features = ["openssl", "neon"] }
+ntex = { version = "3.0.0-pre.1", features = ["openssl", "neon"] }

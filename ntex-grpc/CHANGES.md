@@ -1,5 +1,13 @@
 # Changes
 
+## [1.0.0-pre.0] - 2025-11-28
+
+* Update the `ntex` to 3.0
+
+* Update MSRV to 1.85
+
+* Update edition to 2024
+
 ## [0.7.6] - 2025-07-08
 
 * Better error handling

@@ -1,11 +1,11 @@
 use std::{cell::RefCell, rc::Rc};
 
 use ntex_bytes::{Buf, BufMut, ByteString, BytesMut};
-use ntex_h2::{self as h2, frame::Reason, frame::StreamId, StreamRef};
+use ntex_h2::{self as h2, StreamRef, frame::Reason, frame::StreamId};
 use ntex_http::{HeaderMap, HeaderValue, StatusCode};
 use ntex_io::{Filter, Io, IoBoxed};
-use ntex_service::{Service, ServiceCtx, ServiceFactory};
-use ntex_util::{time::timeout_checked, time::Millis, HashMap};
+use ntex_service::{Service, ServiceCtx, ServiceFactory, cfg::SharedCfg};
+use ntex_util::{HashMap, time::Millis, time::timeout_checked};
 
 use crate::{consts, status::GrpcStatus, utils::Data};
 
@@ -38,21 +38,25 @@ impl<T> GrpcServer<T> {
 
 impl<T> GrpcServer<T>
 where
-    T: ServiceFactory<ServerRequest, Response = ServerResponse, Error = ServerError>,
+    T: ServiceFactory<ServerRequest, SharedCfg, Response = ServerResponse, Error = ServerError>,
     T::Service: Clone,
 {
     /// Create default server
-    pub fn make_server(&self) -> GrpcService<T> {
+    pub fn make_server(&self, cfg: SharedCfg) -> GrpcService<T> {
+        log::trace!("{}: Starting grpc service", cfg.tag());
+
         GrpcService {
+            cfg,
             factory: self.factory.clone(),
         }
     }
 }
 
-impl<F, T> ServiceFactory<Io<F>> for GrpcServer<T>
+impl<F, T> ServiceFactory<Io<F>, SharedCfg> for GrpcServer<T>
 where
     F: Filter,
-    T: ServiceFactory<ServerRequest, Response = ServerResponse, Error = ServerError> + 'static,
+    T: ServiceFactory<ServerRequest, SharedCfg, Response = ServerResponse, Error = ServerError>
+        + 'static,
     T::Service: Clone,
 {
     type Response = ();
@@ -60,32 +64,33 @@ where
     type Service = GrpcService<T>;
     type InitError = ();
 
-    async fn create(&self, _: ()) -> Result<Self::Service, Self::InitError> {
-        Ok(self.make_server())
+    async fn create(&self, cfg: SharedCfg) -> Result<Self::Service, Self::InitError> {
+        Ok(self.make_server(cfg))
     }
 }
 
 pub struct GrpcService<T> {
+    cfg: SharedCfg,
     factory: Rc<T>,
 }
 
 impl<T, F> Service<Io<F>> for GrpcService<T>
 where
     F: Filter,
-    T: ServiceFactory<ServerRequest, Response = ServerResponse, Error = ServerError> + 'static,
+    T: ServiceFactory<ServerRequest, SharedCfg, Response = ServerResponse, Error = ServerError>
+        + 'static,
 {
     type Response = ();
     type Error = T::InitError;
 
     async fn call(&self, io: Io<F>, _: ServiceCtx<'_, Self>) -> Result<(), Self::Error> {
         // init server
-        let service = self.factory.create(()).await?;
+        let service = self.factory.create(self.cfg).await?;
 
         let _ = h2::server::handle_one(
             io.into(),
-            h2::Config::server(),
+            PublishService::new(service, self.cfg),
             ControlService,
-            PublishService::new(service),
         )
         .await;
 
@@ -95,22 +100,18 @@ where
 
 impl<T> Service<IoBoxed> for GrpcService<T>
 where
-    T: ServiceFactory<ServerRequest, Response = ServerResponse, Error = ServerError> + 'static,
+    T: ServiceFactory<ServerRequest, SharedCfg, Response = ServerResponse, Error = ServerError>
+        + 'static,
 {
     type Response = ();
     type Error = T::InitError;
 
     async fn call(&self, io: IoBoxed, _: ServiceCtx<'_, Self>) -> Result<(), Self::Error> {
         // init server
-        let service = self.factory.create(()).await?;
+        let service = self.factory.create(self.cfg).await?;
 
-        let _ = h2::server::handle_one(
-            io,
-            h2::Config::server(),
-            ControlService,
-            PublishService::new(service),
-        )
-        .await;
+        let _ = h2::server::handle_one(io, PublishService::new(service, self.cfg), ControlService)
+            .await;
 
         Ok(())
     }
@@ -133,6 +134,7 @@ impl Service<h2::ControlMessage<h2::StreamError>> for ControlService {
 }
 
 struct PublishService<S: Service<ServerRequest>> {
+    cfg: SharedCfg,
     service: S,
     streams: RefCell<HashMap<StreamId, Inflight>>,
 }
@@ -148,8 +150,9 @@ impl<S> PublishService<S>
 where
     S: Service<ServerRequest, Response = ServerResponse, Error = ServerError>,
 {
-    fn new(service: S) -> Self {
+    fn new(service: S, cfg: SharedCfg) -> Self {
         Self {
+            cfg,
             service,
             streams: RefCell::new(HashMap::default()),
         }
@@ -250,7 +253,12 @@ where
                         .split_to_checked(len as usize)
                         .ok_or(h2::StreamError::Reset(Reason::PROTOCOL_ERROR))?;
 
-                    log::debug!("Call service {} method {}", inflight.service, inflight.name);
+                    log::debug!(
+                        "{}: Call service {} method {}",
+                        self.cfg.tag(),
+                        inflight.service,
+                        inflight.name
+                    );
                     let req = ServerRequest {
                         payload: data,
                         name: inflight.name,
@@ -278,7 +286,7 @@ where
 
                     match timeout_checked(to, ctx.call(&self.service, req)).await {
                         Ok(Ok(res)) => {
-                            log::debug!("Response is received {res:?}");
+                            log::debug!("{}: Response is received {res:?}", self.cfg.tag());
                             let mut buf = BytesMut::with_capacity(res.payload.len() + 5);
                             buf.put_u8(0); // compression
                             buf.put_u32(res.payload.len() as u32); // length
@@ -295,14 +303,21 @@ where
                             stream.send_trailers(trailers);
                         }
                         Ok(Err(err)) => {
-                            log::debug!("Failure during service call: {:?}", err.message);
+                            log::debug!(
+                                "{}: Failure during service call: {:?}",
+                                self.cfg.tag(),
+                                err.message
+                            );
                             let mut trailers = err.headers;
                             trailers.insert(consts::GRPC_STATUS, err.status.into());
                             trailers.insert(consts::GRPC_MESSAGE, err.message);
                             stream.send_trailers(trailers);
                         }
                         Err(_) => {
-                            log::debug!("Deadline exceeded failure during service call");
+                            log::debug!(
+                                "{}: Deadline exceeded failure during service call",
+                                self.cfg.tag()
+                            );
                             send_error(&stream, GrpcStatus::DeadlineExceeded, ERR_DEADLINE);
                         }
                     };

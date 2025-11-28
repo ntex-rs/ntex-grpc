@@ -1,4 +1,4 @@
-use ntex::{server::Server, service::ServiceFactory, util::HashMap};
+use ntex::{SharedCfg, server::Server, service::ServiceFactory, util::HashMap};
 use ntex_grpc::server;
 
 mod helloworld;
@@ -38,21 +38,21 @@ impl GreeterServer {
     }
 }
 
-impl ServiceFactory<server::ServerRequest> for GreeterServer {
+impl ServiceFactory<server::ServerRequest, SharedCfg> for GreeterServer {
     type Response = server::ServerResponse;
     type Error = server::ServerError;
     type InitError = ();
     type Service = GreeterServer;
 
-    async fn create(&self, _: ()) -> Result<Self::Service, Self::InitError> {
+    async fn create(&self, _: SharedCfg) -> Result<Self::Service, Self::InitError> {
         Ok(GreeterServer)
     }
 }
 
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
-    std::env::set_var("RUST_LOG", "trace");
-    env_logger::init();
+    //std::env::set_var("RUST_LOG", "trace");
+    let _ = env_logger::try_init();
 
     let matches = clap::App::new("helloworld server")
         .version("0.1")
@@ -72,6 +72,7 @@ async fn main() -> std::io::Result<()> {
             server::GrpcServer::new(GreeterServer)
         })?
         .workers(threads)
+        .config("helloworld", SharedCfg::new("GRPC"))
         .run()
         .await
 }

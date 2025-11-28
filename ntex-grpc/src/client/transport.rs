@@ -2,10 +2,10 @@ use std::{convert::TryFrom, str::FromStr};
 
 use ntex_bytes::{Buf, BufMut, BytesMut};
 use ntex_h2::{self as h2};
-use ntex_http::{header, HeaderMap, Method};
+use ntex_http::{HeaderMap, Method, header};
 
-use super::{request::RequestContext, request::Response, Client, ClientError, Transport};
-use crate::{consts, service::MethodDef, utils::Data, DecodeError, GrpcStatus, Message};
+use super::{Client, ClientError, Transport, request::RequestContext, request::Response};
+use crate::{DecodeError, GrpcStatus, Message, consts, service::MethodDef, utils::Data};
 
 impl<T: MethodDef> Transport<T> for Client {
     type Error = ClientError;
@@ -88,7 +88,7 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
                         // check grpc status
                         match check_grpc_status(&headers) {
                             Some(Ok(GrpcStatus::DeadlineExceeded)) => {
-                                return Err(ClientError::DeadlineExceeded(hdrs))
+                                return Err(ClientError::DeadlineExceeded(hdrs));
                             }
                             Some(Ok(status)) => {
                                 if status != GrpcStatus::Ok {
@@ -124,7 +124,7 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
                             match check_grpc_status(&hdrs) {
                                 Some(Ok(GrpcStatus::Ok)) => Ok(()),
                                 Some(Ok(GrpcStatus::DeadlineExceeded)) => {
-                                    return Err(ClientError::DeadlineExceeded(hdrs))
+                                    return Err(ClientError::DeadlineExceeded(hdrs));
                                 }
                                 Some(Ok(st)) => return Err(ClientError::GrpcStatus(st, hdrs)),
                                 Some(Err(())) => Err(ClientError::Decode(DecodeError::new(

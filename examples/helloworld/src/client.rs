@@ -4,9 +4,9 @@
     clippy::expect_fun_call,
     clippy::let_underscore_future
 )]
-use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, thread, time::Duration};
+use std::{sync::Arc, sync::atomic::AtomicUsize, sync::atomic::Ordering, thread, time::Duration};
 
-use ntex::{rt::spawn, rt::System};
+use ntex::{SharedCfg, rt::System, rt::spawn};
 use ntex_grpc::client::Client;
 use ntex_h2::client as h2;
 
@@ -14,8 +14,8 @@ mod helloworld;
 use self::helloworld::{GreeterClient, HelloRequest};
 
 fn main() {
-    std::env::set_var("RUST_LOG", "ntex_h2=info");
-    env_logger::init();
+    // std::env::set_var("RUST_LOG", "ntex_h2=info");
+    let _ = env_logger::try_init();
 
     let matches = clap::App::new("helloworld client")
         .version("0.1")
@@ -44,8 +44,11 @@ fn main() {
             let sys = System::new("client");
 
             sys.block_on(async move {
-                let client =
-                    GreeterClient::new(Client::new(h2::Client::with_default(addr).finish()));
+                let h2client = h2::Client::with_default(addr)
+                    .finish(SharedCfg::default())
+                    .await
+                    .unwrap();
+                let client = GreeterClient::new(Client::new(h2client));
 
                 for _ in 0..concurrency - 1 {
                     let cnt = counters.clone();

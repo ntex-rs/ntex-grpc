@@ -1,7 +1,7 @@
 use std::task::{Context, Poll};
 use std::{cell::Cell, convert::TryFrom, fmt, future::Future, mem, ops, pin::Pin, rc::Rc, time};
 
-use ntex_http::{error::Error as HttpError, HeaderMap, HeaderName, HeaderValue};
+use ntex_http::{HeaderMap, HeaderName, HeaderValue, error::Error as HttpError};
 use ntex_util::future::BoxFuture;
 
 use crate::{client::Transport, consts, service::MethodDef};
@@ -245,7 +245,7 @@ fn duration_to_grpc_timeout(duration: time::Duration) -> String {
 fn parts<'a, 'b, T: Transport<M> + 'a, M: MethodDef>(
     parts: &'b mut State<'a, T, M>,
 ) -> Option<&'b mut RequestContext> {
-    if let State::Request { ref mut ctx, .. } = parts {
+    if let State::Request { ctx, .. } = parts {
         ctx.as_mut()
     } else {
         None

@@ -1,8 +1,8 @@
 #![allow(async_fn_in_trait)]
 
 use ntex_bytes::Bytes;
-use ntex_h2::{client, OperationError, StreamError};
-use ntex_http::{error::Error as HttpError, HeaderMap, StatusCode};
+use ntex_h2::{OperationError, StreamError, client};
+use ntex_http::{HeaderMap, StatusCode, error::Error as HttpError};
 
 mod request;
 mod transport;

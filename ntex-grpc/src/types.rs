@@ -85,11 +85,7 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
             DefaultValue::Value(d) => self == d,
         };
 
-        if default {
-            0
-        } else {
-            self.encoded_len(tag)
-        }
+        if default { 0 } else { self.encoded_len(tag) }
     }
 
     #[inline]
@@ -287,7 +283,7 @@ impl<T: NativeType> NativeType for Option<T> {
     #[inline]
     /// Serialize protobuf field
     fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytesMut) {
-        if let Some(ref value) = self {
+        if let Some(value) = self {
             value.serialize(tag, DefaultValue::Unknown, dst);
         }
     }
@@ -295,7 +291,7 @@ impl<T: NativeType> NativeType for Option<T> {
     #[inline]
     /// Protobuf field length
     fn serialized_len(&self, tag: u32, _: DefaultValue<&Self>) -> usize {
-        if let Some(ref value) = self {
+        if let Some(value) = self {
             value.serialized_len(tag, DefaultValue::Unknown)
         } else {
             0

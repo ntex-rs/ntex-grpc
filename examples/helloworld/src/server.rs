@@ -67,7 +67,7 @@ async fn main() -> std::io::Result<()> {
 
     // bind to socket
     Server::build()
-        .bind("helloworld", format!("0.0.0.0:{port}"), move |_| {
+        .bind("helloworld", format!("0.0.0.0:{port}"), async move |_| {
             // create service
             server::GrpcServer::new(GreeterServer)
         })?

@@ -339,15 +339,15 @@ mod tests {
 
     #[test]
     fn duration_to_grpc_timeout_less_than_second() {
-        let timeout = Duration::from_millis(500);
+        let timeout = time::Duration::from_millis(500);
         let value = duration_to_grpc_timeout(timeout);
         assert_eq!(value, format!("{}u", timeout.as_micros()));
 
-        let timeout = Duration::from_secs(30);
+        let timeout = time::Duration::from_secs(30);
         let value = duration_to_grpc_timeout(timeout);
         assert_eq!(value, format!("{}u", timeout.as_micros()));
 
-        let one_hour = Duration::from_secs(60 * 60);
+        let one_hour = time::Duration::from_secs(60 * 60);
         let value = duration_to_grpc_timeout(one_hour);
         assert_eq!(value, format!("{}m", one_hour.as_millis()));
     }

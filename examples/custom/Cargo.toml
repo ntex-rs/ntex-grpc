@@ -10,8 +10,8 @@ path = "src/client.rs"
 
 [dependencies]
 ntex = "3.0.0-pre.2"
-ntex-h2 = "3.0.0-pre.1"
-ntex-grpc = "1.0.0-pre.0"
+ntex-h2 = "3.0.0"
+ntex-grpc = "1.0.0"
 
 env_logger = "0.11"
 uuid = { version = "1", features = ["v4"] }

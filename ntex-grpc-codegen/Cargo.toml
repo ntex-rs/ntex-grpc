@@ -9,7 +9,8 @@ repository = "https://github.com/ntex-rs/ntex-grpc"
 readme = "README.md"
 keywords = ["grpc"]
 categories = ["asynchronous", "network-programming"]
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 
 [[bin]]
 name = "ntex-grpc"

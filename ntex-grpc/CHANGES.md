@@ -1,5 +1,9 @@
 # Changes
 
+## [1.1.0] - 2025-12-17
+
+* Upgrade to ntex-service v4
+
 ## [1.0.0-pre.0] - 2025-11-28
 
 * Update the `ntex` to 3.0

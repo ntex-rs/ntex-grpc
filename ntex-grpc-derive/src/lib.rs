@@ -13,7 +13,7 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input: syn::ItemImpl = syn::parse2(item.into()).unwrap();
 
     match input.self_ty.as_ref() {
-        syn::Type::Path(ref tp) => {
+        syn::Type::Path(tp) => {
             srv.self_ty = tp.path.clone();
             if let Some(s) = tp.path.segments.last() {
                 srv.name = format!("{}", s.ident);

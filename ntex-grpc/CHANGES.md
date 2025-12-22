@@ -1,5 +1,9 @@
 # Changes
 
+## [1.2.0] - 2025-12-22
+
+* Add "CONTENT-TYPE" header to server response
+
 ## [1.1.0] - 2025-12-17
 
 * Upgrade to ntex-service v4

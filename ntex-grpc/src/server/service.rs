@@ -2,7 +2,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use ntex_bytes::{Buf, BufMut, ByteString, BytesMut};
 use ntex_h2::{self as h2, StreamRef, frame::Reason, frame::StreamId};
-use ntex_http::{HeaderMap, HeaderValue, StatusCode};
+use ntex_http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use ntex_io::{Filter, Io, IoBoxed};
 use ntex_service::{Service, ServiceCtx, ServiceFactory, cfg::SharedCfg};
 use ntex_util::{HashMap, time::Millis, time::timeout_checked};
@@ -18,6 +18,7 @@ const ERR_DATA_DECODE: HeaderValue =
 const ERR_DECODE_TIMEOUT: HeaderValue =
     HeaderValue::from_static("Cannot decode grpc-timeout header");
 const ERR_DEADLINE: HeaderValue = HeaderValue::from_static("Deadline exceeded");
+const HDR_APP_GRPC: HeaderValue = HeaderValue::from_static("application/grpc");
 
 const MILLIS_IN_HOUR: u64 = 60 * 60 * 1000;
 const MILLIS_IN_MINUTE: u64 = 60 * 1000;
@@ -187,17 +188,13 @@ where
                     path.split_to(n)
                 } else {
                     // not found
-                    let _ =
-                        stream.send_response(StatusCode::NOT_FOUND, HeaderMap::default(), true);
+                    let _ = stream.send_response(StatusCode::NOT_FOUND, hdrs(), true);
                     return Ok(());
                 };
 
                 // stream eof, cannot do anything
                 if eof {
-                    if stream
-                        .send_response(StatusCode::OK, HeaderMap::default(), false)
-                        .is_ok()
-                    {
+                    if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
                         send_error(&stream, GrpcStatus::InvalidArgument, ERR_DECODE);
                     }
                     return Ok(());
@@ -241,10 +238,7 @@ where
                     let _compressed = data.get_u8();
                     let len = data.get_u32();
                     if (len as usize) > data.len() {
-                        if stream
-                            .send_response(StatusCode::OK, HeaderMap::default(), false)
-                            .is_ok()
-                        {
+                        if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
                             send_error(&stream, GrpcStatus::InvalidArgument, ERR_DATA_DECODE);
                         }
                         return Ok(());
@@ -264,10 +258,7 @@ where
                         name: inflight.name,
                         headers: inflight.headers,
                     };
-                    if stream
-                        .send_response(StatusCode::OK, HeaderMap::default(), false)
-                        .is_err()
-                    {
+                    if stream.send_response(StatusCode::OK, hdrs(), false).is_err() {
                         return Ok(());
                     }
                     drop(streams);
@@ -331,6 +322,12 @@ where
         }
         Ok(())
     }
+}
+
+fn hdrs() -> HeaderMap {
+    let mut hdrs = HeaderMap::default();
+    hdrs.insert(CONTENT_TYPE, HDR_APP_GRPC);
+    hdrs
 }
 
 fn send_error(stream: &StreamRef, st: GrpcStatus, msg: HeaderValue) {

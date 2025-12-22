@@ -13,7 +13,7 @@ name = "server"
 path = "src/server.rs"
 
 [dependencies]
-ntex = "3.0.0-pre.2"
+ntex = { version = "3.0.0-pre.9", features = ["tokio"] }
 ntex-grpc = "1"
 ntex-h2 = "3"
 
@@ -23,4 +23,4 @@ env_logger = "0.11"
 num_cpus = "1"
 
 [dev-dependencies]
-ntex = { version = "3.0.0-pre.2", features = ["openssl", "tokio"] }
+ntex = { version = "3.0.0-pre.9", features = ["openssl", "tokio"] }

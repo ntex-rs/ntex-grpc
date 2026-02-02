@@ -85,7 +85,11 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
             DefaultValue::Value(d) => self == d,
         };
 
-        if default { 0 } else { self.encoded_len(tag) }
+        if default {
+            0
+        } else {
+            self.encoded_len(tag)
+        }
     }
 
     #[inline]
@@ -652,6 +656,7 @@ mod tests {
             Ok(msg)
         }
 
+        #[allow(clippy::identity_op)]
         #[inline]
         fn encoded_len(&self) -> usize {
             0 + NativeType::serialized_len(&self.f, 1, DefaultValue::Default)
@@ -661,6 +666,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::field_reassign_with_default)]
     #[test]
     fn test_hashmap_default_values() {
         let mut msg = TestMessage::default();

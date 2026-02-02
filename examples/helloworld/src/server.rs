@@ -66,7 +66,7 @@ async fn main() -> std::io::Result<()> {
     let threads = parse_usize_default(matches.value_of("threads"), num_cpus::get());
 
     // bind to socket
-    Server::build()
+    Server::builder()
         .bind("helloworld", format!("0.0.0.0:{port}"), async move |_| {
             // create service
             server::GrpcServer::new(GreeterServer)

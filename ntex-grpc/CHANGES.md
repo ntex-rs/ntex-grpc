@@ -1,5 +1,9 @@
 # Changes
 
+## [1.3.0] - 2026-02-02
+
+* Upgrade to ntex v3.0
+
 ## [1.2.0] - 2025-12-22
 
 * Add "CONTENT-TYPE" header to server response

@@ -120,13 +120,13 @@ where
 
 struct ControlService;
 
-impl Service<h2::ControlMessage<h2::StreamError>> for ControlService {
-    type Response = h2::ControlResult;
+impl Service<h2::Control<h2::StreamError>> for ControlService {
+    type Response = h2::ControlAck;
     type Error = ();
 
     async fn call(
         &self,
-        msg: h2::ControlMessage<h2::StreamError>,
+        msg: h2::Control<h2::StreamError>,
         _: ServiceCtx<'_, Self>,
     ) -> Result<Self::Response, Self::Error> {
         log::trace!("Control message: {msg:?}");

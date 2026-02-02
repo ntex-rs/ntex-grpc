@@ -10,7 +10,7 @@ readme = "README.md"
 keywords = ["grpc"]
 categories = ["asynchronous", "network-programming"]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [[bin]]
 name = "ntex-grpc"

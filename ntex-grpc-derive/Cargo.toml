@@ -7,7 +7,7 @@ repository = "https://github.com/ntex-rs/ntex-grpc"
 readme = "README.md"
 description = "A Protocol Buffers implementation for the Rust Language."
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [lib]
 proc-macro = true

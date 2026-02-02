@@ -41,7 +41,7 @@ fn main() {
 
         thread::spawn(move || {
             println!("Starting thread: {t}");
-            let sys = System::new("client");
+            let sys = System::new("client", ntex::rt::DefaultRuntime);
 
             sys.block_on(async move {
                 let h2client = h2::ClientBuilder::with_default(addr)

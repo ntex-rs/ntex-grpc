@@ -85,11 +85,7 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
             DefaultValue::Value(d) => self == d,
         };
 
-        if default {
-            0
-        } else {
-            self.encoded_len(tag)
-        }
+        if default { 0 } else { self.encoded_len(tag) }
     }
 
     #[inline]

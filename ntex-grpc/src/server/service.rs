@@ -86,11 +86,11 @@ where
 
     async fn call(&self, io: Io<F>, _: ServiceCtx<'_, Self>) -> Result<(), Self::Error> {
         // init server
-        let service = self.factory.create(self.cfg).await?;
+        let service = self.factory.create(self.cfg.clone()).await?;
 
         let _ = h2::server::handle_one(
             io.into(),
-            PublishService::new(service, self.cfg),
+            PublishService::new(service, self.cfg.clone()),
             ControlService,
         )
         .await;
@@ -109,10 +109,14 @@ where
 
     async fn call(&self, io: IoBoxed, _: ServiceCtx<'_, Self>) -> Result<(), Self::Error> {
         // init server
-        let service = self.factory.create(self.cfg).await?;
+        let service = self.factory.create(self.cfg.clone()).await?;
 
-        let _ = h2::server::handle_one(io, PublishService::new(service, self.cfg), ControlService)
-            .await;
+        let _ = h2::server::handle_one(
+            io,
+            PublishService::new(service, self.cfg.clone()),
+            ControlService,
+        )
+        .await;
 
         Ok(())
     }

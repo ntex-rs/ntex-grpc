@@ -1,5 +1,9 @@
 # Changes
 
+## [1.4.0] - 2026-02-17
+
+* SharedCfg is not Copy
+
 ## [1.3.0] - 2026-02-02
 
 * Upgrade to ntex v3.0

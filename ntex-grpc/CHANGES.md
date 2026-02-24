@@ -1,5 +1,9 @@
 # Changes
 
+## [1.4.1] - 2026-02-25
+
+* Do not serialize empty vec #34
+
 ## [1.4.0] - 2026-02-17
 
 * SharedCfg is not Copy

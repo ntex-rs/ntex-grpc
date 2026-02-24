@@ -374,6 +374,9 @@ impl<T: NativeType> NativeType for Vec<T> {
 
     /// Serialize protobuf field
     fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytesMut) {
+        if self.is_empty() {
+            return;
+        }
         if T::TYPE == WireType::Varint {
             encoding::encode_key(tag, WireType::LengthDelimited, dst);
             encoding::encode_varint(

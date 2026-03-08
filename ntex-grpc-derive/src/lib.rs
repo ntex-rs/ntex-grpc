@@ -128,29 +128,21 @@ impl Parse for GrpcService {
 }
 
 impl Fold for GrpcService {
-    fn fold_impl_item_method(&mut self, mut m: syn::ImplItemMethod) -> syn::ImplItemMethod {
+    fn fold_impl_item_fn(&mut self, mut m: syn::ImplItemFn) -> syn::ImplItemFn {
         for idx in 0..m.attrs.len() {
             let attr = &m.attrs[idx];
-            if attr.path.is_ident("method") {
-                let args = attr.parse_meta().map_err(|_| ERR_M_MESSAGE).unwrap();
-                let lst = if let syn::Meta::List(lst) = args {
+            if attr.path().is_ident("method") {
+                let lst = if let syn::Meta::List(ref lst) = attr.meta {
                     lst
                 } else {
                     panic!("{}", ERR_M_MESSAGE)
                 };
-                if lst.nested.len() != 1 {
-                    panic!("{}", ERR_M_MESSAGE)
-                }
 
-                let m_name = match lst.nested[0] {
-                    syn::NestedMeta::Meta(syn::Meta::Path(ref name)) => {
-                        if let Some(name) = name.get_ident() {
-                            name.clone()
-                        } else {
-                            panic!("only `Path` literals are supported: {:?}", lst.nested[0]);
-                        }
-                    }
-                    _ => panic!("only `Path` literals are supported: {:?}", lst.nested[0]),
+                let name: syn::Path = lst.parse_args().expect(ERR_M_MESSAGE);
+                let m_name = if let Some(ident) = name.get_ident() {
+                    ident.clone()
+                } else {
+                    panic!("only simple identifiers are supported: {:?}", name);
                 };
 
                 let _ = m.attrs.remove(idx);

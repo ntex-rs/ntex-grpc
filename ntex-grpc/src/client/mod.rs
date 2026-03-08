@@ -1,6 +1,7 @@
 #![allow(async_fn_in_trait)]
 
 use ntex_bytes::Bytes;
+use ntex_error::{ErrorDiagnostic, ErrorType};
 use ntex_h2::{OperationError, StreamError, client};
 use ntex_http::{HeaderMap, StatusCode, error::Error as HttpError};
 
@@ -13,7 +14,7 @@ use crate::{encoding::DecodeError, service::MethodDef, status::GrpcStatus};
 
 pub trait Transport<T: MethodDef> {
     /// Errors produced by the transport.
-    type Error: From<HttpError>;
+    type Error;
 
     async fn request(
         &self,
@@ -90,6 +91,18 @@ impl Clone for ClientError {
             Self::UnexpectedEof(st, hdrs) => Self::UnexpectedEof(*st, hdrs.clone()),
             Self::DeadlineExceeded(hdrs) => Self::DeadlineExceeded(hdrs.clone()),
             Self::GrpcStatus(st, hdrs) => Self::GrpcStatus(*st, hdrs.clone()),
+        }
+    }
+}
+
+impl ErrorDiagnostic for ClientError {
+    type Kind = ErrorType;
+
+    fn kind(&self) -> ErrorType {
+        if matches!(self, ClientError::Http(_)) {
+            ErrorType::Client
+        } else {
+            ErrorType::Service
         }
     }
 }

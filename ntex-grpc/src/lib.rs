@@ -1,3 +1,10 @@
+#![deny(clippy::pedantic)]
+#![allow(
+    clippy::must_use_candidate,
+    clippy::cast_possible_truncation,
+    clippy::missing_errors_doc,
+    clippy::missing_fields_in_debug
+)]
 mod consts;
 mod service;
 mod status;

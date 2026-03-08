@@ -42,6 +42,7 @@ impl<T: MethodDef> Transport<T> for h2::client::Client {
 impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
     type Error = Error<ClientError>;
 
+    #[allow(clippy::too_many_lines)]
     async fn request(
         &self,
         val: &T::Input,
@@ -61,7 +62,7 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
         hdrs.insert(consts::GRPC_ENCODING, consts::IDENTITY);
         hdrs.insert(consts::GRPC_ACCEPT_ENCODING, consts::IDENTITY);
         for (key, val) in ctx.headers() {
-            hdrs.insert(key.clone(), val.clone())
+            hdrs.insert(key.clone(), val.clone());
         }
 
         // send request
@@ -85,9 +86,7 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
 
         async {
             loop {
-                let msg = if let Some(msg) = rcv_stream.recv().await {
-                    msg
-                } else {
+                let Some(msg) = rcv_stream.recv().await else {
                     return Err(Error::from(ClientError::UnexpectedEof(status, hdrs)));
                 };
 
@@ -122,10 +121,9 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
                                 pseudo.status,
                                 headers,
                             )));
-                        } else {
-                            hdrs = headers;
-                            status = pseudo.status;
                         }
+                        hdrs = headers;
+                        status = pseudo.status;
                         continue;
                     }
                     h2::MessageKind::Data(data, _cap) => {
@@ -140,7 +138,7 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
                             h2::StreamEof::Trailers(hdrs) => {
                                 // check grpc status
                                 match check_grpc_status(&hdrs) {
-                                    Some(Ok(GrpcStatus::Ok)) => Ok(()),
+                                    Some(Ok(GrpcStatus::Ok)) | None => Ok(()),
                                     Some(Ok(GrpcStatus::DeadlineExceeded)) => {
                                         return Err(Error::from(ClientError::DeadlineExceeded(
                                             hdrs,
@@ -154,14 +152,13 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
                                     Some(Err(())) => Err(Error::from(ClientError::Decode(
                                         DecodeError::new("Cannot parse grpc status"),
                                     ))),
-                                    None => Ok(()),
                                 }?;
                                 trailers = hdrs;
                             }
                             h2::StreamEof::Error(err) => {
                                 return Err(err.map(ClientError::Stream));
                             }
-                        };
+                        }
                     }
                     h2::MessageKind::Disconnect(err) => {
                         return Err(err.map(ClientError::Operation));
@@ -179,9 +176,7 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
                 }
                 let _compressed = data.get_u8();
                 let len = data.get_u32();
-                let mut block = if let Some(b) = data.split_to_checked(len as usize) {
-                    b
-                } else {
+                let Some(mut block) = data.split_to_checked(len as usize) else {
                     return Err(Error::from(ClientError::UnexpectedEof(None, hdrs)));
                 };
 

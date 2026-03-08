@@ -1,3 +1,8 @@
+#![allow(
+    clippy::cast_lossless,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
 use std::{collections::HashMap, convert::TryFrom, fmt, hash::BuildHasher, hash::Hash, mem};
 
 use ntex_bytes::{Buf, BufMut, ByteString, Bytes, BytesMut};
@@ -147,7 +152,7 @@ impl<T: Message + PartialEq> NativeType for T {
     #[inline]
     /// Encode message to the buffer
     fn encode_value(&self, dst: &mut BytesMut) {
-        self.write(dst)
+        self.write(dst);
     }
 
     /// Deserialize from the input
@@ -301,9 +306,7 @@ impl<T: NativeType> NativeType for Option<T> {
     #[inline]
     /// Protobuf field length
     fn encoded_len(&self, tag: u32) -> usize {
-        self.as_ref()
-            .map(|value| value.encoded_len(tag))
-            .unwrap_or(0)
+        self.as_ref().map_or(0, |value| value.encoded_len(tag))
     }
 }
 
@@ -380,14 +383,14 @@ impl<T: NativeType> NativeType for Vec<T> {
         if T::TYPE == WireType::Varint {
             encoding::encode_key(tag, WireType::LengthDelimited, dst);
             encoding::encode_varint(
-                self.iter().map(|v| v.value_len()).sum::<usize>() as u64,
+                self.iter().map(NativeType::value_len).sum::<usize>() as u64,
                 dst,
             );
-            for item in self.iter() {
+            for item in self {
                 item.encode_value(dst);
             }
         } else {
-            for item in self.iter() {
+            for item in self {
                 item.serialize(tag, DefaultValue::Unknown, dst);
             }
         }
@@ -401,8 +404,8 @@ impl<T: NativeType> NativeType for Vec<T> {
     /// Protobuf field length
     fn encoded_len(&self, tag: u32) -> usize {
         if T::TYPE == WireType::Varint {
-            let len = self.iter().map(|value| value.value_len()).sum::<usize>();
-            self.iter().map(|value| value.value_len()).sum::<usize>()
+            let len = self.iter().map(NativeType::value_len).sum::<usize>();
+            self.iter().map(NativeType::value_len).sum::<usize>()
                 + encoding::key_len(tag)
                 + encoding::encoded_len_varint(len as u64)
         } else {
@@ -468,7 +471,7 @@ impl<K: NativeType + Eq + Hash, V: NativeType, S: BuildHasher + Default> NativeT
         let key_default = K::default();
         let val_default = V::default();
 
-        for item in self.iter() {
+        for item in self {
             let skip_key = item.0 == &key_default;
             let skip_val = item.1 == &val_default;
 

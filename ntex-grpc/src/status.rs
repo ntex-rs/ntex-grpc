@@ -94,16 +94,16 @@ gen_error_code! {
 impl From<Reason> for GrpcStatus {
     fn from(reason: Reason) -> GrpcStatus {
         match reason {
-            Reason::NO_ERROR => GrpcStatus::Internal,
-            Reason::PROTOCOL_ERROR => GrpcStatus::Internal,
-            Reason::INTERNAL_ERROR => GrpcStatus::Internal,
-            Reason::FLOW_CONTROL_ERROR => GrpcStatus::Internal,
-            Reason::SETTINGS_TIMEOUT => GrpcStatus::Internal,
-            Reason::FRAME_SIZE_ERROR => GrpcStatus::Internal,
+            Reason::NO_ERROR
+            | Reason::PROTOCOL_ERROR
+            | Reason::INTERNAL_ERROR
+            | Reason::FLOW_CONTROL_ERROR
+            | Reason::SETTINGS_TIMEOUT
+            | Reason::FRAME_SIZE_ERROR
+            | Reason::COMPRESSION_ERROR
+            | Reason::CONNECT_ERROR => GrpcStatus::Internal,
             Reason::REFUSED_STREAM => GrpcStatus::Unavailable,
             Reason::CANCEL => GrpcStatus::Cancelled,
-            Reason::COMPRESSION_ERROR => GrpcStatus::Internal,
-            Reason::CONNECT_ERROR => GrpcStatus::Internal,
             Reason::ENHANCE_YOUR_CALM => GrpcStatus::ResourceExhausted,
             Reason::INADEQUATE_SECURITY => GrpcStatus::PermissionDenied,
             _ => GrpcStatus::Unknown,

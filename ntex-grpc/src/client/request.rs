@@ -23,7 +23,7 @@ struct RequestContextInner {
 }
 
 impl RequestContext {
-    /// Create new RequestContext instance
+    /// Create new `RequestContext` instance
     fn new() -> Self {
         Self(Rc::new(RequestContextInner {
             err: None,
@@ -77,7 +77,7 @@ impl RequestContext {
                     Err(e) => ctx.err = Some(log_error(e)),
                 },
                 Err(e) => ctx.err = Some(log_error(e)),
-            };
+            }
         }
         self
     }

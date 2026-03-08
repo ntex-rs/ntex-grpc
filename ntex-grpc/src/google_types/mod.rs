@@ -1,3 +1,12 @@
+#![allow(
+    clippy::wildcard_imports,
+    clippy::default_trait_access,
+    clippy::cast_lossless,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::missing_panics_doc,
+    clippy::doc_markdown
+)]
 mod duration;
 mod duration_impl;
 mod timestamp;

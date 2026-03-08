@@ -171,7 +171,7 @@ where
     type Response = ();
     type Error = h2::StreamError;
 
-    #[allow(clippy::await_holding_refcell_ref)]
+    #[allow(clippy::await_holding_refcell_ref, clippy::too_many_lines)]
     async fn call(
         &self,
         msg: h2::Message,
@@ -231,7 +231,7 @@ where
                     match data {
                         h2::StreamEof::Data(chunk) => inflight.data.push(chunk),
                         h2::StreamEof::Trailers(hdrs) => {
-                            for (name, val) in hdrs.iter() {
+                            for (name, val) in &hdrs {
                                 inflight.headers.insert(name.clone(), val.clone());
                             }
                         }
@@ -308,14 +308,14 @@ where
                             trailers.insert(consts::GRPC_MESSAGE, err.message);
                             stream.send_trailers(trailers);
                         }
-                        Err(_) => {
+                        Err(()) => {
                             log::debug!(
                                 "{}: Deadline exceeded failure during service call",
                                 self.cfg.tag()
                             );
                             send_error(&stream, GrpcStatus::DeadlineExceeded, ERR_DEADLINE);
                         }
-                    };
+                    }
 
                     return Ok(());
                 }
@@ -370,7 +370,7 @@ fn try_parse_grpc_timeout(val: &HeaderValue) -> Result<Millis, ()> {
         // Microseconds
         "u" => Millis(u32::try_from(timeout_value / 1000).unwrap_or(u32::MAX)),
         // Nanoseconds
-        "n" => Millis(u32::try_from(timeout_value / 1000000).unwrap_or(u32::MAX)),
+        "n" => Millis(u32::try_from(timeout_value / 1_000_000).unwrap_or(u32::MAX)),
         _ => return Err(()),
     };
 

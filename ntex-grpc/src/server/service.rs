@@ -235,7 +235,7 @@ where
                                 inflight.headers.insert(name.clone(), val.clone());
                             }
                         }
-                        h2::StreamEof::Error(err) => return Err(err),
+                        h2::StreamEof::Error(err) => return Err(err.into_error()),
                     }
 
                     let mut data = inflight.data.get();

@@ -1,5 +1,9 @@
 # Changes
 
+## [1.5.2] - 2026-04-02
+
+* Update ntex-error to 2.0
+
 ## [1.5.1] - 2026-03-26
 
 * Update ntex_error::Error

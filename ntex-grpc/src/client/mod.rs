@@ -57,23 +57,43 @@ impl Client {
 
 #[derive(thiserror::Error, Debug)]
 pub enum ClientError {
-    #[error("{0}")]
-    Client(#[from] client::ClientError),
+    #[error("")]
+    Client(
+        #[from]
+        #[source]
+        client::ClientError,
+    ),
     #[error("Http error {0:?}")]
-    Http(#[from] HttpError),
-    #[error("{0}")]
-    Decode(#[from] DecodeError),
-    #[error("Http operation error: {0}")]
-    Operation(#[from] OperationError),
-    #[error("Http stream error: {0}")]
-    Stream(#[from] StreamError),
+    Http(
+        #[from]
+        #[source]
+        HttpError,
+    ),
+    #[error("Decode")]
+    Decode(
+        #[from]
+        #[source]
+        DecodeError,
+    ),
+    #[error("HTTP2 Operation")]
+    Operation(
+        #[from]
+        #[source]
+        OperationError,
+    ),
+    #[error("HTTP2 Stream")]
+    Stream(
+        #[from]
+        #[source]
+        StreamError,
+    ),
     #[error("Http response {0:?}, headers: {1:?}, body: {2:?}")]
     Response(Option<StatusCode>, HeaderMap, Bytes),
-    #[error("Got eof without payload with {0:?}, headers: {1:?}")]
+    #[error("Got eof without payload")]
     UnexpectedEof(Option<StatusCode>, HeaderMap),
-    #[error("Deadline exceeded, headers: {0:?}")]
+    #[error("Deadline exceeded")]
     DeadlineExceeded(HeaderMap),
-    #[error("Grpc status {0:?}, headers: {1:?}")]
+    #[error("Grpc status")]
     GrpcStatus(GrpcStatus, HeaderMap),
 }
 
@@ -81,7 +101,7 @@ impl Clone for ClientError {
     fn clone(&self) -> Self {
         match self {
             Self::Client(err) => Self::Client(err.clone()),
-            Self::Http(err) => Self::Http(err.clone()),
+            Self::Http(err) => Self::Http(*err),
             Self::Decode(err) => Self::Decode(err.clone()),
             Self::Operation(err) => Self::Operation(err.clone()),
             Self::Stream(err) => Self::Stream(*err),
@@ -96,13 +116,25 @@ impl Clone for ClientError {
 }
 
 impl ErrorDiagnostic for ClientError {
-    type Kind = ResultType;
-
-    fn kind(&self) -> ResultType {
+    fn typ(&self) -> ResultType {
         if matches!(self, ClientError::Http(_)) {
             ResultType::ClientError
         } else {
             ResultType::ServiceError
+        }
+    }
+
+    fn signature(&self) -> &'static str {
+        match self {
+            ClientError::Client(err) => err.signature(),
+            ClientError::Http(_) => "grpc-Http",
+            ClientError::Decode(_) => "grpc-Decode",
+            ClientError::Operation(err) => err.signature(),
+            ClientError::Stream(err) => err.signature(),
+            ClientError::Response(_, _, _) => "grpc-Response",
+            ClientError::UnexpectedEof(_, _) => "grpc-UnexpectedEof",
+            ClientError::DeadlineExceeded(_) => "grpc-BackendCallTimedout",
+            ClientError::GrpcStatus(status, _) => status.signature(),
         }
     }
 }

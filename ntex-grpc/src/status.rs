@@ -26,6 +26,14 @@ macro_rules! gen_error_code {
                     $($name::$var => stringify!($var)),+
                 }
             }
+
+            #[inline]
+            pub const fn signature(&self) -> &'static str {
+                match self {
+                    $($name::$var => concat!("grpc-status-", stringify!($var))),+
+                }
+            }
+
             #[inline]
             pub const fn code(&self) -> u8 {
                 match self {

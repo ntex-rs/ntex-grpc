@@ -74,7 +74,7 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
             snd_stream.disconnect_on_drop();
         }
         snd_stream
-            .send_payload(buf.freeze(), true)
+            .send_pages(buf, true)
             .await
             .map_err(|e| e.map(ClientError::from))?;
 

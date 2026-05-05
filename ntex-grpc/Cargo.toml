@@ -20,7 +20,7 @@ path = "src/lib.rs"
 ntex-grpc-derive = "2.0"
 
 ntex-error = "2.2"
-ntex-h2 = "3.10"
+ntex-h2 = "3.11.1"
 ntex-http = "1.2"
 ntex-io = "3.10"
 ntex-util = "3.5"

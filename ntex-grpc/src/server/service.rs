@@ -287,7 +287,7 @@ where
                             buf.put_u32(res.payload.len() as u32); // length
                             res.payload.move_to(&mut buf);
 
-                            let _ = stream.send_payload(buf.freeze(), false).await;
+                            let _ = stream.send_pages(buf, false).await;
 
                             let mut trailers = HeaderMap::default();
                             trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());

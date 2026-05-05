@@ -3,10 +3,15 @@
     unused_mut,
     unused_variables,
     clippy::identity_op,
+    clippy::too_many_lines,
     clippy::derivable_impls,
     clippy::unit_arg,
     clippy::derive_partial_eq_without_eq,
-    clippy::manual_range_patterns
+    clippy::manual_range_patterns,
+    clippy::default_trait_access,
+    clippy::semicolon_if_nothing_returned,
+    clippy::doc_markdown,
+    clippy::wildcard_imports
 )]
 //! DO NOT MODIFY. Auto-generated file
 
@@ -52,7 +57,7 @@ mod _priv_impl_helloworld {
 
     impl ::ntex_grpc::Message for HelloRequest {
         #[inline]
-        fn write(&self, dst: &mut ::ntex_grpc::BytesMut) {
+        fn write(&self, dst: &mut ::ntex_grpc::BytePages) {
             ::ntex_grpc::NativeType::serialize(
                 &self.name,
                 1,
@@ -114,7 +119,7 @@ mod _priv_impl_helloworld {
 
     impl ::ntex_grpc::Message for HelloReply {
         #[inline]
-        fn write(&self, dst: &mut ::ntex_grpc::BytesMut) {
+        fn write(&self, dst: &mut ::ntex_grpc::BytePages) {
             ::ntex_grpc::NativeType::serialize(
                 &self.message,
                 1,

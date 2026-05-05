@@ -13,8 +13,8 @@ name = "server"
 path = "src/server.rs"
 
 [dependencies]
-ntex = { version = "3.0", features = ["tokio"] }
-ntex-grpc = "1"
+ntex = { version = "3", features = ["tokio"] }
+ntex-grpc = "2"
 ntex-h2 = "3"
 
 clap = "2"

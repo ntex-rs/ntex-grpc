@@ -1,6 +1,6 @@
 use std::{cell::RefCell, rc::Rc};
 
-use ntex_bytes::{Buf, BufMut, ByteString, BytesMut};
+use ntex_bytes::{Buf, BufMut, BytePages, ByteString};
 use ntex_h2::{self as h2, StreamRef, frame::Reason, frame::StreamId};
 use ntex_http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use ntex_io::{Filter, Io, IoBoxed};
@@ -280,12 +280,12 @@ where
                     };
 
                     match timeout_checked(to, ctx.call(&self.service, req)).await {
-                        Ok(Ok(res)) => {
+                        Ok(Ok(mut res)) => {
                             log::debug!("{}: Response is received {res:?}", self.cfg.tag());
-                            let mut buf = BytesMut::with_capacity(res.payload.len() + 5);
+                            let mut buf = BytePages::default();
                             buf.put_u8(0); // compression
                             buf.put_u32(res.payload.len() as u32); // length
-                            buf.extend_from_slice(&res.payload);
+                            res.payload.move_to(&mut buf);
 
                             let _ = stream.send_payload(buf.freeze(), false).await;
 

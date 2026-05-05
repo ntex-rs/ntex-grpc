@@ -1,6 +1,6 @@
 use std::ops;
 
-use ntex_bytes::{ByteString, Bytes};
+use ntex_bytes::{BytePages, ByteString, Bytes};
 use ntex_http::{HeaderMap, HeaderName, HeaderValue};
 
 mod error;
@@ -19,19 +19,19 @@ pub struct ServerRequest {
 
 #[derive(Debug)]
 pub struct ServerResponse {
-    pub payload: Bytes,
+    pub payload: BytePages,
     pub headers: Vec<(HeaderName, HeaderValue)>,
 }
 
 impl ServerResponse {
     #[inline]
-    pub fn new(payload: Bytes) -> ServerResponse {
+    pub fn new(payload: BytePages) -> ServerResponse {
         ServerResponse::with_headers(payload, Vec::new())
     }
 
     #[inline]
     pub fn with_headers(
-        payload: Bytes,
+        payload: BytePages,
         headers: Vec<(HeaderName, HeaderValue)>,
     ) -> ServerResponse {
         ServerResponse { payload, headers }

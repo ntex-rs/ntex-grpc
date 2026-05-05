@@ -11,3 +11,5 @@ resolver = "3"
 
 [patch.crates-io]
 ntex-grpc = { path = "./ntex-grpc" }
+ntex-grpc-derive = { path = "./ntex-grpc-derive" }
+ntex-prost-build = { path = "./prost-build" }

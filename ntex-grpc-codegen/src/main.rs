@@ -36,6 +36,10 @@ struct Args {
     /// Path to rustfmt configuration file
     #[clap(short, long, value_parser, name = "RUSTFMT-PATH")]
     rustfmt_path: Option<path::PathBuf>,
+
+    /// Generate google types
+    #[clap(short, long, value_parser, name = "WELL-KNOWN-TYPES")]
+    well_known_types: bool,
 }
 
 fn main() -> io::Result<()> {
@@ -46,6 +50,10 @@ fn main() -> io::Result<()> {
 
     if let Some(out_dir) = args.out_dir.clone() {
         cfg.out_dir(out_dir);
+    }
+
+    if args.well_known_types {
+        cfg.compile_well_known_types();
     }
 
     for map in args.map {
@@ -74,7 +82,7 @@ fn main() -> io::Result<()> {
             args.proto
         );
 
-        let mut fmt_args = vec!["--edition", "2021"];
+        let mut fmt_args = vec!["--edition", "2024"];
 
         let rustfmt_path = args.rustfmt_path.map(|s| s.to_string_lossy().to_string());
         if let Some(ref cfg_path) = rustfmt_path {

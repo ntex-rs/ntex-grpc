@@ -3,9 +3,15 @@
     unused_mut,
     unused_variables,
     clippy::identity_op,
+    clippy::too_many_lines,
     clippy::derivable_impls,
     clippy::unit_arg,
-    clippy::derive_partial_eq_without_eq
+    clippy::derive_partial_eq_without_eq,
+    clippy::manual_range_patterns,
+    clippy::default_trait_access,
+    clippy::semicolon_if_nothing_returned,
+    clippy::doc_markdown,
+    clippy::wildcard_imports
 )]
 //! DO NOT MODIFY. Auto-generated file
 
@@ -84,12 +90,12 @@ pub struct Duration {
     pub nanos: i32,
 }
 
-mod _priv_impl {
+mod _priv_impl_duration {
     use super::*;
 
     impl crate::Message for Duration {
         #[inline]
-        fn write(&self, dst: &mut crate::BytesMut) {
+        fn write(&self, dst: &mut crate::BytePages) {
             crate::NativeType::serialize(
                 &self.seconds,
                 1,

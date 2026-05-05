@@ -135,7 +135,7 @@ impl ExternPaths {
                                 to_snake(segment)
                             }
                         })
-                        .chain(ident_type.into_iter())
+                        .chain(ident_type)
                         .join("::"),
                 );
             }

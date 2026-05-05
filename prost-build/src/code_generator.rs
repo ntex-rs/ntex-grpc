@@ -296,7 +296,7 @@ impl CodeGenerator<'_> {
         // message impl =============================
         self.priv_buf.push_str(&format!(
             "#[inline]
-              fn write(&self, dst: &mut ::ntex_grpc::BytesMut) {{
+              fn write(&self, dst: &mut ::ntex_grpc::BytePages) {{
                 {write}
              }}\n\n"
         ));
@@ -574,7 +574,7 @@ impl CodeGenerator<'_> {
                 panic!(\"Not supported\")
             }}
 
-            fn encode_value(&self, _: &mut ::ntex_grpc::BytesMut) {{
+            fn encode_value(&self, _: &mut ::ntex_grpc::BytePages) {{
                 panic!(\"Not supported\")
             }}
         "));
@@ -583,7 +583,7 @@ impl CodeGenerator<'_> {
             "
             #[inline]
             /// Encodes the message to a buffer.
-            fn serialize(&self, _: u32, _: ::ntex_grpc::types::DefaultValue<&Self>, dst: &mut ::ntex_grpc::BytesMut) {{
+            fn serialize(&self, _: u32, _: ::ntex_grpc::types::DefaultValue<&Self>, dst: &mut ::ntex_grpc::BytePages) {{
                 match *self {{ {write} }}
             }}\n",
         ));
@@ -821,7 +821,7 @@ impl CodeGenerator<'_> {
                  }}
 
                  #[inline]
-                 fn encode_value(&self, dst: &mut ::ntex_grpc::BytesMut) {{
+                 fn encode_value(&self, dst: &mut ::ntex_grpc::BytePages) {{
                     ::ntex_grpc::encoding::encode_varint(*self as i32 as u64, dst);
                  }}
 

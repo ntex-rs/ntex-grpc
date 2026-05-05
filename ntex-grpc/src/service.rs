@@ -1,4 +1,4 @@
-use ntex_bytes::{ByteString, Bytes, BytesMut};
+use ntex_bytes::{BytePages, ByteString, Bytes};
 
 use crate::{encoding::DecodeError, server::MethodResult, types::Message};
 
@@ -27,7 +27,7 @@ pub trait MethodDef {
     }
 
     #[inline]
-    fn encode(&self, val: Self::Output, buf: &mut BytesMut) {
+    fn encode(&self, val: Self::Output, buf: &mut BytePages) {
         val.write(buf);
     }
 

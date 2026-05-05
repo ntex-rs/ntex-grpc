@@ -5,7 +5,7 @@
 )]
 use std::{collections::HashMap, convert::TryFrom, fmt, hash::BuildHasher, hash::Hash, mem};
 
-use ntex_bytes::{Buf, BufMut, ByteString, Bytes, BytesMut};
+use ntex_bytes::{Buf, BufMut, BytePages, ByteString, Bytes};
 
 pub use crate::encoding::WireType;
 use crate::encoding::{self, DecodeError};
@@ -16,7 +16,7 @@ pub trait Message: Default + Sized + fmt::Debug {
     fn read(src: &mut Bytes) -> Result<Self, DecodeError>;
 
     /// Encodes and writes the message to a buffer
-    fn write(&self, dst: &mut BytesMut);
+    fn write(&self, dst: &mut BytePages);
 
     /// Returns the encoded length of the message with a length delimiter
     fn encoded_len(&self) -> usize;
@@ -48,11 +48,11 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
     }
 
     /// Encode field value
-    fn encode_value(&self, dst: &mut BytesMut);
+    fn encode_value(&self, dst: &mut BytePages);
 
     #[inline]
     /// Encode field tag and length
-    fn encode_type(&self, tag: u32, dst: &mut BytesMut) {
+    fn encode_type(&self, tag: u32, dst: &mut BytePages) {
         encoding::encode_key(tag, Self::TYPE, dst);
         if !matches!(Self::TYPE, WireType::Varint | WireType::SixtyFourBit) {
             encoding::encode_varint(self.value_len() as u64, dst);
@@ -68,7 +68,7 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
 
     #[inline]
     /// Serialize protobuf field
-    fn serialize(&self, tag: u32, default: DefaultValue<&Self>, dst: &mut BytesMut) {
+    fn serialize(&self, tag: u32, default: DefaultValue<&Self>, dst: &mut BytePages) {
         let default = match default {
             DefaultValue::Unknown => false,
             DefaultValue::Default => self.is_default(),
@@ -136,10 +136,12 @@ impl Message for () {
     fn encoded_len(&self) -> usize {
         0
     }
+
     fn read(_: &mut Bytes) -> Result<Self, DecodeError> {
         Ok(())
     }
-    fn write(&self, _: &mut BytesMut) {}
+
+    fn write(&self, _: &mut BytePages) {}
 }
 
 impl<T: Message + PartialEq> NativeType for T {
@@ -151,7 +153,7 @@ impl<T: Message + PartialEq> NativeType for T {
 
     #[inline]
     /// Encode message to the buffer
-    fn encode_value(&self, dst: &mut BytesMut) {
+    fn encode_value(&self, dst: &mut BytePages) {
         self.write(dst);
     }
 
@@ -172,8 +174,8 @@ impl NativeType for Bytes {
 
     #[inline]
     /// Serialize field value
-    fn encode_value(&self, dst: &mut BytesMut) {
-        dst.extend_from_slice(self);
+    fn encode_value(&self, dst: &mut BytePages) {
+        dst.append(self.clone());
     }
 
     #[inline]
@@ -210,7 +212,7 @@ impl NativeType for String {
     }
 
     #[inline]
-    fn encode_value(&self, dst: &mut BytesMut) {
+    fn encode_value(&self, dst: &mut BytePages) {
         dst.extend_from_slice(self.as_bytes());
     }
 
@@ -241,8 +243,8 @@ impl NativeType for ByteString {
     }
 
     #[inline]
-    fn encode_value(&self, dst: &mut BytesMut) {
-        dst.extend_from_slice(self.as_bytes());
+    fn encode_value(&self, dst: &mut BytePages) {
+        dst.append(self.as_bytes());
     }
 
     #[inline]
@@ -261,7 +263,7 @@ impl<T: NativeType> NativeType for Option<T> {
 
     #[inline]
     /// Serialize field value
-    fn encode_value(&self, _: &mut BytesMut) {}
+    fn encode_value(&self, _: &mut BytePages) {}
 
     #[inline]
     /// Deserialize from the input
@@ -287,7 +289,7 @@ impl<T: NativeType> NativeType for Option<T> {
 
     #[inline]
     /// Serialize protobuf field
-    fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytesMut) {
+    fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytePages) {
         if let Some(value) = self {
             value.serialize(tag, DefaultValue::Unknown, dst);
         }
@@ -320,7 +322,7 @@ impl NativeType for Vec<u8> {
 
     #[inline]
     /// Serialize field value
-    fn encode_value(&self, dst: &mut BytesMut) {
+    fn encode_value(&self, dst: &mut BytePages) {
         dst.extend_from_slice(self.as_slice());
     }
 
@@ -342,7 +344,7 @@ impl<T: NativeType> NativeType for Vec<T> {
 
     #[inline]
     /// Serialize field value
-    fn encode_value(&self, _: &mut BytesMut) {}
+    fn encode_value(&self, _: &mut BytePages) {}
 
     #[inline]
     /// Deserialize from the input
@@ -376,7 +378,7 @@ impl<T: NativeType> NativeType for Vec<T> {
     }
 
     /// Serialize protobuf field
-    fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytesMut) {
+    fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytePages) {
         if self.is_empty() {
             return;
         }
@@ -427,7 +429,7 @@ impl<K: NativeType + Eq + Hash, V: NativeType, S: BuildHasher + Default> NativeT
 
     #[inline]
     /// Serialize field value
-    fn encode_value(&self, _: &mut BytesMut) {}
+    fn encode_value(&self, _: &mut BytePages) {}
 
     #[inline]
     fn is_default(&self) -> bool {
@@ -467,7 +469,7 @@ impl<K: NativeType + Eq + Hash, V: NativeType, S: BuildHasher + Default> NativeT
     }
 
     /// Serialize protobuf field
-    fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytesMut) {
+    fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytePages) {
         let key_default = K::default();
         let val_default = V::default();
 
@@ -530,7 +532,7 @@ macro_rules! varint {
             }
 
             #[inline]
-            fn encode_value(&$slf, dst: &mut BytesMut) {
+            fn encode_value(&$slf, dst: &mut BytePages) {
                 encoding::encode_varint($to_uint64, dst);
             }
 
@@ -579,7 +581,7 @@ macro_rules! fixed_width {
             }
 
             #[inline]
-            fn encode_value(&self, dst: &mut BytesMut) {
+            fn encode_value(&self, dst: &mut BytePages) {
                 $put(dst, *self);
             }
 
@@ -635,7 +637,7 @@ mod tests {
     }
 
     impl Message for TestMessage {
-        fn write(&self, dst: &mut BytesMut) {
+        fn write(&self, dst: &mut BytePages) {
             NativeType::serialize(&self.f, 1, DefaultValue::Default, dst);
             NativeType::serialize(&self.props, 2, DefaultValue::Default, dst);
             NativeType::serialize(&self.b, 3, DefaultValue::Default, dst);
@@ -679,12 +681,12 @@ mod tests {
         msg.props.insert("test2".to_string(), 0);
         msg.props.insert("".to_string(), 0);
 
-        let mut buf = BytesMut::new();
+        let mut buf = BytePages::default();
         msg.write(&mut buf);
         assert_eq!(Message::encoded_len(&msg), 33);
         assert_eq!(buf.len(), 33);
 
-        let mut buf2 = BytesMut::new();
+        let mut buf2 = BytePages::default();
         msg.serialize(1, DefaultValue::Default, &mut buf2);
         assert_eq!(NativeType::encoded_len(&msg, 1), 35);
         assert_eq!(buf2.len(), 35);

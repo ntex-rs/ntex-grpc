@@ -1,6 +1,6 @@
 use std::{convert::TryFrom, str::FromStr};
 
-use ntex_bytes::{Buf, BufMut, BytesMut};
+use ntex_bytes::{Buf, BufMut, BytePages};
 use ntex_error::Error;
 use ntex_h2::{self as h2};
 use ntex_http::{HeaderMap, Method, header};
@@ -49,7 +49,7 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
         ctx: RequestContext,
     ) -> Result<Response<T>, Self::Error> {
         let len = val.encoded_len();
-        let mut buf = BytesMut::with_capacity(len + 5);
+        let mut buf = BytePages::default();
         buf.put_u8(0); // compression
         buf.put_u32(len as u32); // length
         val.write(&mut buf);
@@ -74,7 +74,7 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
             snd_stream.disconnect_on_drop();
         }
         snd_stream
-            .send_payload(buf.freeze(), true)
+            .send_pages(buf, true)
             .await
             .map_err(|e| e.map(ClientError::from))?;
 
@@ -102,19 +102,17 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
                                 Some(Ok(GrpcStatus::DeadlineExceeded)) => {
                                     return Err(Error::from(ClientError::DeadlineExceeded(hdrs)));
                                 }
-                                Some(Ok(status)) => {
-                                    if status != GrpcStatus::Ok {
-                                        return Err(Error::from(ClientError::GrpcStatus(
-                                            status, headers,
-                                        )));
-                                    }
+                                Some(Ok(status)) if status != GrpcStatus::Ok => {
+                                    return Err(Error::from(ClientError::GrpcStatus(
+                                        status, headers,
+                                    )));
                                 }
                                 Some(Err(())) => {
                                     return Err(Error::from(ClientError::Decode(
                                         DecodeError::new("Cannot parse grpc status"),
                                     )));
                                 }
-                                None => {}
+                                Some(Ok(_)) | None => {}
                             }
 
                             return Err(Error::from(ClientError::UnexpectedEof(

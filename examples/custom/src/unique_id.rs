@@ -1,4 +1,4 @@
-use ntex::util::{Bytes, BytesMut};
+use ntex::util::{BytePages, Bytes};
 use uuid::Uuid;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -44,7 +44,7 @@ impl ntex_grpc::NativeType for UniqueId {
     }
 
     #[inline]
-    fn encode_value(&self, dst: &mut BytesMut) {
+    fn encode_value(&self, dst: &mut BytePages) {
         dst.extend_from_slice(self.0.as_bytes())
     }
 

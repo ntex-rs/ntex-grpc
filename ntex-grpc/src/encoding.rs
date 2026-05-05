@@ -2,7 +2,7 @@
 /// cloned from `<https://github.com/hyperium/tonic/>`
 use std::{borrow::Cow, cmp::min, convert::TryFrom, fmt, rc::Rc};
 
-use ntex_bytes::{Buf, BufMut, Bytes, BytesMut};
+use ntex_bytes::{Buf, BufMut, BytePages, Bytes};
 
 pub const MIN_TAG: u32 = 1;
 pub const MAX_TAG: u32 = (1 << 29) - 1;
@@ -49,7 +49,7 @@ pub fn encoded_len_varint(value: u64) -> usize {
 /// Encodes an integer value into LEB128 variable length format, and writes it to the buffer.
 /// The buffer must have enough remaining space (maximum 10 bytes).
 #[inline]
-pub fn encode_varint(mut value: u64, buf: &mut BytesMut) {
+pub fn encode_varint(mut value: u64, buf: &mut BytePages) {
     loop {
         if value < 0x80 {
             buf.put_u8(value as u8);
@@ -63,8 +63,8 @@ pub fn encode_varint(mut value: u64, buf: &mut BytesMut) {
 /// Decodes a LEB128-encoded variable length integer from the buffer.
 #[inline]
 pub fn decode_varint(buf: &mut Bytes) -> Result<u64, DecodeError> {
-    let bytes = buf.chunk();
-    let len = bytes.len();
+    let bytes = buf.as_ref();
+    let len = buf.len();
     if len == 0 {
         return Err(DecodeError::new("invalid varint"));
     }
@@ -182,10 +182,7 @@ fn decode_varint_slice(bytes: &[u8]) -> Result<(u64, usize), DecodeError> {
 /// [1]: https://github.com/protocolbuffers/protobuf-go/blob/v1.27.1/encoding/protowire/wire.go#L358
 #[inline(never)]
 #[cold]
-fn decode_varint_slow<B>(buf: &mut B) -> Result<u64, DecodeError>
-where
-    B: Buf,
-{
+fn decode_varint_slow(buf: &mut Bytes) -> Result<u64, DecodeError> {
     let mut value = 0;
     for count in 0..min(10, buf.remaining()) {
         let byte = buf.get_u8();
@@ -207,7 +204,7 @@ where
 /// Encodes a Protobuf field key, which consists of a wire type designator and
 /// the field tag.
 #[inline]
-pub fn encode_key(tag: u32, wire_type: WireType, buf: &mut BytesMut) {
+pub fn encode_key(tag: u32, wire_type: WireType, buf: &mut BytePages) {
     debug_assert!((MIN_TAG..=MAX_TAG).contains(&tag));
     let key = (tag << 3) | wire_type as u32;
     encode_varint(u64::from(key), buf);

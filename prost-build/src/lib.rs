@@ -773,14 +773,20 @@ impl Config {
                 )
             })
             .collect::<HashMap<Module, String>>();
+        //self.default_package_filename
 
         let modules = self.generate(requests)?;
+
         for (module, content) in &modules {
-            let file_name = file_names
+            let mut file_name = file_names
                 .get(module)
                 .expect("every module should have a filename");
             if file_name == "google.protobuf.rs" || file_name == "google_protobuf.rs" {
-                continue;
+                if self.prost_types {
+                    continue;
+                } else {
+                    file_name = &self.default_package_filename;
+                }
             }
             let output_path = target.join(file_name);
             let previous_content = fs::read(&output_path);

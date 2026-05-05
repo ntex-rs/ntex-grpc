@@ -3,29 +3,35 @@
     unused_mut,
     unused_variables,
     clippy::identity_op,
+    clippy::too_many_lines,
     clippy::derivable_impls,
     clippy::unit_arg,
-    clippy::derive_partial_eq_without_eq
+    clippy::derive_partial_eq_without_eq,
+    clippy::manual_range_patterns,
+    clippy::default_trait_access,
+    clippy::semicolon_if_nothing_returned,
+    clippy::doc_markdown,
+    clippy::wildcard_imports
 )]
 //! DO NOT MODIFY. Auto-generated file
 
-// ///  Wrapper message for `double`.
-// ///
-// ///  The JSON representation for `DoubleValue` is JSON number.
-// #[derive(Clone, PartialEq, Debug)]
-// pub struct DoubleValue {
-//     ///  The double value.
-//     pub value: f64,
-// }
+///  Wrapper message for `double`.
+///
+///  The JSON representation for `DoubleValue` is JSON number.
+#[derive(Clone, PartialEq, Debug)]
+pub struct DoubleValue {
+    ///  The double value.
+    pub value: f64,
+}
 
-// ///  Wrapper message for `float`.
-// ///
-// ///  The JSON representation for `FloatValue` is JSON number.
-// #[derive(Clone, PartialEq, Debug)]
-// pub struct FloatValue {
-//     ///  The float value.
-//     pub value: f32,
-// }
+///  Wrapper message for `float`.
+///
+///  The JSON representation for `FloatValue` is JSON number.
+#[derive(Clone, PartialEq, Debug)]
+pub struct FloatValue {
+    ///  The float value.
+    pub value: f32,
+}
 
 ///  Wrapper message for `int64`.
 ///
@@ -90,92 +96,92 @@ pub struct BytesValue {
     pub value: crate::Bytes,
 }
 
-mod _priv_impl {
+mod _priv_impl_wrappers {
     use super::*;
 
-    // impl crate::Message for DoubleValue {
-    //     #[inline]
-    //     fn write(&self, dst: &mut crate::BytesMut) {
-    //         crate::NativeType::serialize(&self.value, 1, crate::types::DefaultValue::Default, dst);
-    //     }
+    impl crate::Message for DoubleValue {
+        #[inline]
+        fn write(&self, dst: &mut crate::BytePages) {
+            crate::NativeType::serialize(&self.value, 1, crate::types::DefaultValue::Default, dst);
+        }
 
-    //     #[inline]
-    //     fn read(src: &mut crate::Bytes) -> ::std::result::Result<Self, crate::DecodeError> {
-    //         const STRUCT_NAME: &str = "DoubleValue";
-    //         let mut msg = Self::default();
-    //         while !src.is_empty() {
-    //             let (tag, wire_type) = crate::encoding::decode_key(src)?;
-    //             match tag {
-    //                 1 => crate::NativeType::deserialize(&mut msg.value, tag, wire_type, src)
-    //                     .map_err(|err| err.push(STRUCT_NAME, "value"))?,
-    //                 _ => crate::encoding::skip_field(wire_type, tag, src)?,
-    //             }
-    //         }
-    //         Ok(msg)
-    //     }
+        #[inline]
+        fn read(src: &mut crate::Bytes) -> ::std::result::Result<Self, crate::DecodeError> {
+            const STRUCT_NAME: &str = "DoubleValue";
+            let mut msg = Self::default();
+            while !src.is_empty() {
+                let (tag, wire_type) = crate::encoding::decode_key(src)?;
+                match tag {
+                    1 => crate::NativeType::deserialize(&mut msg.value, tag, wire_type, src)
+                        .map_err(|err| err.push(STRUCT_NAME, "value"))?,
+                    _ => crate::encoding::skip_field(wire_type, tag, src)?,
+                }
+            }
+            Ok(msg)
+        }
 
-    //     #[inline]
-    //     fn encoded_len(&self) -> usize {
-    //         0 + crate::NativeType::serialized_len(
-    //             &self.value,
-    //             1,
-    //             crate::types::DefaultValue::Default,
-    //         )
-    //     }
-    // }
+        #[inline]
+        fn encoded_len(&self) -> usize {
+            0 + crate::NativeType::serialized_len(
+                &self.value,
+                1,
+                crate::types::DefaultValue::Default,
+            )
+        }
+    }
 
-    // impl ::std::default::Default for DoubleValue {
-    //     #[inline]
-    //     fn default() -> Self {
-    //         Self {
-    //             value: ::core::default::Default::default(),
-    //         }
-    //     }
-    // }
+    impl ::std::default::Default for DoubleValue {
+        #[inline]
+        fn default() -> Self {
+            Self {
+                value: ::core::default::Default::default(),
+            }
+        }
+    }
 
-    // impl crate::Message for FloatValue {
-    //     #[inline]
-    //     fn write(&self, dst: &mut crate::BytesMut) {
-    //         crate::NativeType::serialize(&self.value, 1, crate::types::DefaultValue::Default, dst);
-    //     }
+    impl crate::Message for FloatValue {
+        #[inline]
+        fn write(&self, dst: &mut crate::BytePages) {
+            crate::NativeType::serialize(&self.value, 1, crate::types::DefaultValue::Default, dst);
+        }
 
-    //     #[inline]
-    //     fn read(src: &mut crate::Bytes) -> ::std::result::Result<Self, crate::DecodeError> {
-    //         const STRUCT_NAME: &str = "FloatValue";
-    //         let mut msg = Self::default();
-    //         while !src.is_empty() {
-    //             let (tag, wire_type) = crate::encoding::decode_key(src)?;
-    //             match tag {
-    //                 1 => crate::NativeType::deserialize(&mut msg.value, tag, wire_type, src)
-    //                     .map_err(|err| err.push(STRUCT_NAME, "value"))?,
-    //                 _ => crate::encoding::skip_field(wire_type, tag, src)?,
-    //             }
-    //         }
-    //         Ok(msg)
-    //     }
+        #[inline]
+        fn read(src: &mut crate::Bytes) -> ::std::result::Result<Self, crate::DecodeError> {
+            const STRUCT_NAME: &str = "FloatValue";
+            let mut msg = Self::default();
+            while !src.is_empty() {
+                let (tag, wire_type) = crate::encoding::decode_key(src)?;
+                match tag {
+                    1 => crate::NativeType::deserialize(&mut msg.value, tag, wire_type, src)
+                        .map_err(|err| err.push(STRUCT_NAME, "value"))?,
+                    _ => crate::encoding::skip_field(wire_type, tag, src)?,
+                }
+            }
+            Ok(msg)
+        }
 
-    //     #[inline]
-    //     fn encoded_len(&self) -> usize {
-    //         0 + crate::NativeType::serialized_len(
-    //             &self.value,
-    //             1,
-    //             crate::types::DefaultValue::Default,
-    //         )
-    //     }
-    // }
+        #[inline]
+        fn encoded_len(&self) -> usize {
+            0 + crate::NativeType::serialized_len(
+                &self.value,
+                1,
+                crate::types::DefaultValue::Default,
+            )
+        }
+    }
 
-    // impl ::std::default::Default for FloatValue {
-    //     #[inline]
-    //     fn default() -> Self {
-    //         Self {
-    //             value: ::core::default::Default::default(),
-    //         }
-    //     }
-    // }
+    impl ::std::default::Default for FloatValue {
+        #[inline]
+        fn default() -> Self {
+            Self {
+                value: ::core::default::Default::default(),
+            }
+        }
+    }
 
     impl crate::Message for Int64Value {
         #[inline]
-        fn write(&self, dst: &mut crate::BytesMut) {
+        fn write(&self, dst: &mut crate::BytePages) {
             crate::NativeType::serialize(&self.value, 1, crate::types::DefaultValue::Default, dst);
         }
 
@@ -215,7 +221,7 @@ mod _priv_impl {
 
     impl crate::Message for UInt64Value {
         #[inline]
-        fn write(&self, dst: &mut crate::BytesMut) {
+        fn write(&self, dst: &mut crate::BytePages) {
             crate::NativeType::serialize(&self.value, 1, crate::types::DefaultValue::Default, dst);
         }
 
@@ -255,7 +261,7 @@ mod _priv_impl {
 
     impl crate::Message for Int32Value {
         #[inline]
-        fn write(&self, dst: &mut crate::BytesMut) {
+        fn write(&self, dst: &mut crate::BytePages) {
             crate::NativeType::serialize(&self.value, 1, crate::types::DefaultValue::Default, dst);
         }
 
@@ -295,7 +301,7 @@ mod _priv_impl {
 
     impl crate::Message for UInt32Value {
         #[inline]
-        fn write(&self, dst: &mut crate::BytesMut) {
+        fn write(&self, dst: &mut crate::BytePages) {
             crate::NativeType::serialize(&self.value, 1, crate::types::DefaultValue::Default, dst);
         }
 
@@ -335,7 +341,7 @@ mod _priv_impl {
 
     impl crate::Message for BoolValue {
         #[inline]
-        fn write(&self, dst: &mut crate::BytesMut) {
+        fn write(&self, dst: &mut crate::BytePages) {
             crate::NativeType::serialize(&self.value, 1, crate::types::DefaultValue::Default, dst);
         }
 
@@ -375,7 +381,7 @@ mod _priv_impl {
 
     impl crate::Message for StringValue {
         #[inline]
-        fn write(&self, dst: &mut crate::BytesMut) {
+        fn write(&self, dst: &mut crate::BytePages) {
             crate::NativeType::serialize(&self.value, 1, crate::types::DefaultValue::Default, dst);
         }
 
@@ -415,7 +421,7 @@ mod _priv_impl {
 
     impl crate::Message for BytesValue {
         #[inline]
-        fn write(&self, dst: &mut crate::BytesMut) {
+        fn write(&self, dst: &mut crate::BytePages) {
             crate::NativeType::serialize(&self.value, 1, crate::types::DefaultValue::Default, dst);
         }
 

@@ -50,10 +50,10 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
                 let res = method.server_result(result);
                 let response = ::ntex_grpc::server::Response::from(res);
-                let mut buf = ::ntex_grpc::BytesMut::new();
+                let mut buf = ::ntex_grpc::BytePages::default();
                 method.encode(response.message, &mut buf);
 
-                Ok(::ntex_grpc::server::ServerResponse::with_headers(buf.freeze(), response.headers))
+                Ok(::ntex_grpc::server::ServerResponse::with_headers(buf, response.headers))
             }
         });
     }

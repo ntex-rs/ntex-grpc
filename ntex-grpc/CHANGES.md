@@ -1,5 +1,9 @@
 # Changes
 
+## [2.1.0] - 2026-05-15
+
+* Add NativeType impl for Arc<str>
+
 ## [2.0.0] - 2026-05-05
 
 * Use new codec api with BytePages support

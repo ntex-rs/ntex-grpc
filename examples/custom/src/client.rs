@@ -23,6 +23,7 @@ async fn main() {
             name: "world".into(),
             msg_id: unique_id::UniqueId::new(),
         })
+        .send()
         .await
         .unwrap();
 

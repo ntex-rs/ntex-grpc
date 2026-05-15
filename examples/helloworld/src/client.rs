@@ -61,6 +61,7 @@ fn main() {
                                     data1: vec![-234234234, 123412414, 45456],
                                     data2: vec![helloworld::DocumentType::Namespace],
                                 })
+                                .send()
                                 .await
                                 .unwrap();
                             cnt.register_request();
@@ -75,6 +76,7 @@ fn main() {
                             data1: vec![-234234234, 123412414, 45456],
                             data2: vec![helloworld::DocumentType::Namespace],
                         })
+                        .send()
                         .await
                         .unwrap();
                     counters.register_request();

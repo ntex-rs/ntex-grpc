@@ -1,8 +1,6 @@
-use std::task::{Context, Poll};
-use std::{cell::Cell, convert::TryFrom, fmt, future::Future, mem, ops, pin::Pin, rc::Rc, time};
+use std::{cell::Cell, convert::TryFrom, fmt, ops, rc::Rc, time};
 
 use ntex_http::{HeaderMap, HeaderName, HeaderValue, error::Error as HttpError};
-use ntex_util::future::BoxFuture;
 
 use crate::{client::Transport, consts, service::MethodDef};
 
@@ -121,31 +119,15 @@ fn ctx(slf: &mut RequestContext) -> Option<&mut RequestContextInner> {
     }
 }
 
-pin_project_lite::pin_project! {
-    pub struct Request<'a, T, M>
-    where T: Transport<M>,
-          T: 'a,
-          M: MethodDef
-    {
-        transport: &'a T,
-        #[pin]
-        state: State<'a, T, M>,
-    }
-}
-
-enum State<'a, T, M>
+pub struct Request<'a, T, M>
 where
-    T: Transport<M> + 'a,
+    T: Transport<M>,
+    T: 'a,
     M: MethodDef,
 {
-    Call {
-        fut: BoxFuture<'a, Result<Response<M>, T::Error>>,
-    },
-    Request {
-        input: &'a M::Input,
-        ctx: Option<RequestContext>,
-    },
-    None,
+    input: &'a M::Input,
+    transport: &'a T,
+    ctx: RequestContext,
 }
 
 impl<'a, T, M> Request<'a, T, M>
@@ -155,11 +137,9 @@ where
 {
     pub fn new(transport: &'a T, input: &'a M::Input) -> Self {
         Self {
+            input,
             transport,
-            state: State::Request {
-                input,
-                ctx: Some(RequestContext::new()),
-            },
+            ctx: RequestContext::new(),
         }
     }
 
@@ -182,9 +162,7 @@ where
         <HeaderName as TryFrom<K>>::Error: Into<HttpError>,
         <HeaderValue as TryFrom<V>>::Error: Into<HttpError>,
     {
-        if let Some(ctx) = parts(&mut self.state) {
-            ctx.header(key, value);
-        }
+        self.ctx.header(key, value);
         self
     }
 
@@ -198,12 +176,22 @@ where
     where
         time::Duration: From<U>,
     {
-        if let Some(ctx) = parts(&mut self.state) {
-            let to = timeout.into();
-            ctx.0.timeout.set(Some(to));
-            ctx.header(consts::GRPC_TIMEOUT, duration_to_grpc_timeout(to));
-        }
+        let to = timeout.into();
+        self.ctx.0.timeout.set(Some(to));
+        self.ctx
+            .header(consts::GRPC_TIMEOUT, duration_to_grpc_timeout(to));
         self
+    }
+
+    /// Send request
+    pub async fn send(self) -> Result<Response<M>, T::Error> {
+        let Request {
+            input,
+            transport,
+            ctx,
+        } = self;
+
+        transport.request(input, &ctx).await
     }
 }
 
@@ -239,41 +227,6 @@ fn duration_to_grpc_timeout(duration: time::Duration) -> String {
         })
         // duration has to be more than 11_415 years for this to happen
         .expect("duration is unrealistically large")
-}
-
-#[inline]
-fn parts<'a, 'b, T: Transport<M> + 'a, M: MethodDef>(
-    parts: &'b mut State<'a, T, M>,
-) -> Option<&'b mut RequestContext> {
-    if let State::Request { ctx, .. } = parts {
-        ctx.as_mut()
-    } else {
-        None
-    }
-}
-
-impl<'a, T, M: 'a> Future for Request<'a, T, M>
-where
-    T: Transport<M>,
-    M: MethodDef,
-{
-    type Output = Result<Response<M>, T::Error>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        loop {
-            if let State::Call { ref mut fut } = self.state {
-                return Pin::new(fut).poll(cx);
-            }
-
-            if let State::Request { input, ref mut ctx } =
-                mem::replace(&mut self.state, State::None)
-            {
-                self.state = State::Call {
-                    fut: Box::pin(self.transport.request(input, ctx.take().unwrap())),
-                };
-            }
-        }
-    }
 }
 
 pub struct Response<T: MethodDef> {

@@ -1,5 +1,9 @@
 # Changes
 
+## [2.2.0] - 2026-05-15
+
+* Simplify send request process
+
 ## [2.1.0] - 2026-05-15
 
 * Add NativeType impl for Arc<str>

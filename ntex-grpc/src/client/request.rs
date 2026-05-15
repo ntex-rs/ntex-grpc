@@ -1,10 +1,16 @@
-use std::{cell::Cell, convert::TryFrom, fmt, ops, rc::Rc, time};
+use std::{convert::TryFrom, fmt, ops, time};
 
 use ntex_http::{HeaderMap, HeaderName, HeaderValue, error::Error as HttpError};
 
 use crate::{client::Transport, consts, service::MethodDef};
 
-pub struct RequestContext(Rc<RequestContextInner>);
+#[derive(Debug)]
+pub struct RequestContext {
+    err: Option<HttpError>,
+    headers: Vec<(HeaderName, HeaderValue)>,
+    timeout: Option<time::Duration>,
+    flags: Flags,
+}
 
 bitflags::bitflags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -13,27 +19,20 @@ bitflags::bitflags! {
     }
 }
 
-struct RequestContextInner {
-    err: Option<HttpError>,
-    headers: Vec<(HeaderName, HeaderValue)>,
-    timeout: Cell<Option<time::Duration>>,
-    flags: Cell<Flags>,
-}
-
 impl RequestContext {
     /// Create new `RequestContext` instance
     fn new() -> Self {
-        Self(Rc::new(RequestContextInner {
+        Self {
             err: None,
             headers: Vec::new(),
-            timeout: Cell::new(None),
-            flags: Cell::new(Flags::empty()),
-        }))
+            timeout: None,
+            flags: Flags::empty(),
+        }
     }
 
     /// Get request timeout
     pub fn get_timeout(&self) -> Option<time::Duration> {
-        self.0.timeout.get()
+        self.timeout
     }
 
     /// Set the max duration the request is allowed to take.
@@ -47,16 +46,14 @@ impl RequestContext {
         time::Duration: From<U>,
     {
         let to = timeout.into();
-        self.0.timeout.set(Some(to));
+        self.timeout = Some(to);
         self.header(consts::GRPC_TIMEOUT, duration_to_grpc_timeout(to));
         self
     }
 
     /// Disconnect connection on request drop
     pub fn disconnect_on_drop(&mut self) -> &mut Self {
-        let mut flags = self.0.flags.get();
-        flags.insert(Flags::DISCONNECT_ON_DROP);
-        self.0.flags.set(flags);
+        self.flags.insert(Flags::DISCONNECT_ON_DROP);
         self
     }
 
@@ -68,30 +65,22 @@ impl RequestContext {
         <HeaderName as TryFrom<K>>::Error: Into<HttpError>,
         <HeaderValue as TryFrom<V>>::Error: Into<HttpError>,
     {
-        if let Some(ctx) = ctx(self) {
-            match HeaderName::try_from(key) {
-                Ok(key) => match HeaderValue::try_from(value) {
-                    Ok(value) => ctx.headers.push((key, value)),
-                    Err(e) => ctx.err = Some(log_error(e)),
-                },
-                Err(e) => ctx.err = Some(log_error(e)),
-            }
+        match HeaderName::try_from(key) {
+            Ok(key) => match HeaderValue::try_from(value) {
+                Ok(value) => self.headers.push((key, value)),
+                Err(e) => self.err = Some(log_error(e)),
+            },
+            Err(e) => self.err = Some(log_error(e)),
         }
         self
     }
 
     pub(crate) fn headers(&self) -> &[(HeaderName, HeaderValue)] {
-        &self.0.headers
+        &self.headers
     }
 
     pub(crate) fn get_disconnect_on_drop(&self) -> bool {
-        self.0.flags.get().contains(Flags::DISCONNECT_ON_DROP)
-    }
-}
-
-impl Clone for RequestContext {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
+        self.flags.contains(Flags::DISCONNECT_ON_DROP)
     }
 }
 
@@ -99,24 +88,6 @@ fn log_error<T: Into<HttpError>>(err: T) -> HttpError {
     let e = err.into();
     log::error!("Error in Grpc Request {e}");
     e
-}
-
-fn ctx(slf: &mut RequestContext) -> Option<&mut RequestContextInner> {
-    if slf.0.err.is_some() {
-        return None;
-    }
-
-    if Rc::get_mut(&mut slf.0).is_some() {
-        Rc::get_mut(&mut slf.0)
-    } else {
-        slf.0 = Rc::new(RequestContextInner {
-            err: None,
-            headers: slf.0.headers.clone(),
-            timeout: slf.0.timeout.clone(),
-            flags: slf.0.flags.clone(),
-        });
-        Some(Rc::get_mut(&mut slf.0).unwrap())
-    }
 }
 
 pub struct Request<'a, T, M>
@@ -177,7 +148,7 @@ where
         time::Duration: From<U>,
     {
         let to = timeout.into();
-        self.ctx.0.timeout.set(Some(to));
+        self.ctx.timeout = Some(to);
         self.ctx
             .header(consts::GRPC_TIMEOUT, duration_to_grpc_timeout(to));
         self
@@ -188,10 +159,10 @@ where
         let Request {
             input,
             transport,
-            ctx,
+            mut ctx,
         } = self;
 
-        transport.request(input, &ctx).await
+        transport.request(input, &mut ctx).await
     }
 }
 

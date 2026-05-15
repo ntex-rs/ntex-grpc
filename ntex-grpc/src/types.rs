@@ -3,7 +3,8 @@
     clippy::cast_sign_loss,
     clippy::cast_possible_wrap
 )]
-use std::{collections::HashMap, convert::TryFrom, fmt, hash::BuildHasher, hash::Hash, mem};
+use std::hash::{BuildHasher, Hash};
+use std::{collections::HashMap, convert::TryFrom, fmt, mem, sync::Arc};
 
 use ntex_bytes::{Buf, BufMut, BytePages, ByteString, Bytes};
 
@@ -245,6 +246,37 @@ impl NativeType for ByteString {
     #[inline]
     fn encode_value(&self, dst: &mut BytePages) {
         dst.append(self.as_bytes());
+    }
+
+    #[inline]
+    fn is_default(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+impl NativeType for Arc<str> {
+    const TYPE: WireType = WireType::LengthDelimited;
+
+    #[inline]
+    fn value_len(&self) -> usize {
+        self.len()
+    }
+
+    #[inline]
+    fn merge(&mut self, src: &mut Bytes) -> Result<(), DecodeError> {
+        if let Ok(s) = ByteString::try_from(mem::take(src)) {
+            *self = Arc::from(s.as_str());
+            Ok(())
+        } else {
+            Err(DecodeError::new(
+                "invalid string value: data is not UTF-8 encoded",
+            ))
+        }
+    }
+
+    #[inline]
+    fn encode_value(&self, dst: &mut BytePages) {
+        dst.extend_from_slice(self.as_bytes());
     }
 
     #[inline]
@@ -679,7 +711,7 @@ mod tests {
         msg.b = true;
         msg.props.insert("test1".to_string(), 1);
         msg.props.insert("test2".to_string(), 0);
-        msg.props.insert("".to_string(), 0);
+        msg.props.insert(String::new(), 0);
 
         let mut buf = BytePages::default();
         msg.write(&mut buf);

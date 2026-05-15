@@ -67,7 +67,16 @@ impl RequestContext {
     {
         match HeaderName::try_from(key) {
             Ok(key) => match HeaderValue::try_from(value) {
-                Ok(value) => self.headers.push((key, value)),
+                Ok(value) => {
+                    if self.headers.is_empty() {
+                        self.headers.push((key, value))
+                    } else if self.headers[self.headers.len() - 1].0 == key {
+                        let idx = self.headers.len() - 1;
+                        self.headers[idx].1 = value;
+                    } else {
+                        self.headers.push((key, value))
+                    }
+                }
                 Err(e) => self.err = Some(log_error(e)),
             },
             Err(e) => self.err = Some(log_error(e)),

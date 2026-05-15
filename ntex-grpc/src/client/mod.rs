@@ -19,7 +19,7 @@ pub trait Transport<T: MethodDef> {
     async fn request(
         &self,
         args: &T::Input,
-        ctx: RequestContext,
+        ctx: &RequestContext,
     ) -> Result<Response<T>, Self::Error>;
 }
 

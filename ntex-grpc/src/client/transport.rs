@@ -15,7 +15,7 @@ impl<T: MethodDef> Transport<T> for Client {
     async fn request(
         &self,
         val: &T::Input,
-        ctx: RequestContext,
+        ctx: &RequestContext,
     ) -> Result<Response<T>, Self::Error> {
         Transport::request(&self.0, val, ctx).await
     }
@@ -28,7 +28,7 @@ impl<T: MethodDef> Transport<T> for h2::client::Client {
     async fn request(
         &self,
         val: &T::Input,
-        ctx: RequestContext,
+        ctx: &RequestContext,
     ) -> Result<Response<T>, Self::Error> {
         Transport::request(
             &self.client().await.map_err(|e| e.map(ClientError::from))?,
@@ -46,7 +46,7 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
     async fn request(
         &self,
         val: &T::Input,
-        ctx: RequestContext,
+        ctx: &RequestContext,
     ) -> Result<Response<T>, Self::Error> {
         let len = val.encoded_len();
         let mut buf = BytePages::default();

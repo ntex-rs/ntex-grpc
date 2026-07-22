@@ -245,7 +245,7 @@ impl NativeType for ByteString {
 
     #[inline]
     fn encode_value(&self, dst: &mut BytePages) {
-        dst.append(self.as_bytes());
+        dst.append(self.clone());
     }
 
     #[inline]

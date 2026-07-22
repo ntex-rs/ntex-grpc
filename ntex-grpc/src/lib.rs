@@ -15,7 +15,6 @@ pub mod server;
 pub mod types;
 
 pub use crate::encoding::DecodeError;
-
 pub use crate::service::{MethodDef, ServiceDef};
 pub use crate::status::GrpcStatus;
 pub use crate::types::{Message, NativeType};

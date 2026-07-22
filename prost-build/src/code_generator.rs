@@ -172,7 +172,7 @@ impl CodeGenerator<'_> {
                     assert_eq!("key", key.name());
                     assert_eq!("value", value.name());
 
-                    let name = format!("{}.{}", &fq_message_name, nested_type.name());
+                    let name = format!("{fq_message_name}.{}", nested_type.name());
                     Either::Right((name, (key, value)))
                 } else {
                     Either::Left((nested_type, idx))
@@ -849,10 +849,10 @@ impl CodeGenerator<'_> {
             }}\n\n",
             full_name,
             full_name,
-            &variant_mappings[0].generated_variant_name,
+            variant_mappings[0].generated_variant_name,
             full_name,
             full_name,
-            &variant_mappings[0].generated_variant_name
+            variant_mappings[0].generated_variant_name
         ));
     }
 

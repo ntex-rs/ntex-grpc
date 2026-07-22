@@ -103,7 +103,7 @@ impl Clone for ClientError {
             Self::Client(err) => Self::Client(err.clone()),
             Self::Http(err) => Self::Http(*err),
             Self::Decode(err) => Self::Decode(err.clone()),
-            Self::Operation(err) => Self::Operation(err.clone()),
+            Self::Operation(err) => Self::Operation(*err),
             Self::Stream(err) => Self::Stream(*err),
             Self::Response(st, hdrs, payload) => {
                 Self::Response(*st, hdrs.clone(), payload.clone())

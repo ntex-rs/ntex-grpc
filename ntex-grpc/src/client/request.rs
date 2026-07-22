@@ -1,13 +1,14 @@
 use std::{convert::TryFrom, fmt, ops, time};
 
 use ntex_http::{HeaderMap, HeaderName, HeaderValue, error::Error as HttpError};
+use ntex_util::HashMap;
 
 use crate::{client::Transport, consts, service::MethodDef};
 
 #[derive(Debug)]
 pub struct RequestContext {
     err: Option<HttpError>,
-    headers: Vec<(HeaderName, HeaderValue)>,
+    headers: HashMap<HeaderName, HeaderValue>,
     timeout: Option<time::Duration>,
     flags: Flags,
 }
@@ -24,7 +25,7 @@ impl RequestContext {
     fn new() -> Self {
         Self {
             err: None,
-            headers: Vec::new(),
+            headers: HashMap::default(),
             timeout: None,
             flags: Flags::empty(),
         }
@@ -68,14 +69,7 @@ impl RequestContext {
         match HeaderName::try_from(key) {
             Ok(key) => match HeaderValue::try_from(value) {
                 Ok(value) => {
-                    if self.headers.is_empty() {
-                        self.headers.push((key, value))
-                    } else if self.headers[self.headers.len() - 1].0 == key {
-                        let idx = self.headers.len() - 1;
-                        self.headers[idx].1 = value;
-                    } else {
-                        self.headers.push((key, value))
-                    }
+                    self.headers.insert(key, value);
                 }
                 Err(e) => self.err = Some(log_error(e)),
             },
@@ -84,7 +78,13 @@ impl RequestContext {
         self
     }
 
-    pub(crate) fn headers(&self) -> &[(HeaderName, HeaderValue)] {
+    /// Clear existing headers.
+    pub fn clear(&mut self) -> &mut Self {
+        self.headers.clear();
+        self
+    }
+
+    pub(crate) fn headers(&self) -> &HashMap<HeaderName, HeaderValue> {
         &self.headers
     }
 

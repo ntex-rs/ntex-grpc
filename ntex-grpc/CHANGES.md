@@ -1,5 +1,9 @@
 # Changes
 
+## [2.3.0] - 2026-07-22
+
+* RequestContext::header() overrides existing headers
+
 ## [2.2.0] - 2026-05-15
 
 * Simplify send request process

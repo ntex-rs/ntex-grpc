@@ -29,11 +29,7 @@ fn bundle_path() -> PathBuf {
 /// Returns the path to the Protobuf include directory pointed to by the `PROTOC_INCLUDE`
 /// environment variable, if it is set.
 fn env_protoc_include() -> Option<PathBuf> {
-    let protoc_include = match env::var_os("PROTOC_INCLUDE") {
-        Some(path) => PathBuf::from(path),
-        None => return None,
-    };
-
+    let protoc_include = PathBuf::from(env::var_os("PROTOC_INCLUDE")?);
     if !protoc_include.exists() {
         panic!(
             "PROTOC_INCLUDE environment variable points to non-existent directory ({protoc_include:?})"

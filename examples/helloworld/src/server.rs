@@ -43,9 +43,14 @@ impl ServiceFactory<server::ServerRequest, SharedCfg> for GreeterServer {
     type Error = server::ServerError;
     type InitError = ();
     type Service = GreeterServer;
+    type Data = ();
 
     async fn create(&self, _: SharedCfg) -> Result<Self::Service, Self::InitError> {
         Ok(GreeterServer)
+    }
+
+    async fn map_data(&self, _: &SharedCfg, (): &Self::Data) -> Result<(), Self::InitError> {
+        Ok(())
     }
 }
 

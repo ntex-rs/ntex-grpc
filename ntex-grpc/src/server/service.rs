@@ -63,10 +63,19 @@ where
     type Response = ();
     type Error = T::InitError;
     type Service = GrpcService<T>;
-    type InitError = ();
+    type InitError = T::InitError;
+    type Data = T::Data;
 
     async fn create(&self, cfg: SharedCfg) -> Result<Self::Service, Self::InitError> {
         Ok(self.make_server(cfg))
+    }
+
+    async fn map_data(
+        &self,
+        cfg: &SharedCfg,
+        data: &Self::Data,
+    ) -> Result<Rc<<T::Service as Service<ServerRequest>>::Data>, Self::InitError> {
+        self.factory.map_data(cfg, data).await.map(Rc::new)
     }
 }
 
@@ -83,15 +92,23 @@ where
 {
     type Response = ();
     type Error = T::InitError;
+    type Data = Rc<<T::Service as Service<ServerRequest>>::Data>;
 
-    async fn call(&self, io: Io<F>, _: ServiceCtx<'_, Self>) -> Result<(), Self::Error> {
+    async fn call(
+        &self,
+        io: Io<F>,
+        data: &Self::Data,
+        _: ServiceCtx<'_, Self>,
+    ) -> Result<(), Self::Error> {
         // init server
         let service = self.factory.create(self.cfg.clone()).await?;
 
-        let _ = h2::server::handle_one(
+        let _ = h2::server::handle_one_with_data(
             io.into(),
             PublishService::new(service, self.cfg.clone()),
+            data.clone(),
             ControlService,
+            (),
         )
         .await;
 
@@ -106,15 +123,23 @@ where
 {
     type Response = ();
     type Error = T::InitError;
+    type Data = Rc<<T::Service as Service<ServerRequest>>::Data>;
 
-    async fn call(&self, io: IoBoxed, _: ServiceCtx<'_, Self>) -> Result<(), Self::Error> {
+    async fn call(
+        &self,
+        io: IoBoxed,
+        data: &Self::Data,
+        _: ServiceCtx<'_, Self>,
+    ) -> Result<(), Self::Error> {
         // init server
         let service = self.factory.create(self.cfg.clone()).await?;
 
-        let _ = h2::server::handle_one(
+        let _ = h2::server::handle_one_with_data(
             io,
             PublishService::new(service, self.cfg.clone()),
+            data.clone(),
             ControlService,
+            (),
         )
         .await;
 
@@ -127,10 +152,12 @@ struct ControlService;
 impl Service<h2::Control<h2::StreamError>> for ControlService {
     type Response = h2::ControlAck;
     type Error = ();
+    type Data = ();
 
     async fn call(
         &self,
         msg: h2::Control<h2::StreamError>,
+        (): &Self::Data,
         _: ServiceCtx<'_, Self>,
     ) -> Result<Self::Response, Self::Error> {
         log::trace!("Control message: {msg:?}");
@@ -170,11 +197,13 @@ where
 {
     type Response = ();
     type Error = h2::StreamError;
+    type Data = Rc<S::Data>;
 
     #[allow(clippy::await_holding_refcell_ref, clippy::too_many_lines)]
     async fn call(
         &self,
         msg: h2::Message,
+        svc_data: &Self::Data,
         ctx: ServiceCtx<'_, Self>,
     ) -> Result<Self::Response, Self::Error> {
         let id = msg.id();
@@ -279,7 +308,9 @@ where
                         Millis::ZERO
                     };
 
-                    match timeout_checked(to, ctx.call(&self.service, req)).await {
+                    match timeout_checked(to, ctx.call(&self.service, req, svc_data.as_ref()))
+                        .await
+                    {
                         Ok(Ok(mut res)) => {
                             log::debug!("{}: Response is received {res:?}", self.cfg.tag());
                             let mut buf = BytePages::default();

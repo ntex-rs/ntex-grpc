@@ -65,8 +65,14 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             impl ::ntex_grpc::Service<::ntex_grpc::server::ServerRequest> for #ty {
                 type Response = ::ntex_grpc::server::ServerResponse;
                 type Error = ::ntex_grpc::server::ServerError;
+                type Data = ();
 
-                async fn call(&self, mut req: ::ntex_grpc::server::ServerRequest, _: ::ntex_grpc::ServiceCtx<'_, Self>) -> Result<Self::Response, Self::Error> {
+                async fn call(
+                    &self,
+                    mut req: ::ntex_grpc::server::ServerRequest,
+                    (): &Self::Data,
+                    _: ::ntex_grpc::ServiceCtx<'_, Self>,
+                ) -> Result<Self::Response, Self::Error> {
                     use ::ntex_grpc::{ServiceDef, MethodDef};
 
                     match #srvpath::method_by_name(&req.name) {

@@ -10,14 +10,15 @@ readme = "README.md"
 keywords = ["grpc"]
 categories = ["asynchronous", "network-programming"]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 
 [[bin]]
 name = "ntex-grpc"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "3.2", features = ["derive"] }
-ntex-prost-build = "0.12.0"
-log = "0.4"
-env_logger = "0.11"
+ntex-prost-build = { workspace = true }
+
+clap = { workspace = true, features = ["derive"] }
+log = { workspace = true }
+env_logger = { workspace = true }

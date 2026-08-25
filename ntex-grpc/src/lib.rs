@@ -1,9 +1,10 @@
 #![deny(clippy::pedantic)]
 #![allow(
-    clippy::must_use_candidate,
     clippy::cast_possible_truncation,
     clippy::missing_errors_doc,
-    clippy::missing_fields_in_debug
+    clippy::missing_fields_in_debug,
+    clippy::must_use_candidate,
+    clippy::unused_async_trait_impl
 )]
 mod consts;
 mod service;
@@ -30,7 +31,7 @@ pub use ntex_bytes::{BytePages, ByteString, Bytes, BytesMut};
 #[doc(hidden)]
 pub use ntex_http::HeaderValue;
 #[doc(hidden)]
-pub use ntex_service::{Service, ServiceCtx, ServiceFactory};
+pub use ntex_service::{Ctx, Service, ServiceFactory};
 #[doc(hidden)]
 pub use ntex_util::HashMap;
 

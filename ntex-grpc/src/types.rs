@@ -7,6 +7,7 @@ use std::hash::{BuildHasher, Hash};
 use std::{collections::HashMap, convert::TryFrom, fmt, mem, sync::Arc};
 
 use ntex_bytes::{Buf, BufMut, BytePages, ByteString, Bytes};
+use ntex_util::HashMapBase;
 
 pub use crate::encoding::WireType;
 use crate::encoding::{self, DecodeError};
@@ -448,103 +449,110 @@ impl<T: NativeType> NativeType for Vec<T> {
     }
 }
 
-impl<K: NativeType + Eq + Hash, V: NativeType, S: BuildHasher + Default> NativeType
-    for HashMap<K, V, S>
-{
-    const TYPE: WireType = WireType::LengthDelimited;
+macro_rules! hashmap {
+    ($ty:ident) => {
+        impl<K: NativeType + Eq + Hash, V: NativeType, S: BuildHasher + Default> NativeType
+            for $ty<K, V, S>
+        {
+            const TYPE: WireType = WireType::LengthDelimited;
 
-    #[inline]
-    /// Deserialize from the input
-    fn merge(&mut self, _: &mut Bytes) -> Result<(), DecodeError> {
-        Err(DecodeError::new("Cannot directly call merge for Map<K, V>"))
-    }
+            #[inline]
+            /// Deserialize from the input
+            fn merge(&mut self, _: &mut Bytes) -> Result<(), DecodeError> {
+                Err(DecodeError::new("Cannot directly call merge for Map<K, V>"))
+            }
 
-    #[inline]
-    /// Serialize field value
-    fn encode_value(&self, _: &mut BytePages) {}
+            #[inline]
+            /// Serialize field value
+            fn encode_value(&self, _: &mut BytePages) {}
 
-    #[inline]
-    fn is_default(&self) -> bool {
-        self.is_empty()
-    }
+            #[inline]
+            fn is_default(&self) -> bool {
+                self.is_empty()
+            }
 
-    /// Deserialize protobuf field
-    fn deserialize(
-        &mut self,
-        _: u32,
-        wtype: WireType,
-        src: &mut Bytes,
-    ) -> Result<(), DecodeError> {
-        encoding::check_wire_type(Self::TYPE, wtype)?;
+            /// Deserialize protobuf field
+            fn deserialize(
+                &mut self,
+                _: u32,
+                wtype: WireType,
+                src: &mut Bytes,
+            ) -> Result<(), DecodeError> {
+                encoding::check_wire_type(Self::TYPE, wtype)?;
 
-        let len = encoding::decode_varint(src)? as usize;
-        let mut buf = src.split_to_checked(len).ok_or_else(|| {
-            DecodeError::new(format!(
-                "Not enough data for HashMap, message size {}, buf size {}",
-                len,
-                src.len()
-            ))
-        })?;
-        let mut key = Default::default();
-        let mut val = Default::default();
+                let len = encoding::decode_varint(src)? as usize;
+                let mut buf = src.split_to_checked(len).ok_or_else(|| {
+                    DecodeError::new(format!(
+                        "Not enough data for HashMap, message size {}, buf size {}",
+                        len,
+                        src.len()
+                    ))
+                })?;
+                let mut key = Default::default();
+                let mut val = Default::default();
 
-        while !buf.is_empty() {
-            let (tag, wire_type) = encoding::decode_key(&mut buf)?;
-            match tag {
-                1 => NativeType::deserialize(&mut key, 1, wire_type, &mut buf)?,
-                2 => NativeType::deserialize(&mut val, 2, wire_type, &mut buf)?,
-                _ => return Err(DecodeError::new("Map deserialization error")),
+                while !buf.is_empty() {
+                    let (tag, wire_type) = encoding::decode_key(&mut buf)?;
+                    match tag {
+                        1 => NativeType::deserialize(&mut key, 1, wire_type, &mut buf)?,
+                        2 => NativeType::deserialize(&mut val, 2, wire_type, &mut buf)?,
+                        _ => return Err(DecodeError::new("Map deserialization error")),
+                    }
+                }
+                self.insert(key, val);
+                Ok(())
+            }
+
+            /// Serialize protobuf field
+            fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytePages) {
+                let key_default = K::default();
+                let val_default = V::default();
+
+                for item in self {
+                    let skip_key = item.0 == &key_default;
+                    let skip_val = item.1 == &val_default;
+
+                    let len = (if skip_key { 0 } else { item.0.encoded_len(1) })
+                        + (if skip_val { 0 } else { item.1.encoded_len(2) });
+
+                    encoding::encode_key(tag, WireType::LengthDelimited, dst);
+                    encoding::encode_varint(len as u64, dst);
+                    if !skip_key {
+                        item.0.serialize(1, DefaultValue::Default, dst);
+                    }
+                    if !skip_val {
+                        item.1.serialize(2, DefaultValue::Default, dst);
+                    }
+                }
+            }
+
+            /// Generic protobuf map encode function with an overridden value default.
+            fn encoded_len(&self, tag: u32) -> usize {
+                let key_default = K::default();
+                let val_default = V::default();
+
+                self.iter()
+                    .map(|(key, val)| {
+                        let len = (if key == &key_default {
+                            0
+                        } else {
+                            key.encoded_len(1)
+                        }) + (if val == &val_default {
+                            0
+                        } else {
+                            val.encoded_len(2)
+                        });
+
+                        encoding::key_len(tag) + encoding::encoded_len_varint(len as u64) + len
+                    })
+                    .sum::<usize>()
             }
         }
-        self.insert(key, val);
-        Ok(())
-    }
-
-    /// Serialize protobuf field
-    fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytePages) {
-        let key_default = K::default();
-        let val_default = V::default();
-
-        for item in self {
-            let skip_key = item.0 == &key_default;
-            let skip_val = item.1 == &val_default;
-
-            let len = (if skip_key { 0 } else { item.0.encoded_len(1) })
-                + (if skip_val { 0 } else { item.1.encoded_len(2) });
-
-            encoding::encode_key(tag, WireType::LengthDelimited, dst);
-            encoding::encode_varint(len as u64, dst);
-            if !skip_key {
-                item.0.serialize(1, DefaultValue::Default, dst);
-            }
-            if !skip_val {
-                item.1.serialize(2, DefaultValue::Default, dst);
-            }
-        }
-    }
-
-    /// Generic protobuf map encode function with an overridden value default.
-    fn encoded_len(&self, tag: u32) -> usize {
-        let key_default = K::default();
-        let val_default = V::default();
-
-        self.iter()
-            .map(|(key, val)| {
-                let len = (if key == &key_default {
-                    0
-                } else {
-                    key.encoded_len(1)
-                }) + (if val == &val_default {
-                    0
-                } else {
-                    val.encoded_len(2)
-                });
-
-                encoding::key_len(tag) + encoding::encoded_len_varint(len as u64) + len
-            })
-            .sum::<usize>()
-    }
+    };
 }
+
+hashmap!(HashMap);
+hashmap!(HashMapBase);
 
 /// Macro which emits a module containing a set of encoding functions for a
 /// variable width numeric type.

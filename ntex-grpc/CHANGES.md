@@ -1,5 +1,9 @@
 # Changes
 
+## [3.0.0-beta.0] - 2026-08-25
+
+* Update to ntex 4.0
+
 ## [2.3.0] - 2026-07-22
 
 * RequestContext::header() overrides existing headers

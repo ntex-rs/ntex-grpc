@@ -7,7 +7,7 @@ mod error;
 mod service;
 
 pub use self::error::{MethodResult, ServerError};
-pub use self::service::{GrpcServer, GrpcService};
+pub use self::service::GrpcServer;
 pub use crate::GrpcStatus;
 
 #[derive(Debug)]

@@ -1,6 +1,6 @@
 [package]
 name = "ntex-prost-build"
-version = "0.12.0"
+version = "0.13.0"
 authors = [
     "Dan Burkert <dan@danburkert.com>",
     "Tokio Contributors <team@tokio.rs>",
@@ -17,20 +17,20 @@ default = []
 vendored = []
 
 [dependencies]
-heck = "0.5"
-itertools = "0.14"
-log = "0.4"
-multimap = { version = "0.10", default-features = false }
-prost = { version = "0.11", default-features = false }
-prost-types = { version = "0.11", default-features = false }
-tempfile = "3"
-once_cell = "1.9"
-regex = { version = "1.5.5", default-features = false, features = ["std", "unicode-bool"] }
+log = { workspace = true }
+heck = { workspace = true }
+itertools = { workspace = true }
+multimap = { workspace = true }
+tempfile = { workspace = true }
+regex = { workspace = true, default-features = false, features = ["std", "unicode-bool"] }
+
+prost = { version = "0.14", default-features = false }
+prost-types = { version = "0.14", default-features = false }
 
 [build-dependencies]
-which = { version = "4", default-features = false }
+which = "8"
 cfg-if = "1"
 cmake = "0.1"
 
 [dev-dependencies]
-env_logger = { version = "0.11", default-features = false }
+env_logger = { workspace = true }

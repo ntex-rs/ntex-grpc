@@ -1,10 +1,10 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, error::Error, rc::Rc};
 
 use ntex_bytes::{Buf, BufMut, BytePages, ByteString};
 use ntex_h2::{self as h2, StreamRef, frame::Reason, frame::StreamId};
 use ntex_http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use ntex_io::{Filter, Io, IoBoxed};
-use ntex_service::{Service, ServiceCtx, ServiceFactory, cfg::SharedCfg};
+use ntex_service::{Ctx, Pipeline, Service, ServiceFactory, cfg::SharedCfg};
 use ntex_util::{HashMap, time::Millis, time::timeout_checked};
 
 use crate::{consts, status::GrpcStatus, utils::Data};
@@ -26,6 +26,7 @@ const MILLIS_IN_MINUTE: u64 = 60 * 1000;
 /// Grpc server
 pub struct GrpcServer<T> {
     factory: Rc<T>,
+    control: Pipeline<h2::Control<h2::StreamError>, h2::ControlAck, Rc<dyn Error>>,
 }
 
 impl<T> GrpcServer<T> {
@@ -33,112 +34,80 @@ impl<T> GrpcServer<T> {
     pub fn new(factory: T) -> Self {
         Self {
             factory: Rc::new(factory),
+            control: Pipeline::new(ControlService),
         }
     }
 }
 
-impl<T> GrpcServer<T>
+impl<Sf> GrpcServer<Sf>
 where
-    T: ServiceFactory<ServerRequest, SharedCfg, Response = ServerResponse, Error = ServerError>,
-    T::Service: Clone,
-{
-    /// Create default server
-    pub fn make_server(&self, cfg: SharedCfg) -> GrpcService<T> {
-        log::trace!("{}: Starting grpc service", cfg.tag());
-
-        GrpcService {
-            cfg,
-            factory: self.factory.clone(),
-        }
-    }
-}
-
-impl<F, T> ServiceFactory<Io<F>, SharedCfg> for GrpcServer<T>
-where
-    F: Filter,
-    T: ServiceFactory<ServerRequest, SharedCfg, Response = ServerResponse, Error = ServerError>
+    Sf: ServiceFactory<(), ServerRequest, SharedCfg, Res = ServerResponse, Error = ServerError>
         + 'static,
-    T::Service: Clone,
+    Sf::InitError: Into<Box<dyn Error>>,
 {
-    type Response = ();
-    type Error = T::InitError;
-    type Service = GrpcService<T>;
-    type InitError = ();
+    async fn run(&self, io: IoBoxed) -> Result<(), Box<dyn Error>> {
+        let cfg = io.shared();
 
-    async fn create(&self, cfg: SharedCfg) -> Result<Self::Service, Self::InitError> {
-        Ok(self.make_server(cfg))
-    }
-}
-
-pub struct GrpcService<T> {
-    cfg: SharedCfg,
-    factory: Rc<T>,
-}
-
-impl<T, F> Service<Io<F>> for GrpcService<T>
-where
-    F: Filter,
-    T: ServiceFactory<ServerRequest, SharedCfg, Response = ServerResponse, Error = ServerError>
-        + 'static,
-{
-    type Response = ();
-    type Error = T::InitError;
-
-    async fn call(&self, io: Io<F>, _: ServiceCtx<'_, Self>) -> Result<(), Self::Error> {
         // init server
-        let service = self.factory.create(self.cfg.clone()).await?;
-
-        let _ = h2::server::handle_one(
-            io.into(),
-            PublishService::new(service, self.cfg.clone()),
-            ControlService,
-        )
-        .await;
-
-        Ok(())
-    }
-}
-
-impl<T> Service<IoBoxed> for GrpcService<T>
-where
-    T: ServiceFactory<ServerRequest, SharedCfg, Response = ServerResponse, Error = ServerError>
-        + 'static,
-{
-    type Response = ();
-    type Error = T::InitError;
-
-    async fn call(&self, io: IoBoxed, _: ServiceCtx<'_, Self>) -> Result<(), Self::Error> {
-        // init server
-        let service = self.factory.create(self.cfg.clone()).await?;
+        let svc = self.factory.create(&cfg).await.map_err(Into::into)?;
 
         let _ = h2::server::handle_one(
             io,
-            PublishService::new(service, self.cfg.clone()),
-            ControlService,
+            Pipeline::with((), PublishService::new(svc, cfg)),
+            self.control.bind(),
         )
         .await;
 
         Ok(())
+    }
+}
+
+impl<Sf, F> Service<(), Io<F>> for GrpcServer<Sf>
+where
+    F: Filter,
+    Sf: ServiceFactory<(), ServerRequest, SharedCfg, Res = ServerResponse, Error = ServerError>
+        + 'static,
+    Sf::InitError: Into<Box<dyn Error>>,
+{
+    type Res = ();
+    type Error = Box<dyn Error>;
+
+    async fn call(&self, io: Io<F>, _: Ctx<'_, Self, ()>) -> Result<(), Self::Error> {
+        self.run(io.boxed()).await
+    }
+}
+
+impl<Sf> Service<(), IoBoxed> for GrpcServer<Sf>
+where
+    Sf: ServiceFactory<(), ServerRequest, SharedCfg, Res = ServerResponse, Error = ServerError>
+        + 'static,
+    Sf::InitError: Into<Box<dyn Error>>,
+{
+    type Res = ();
+    type Error = Box<dyn Error>;
+
+    async fn call(&self, io: IoBoxed, _: Ctx<'_, Self, ()>) -> Result<(), Self::Error> {
+        self.run(io).await
     }
 }
 
 struct ControlService;
 
-impl Service<h2::Control<h2::StreamError>> for ControlService {
-    type Response = h2::ControlAck;
-    type Error = ();
+impl Service<(), h2::Control<h2::StreamError>> for ControlService {
+    type Res = h2::ControlAck;
+    type Error = Rc<dyn Error>;
 
     async fn call(
         &self,
         msg: h2::Control<h2::StreamError>,
-        _: ServiceCtx<'_, Self>,
-    ) -> Result<Self::Response, Self::Error> {
+        _: Ctx<'_, Self, ()>,
+    ) -> Result<Self::Res, Self::Error> {
         log::trace!("Control message: {msg:?}");
-        Ok::<_, ()>(msg.ack())
+        Ok(msg.ack())
     }
 }
 
-struct PublishService<S: Service<ServerRequest>> {
+struct PublishService<S: Service<(), ServerRequest>> {
     cfg: SharedCfg,
     service: S,
     streams: RefCell<HashMap<StreamId, Inflight>>,
@@ -153,7 +122,7 @@ struct Inflight {
 
 impl<S> PublishService<S>
 where
-    S: Service<ServerRequest, Response = ServerResponse, Error = ServerError>,
+    S: Service<(), ServerRequest, Res = ServerResponse, Error = ServerError>,
 {
     fn new(service: S, cfg: SharedCfg) -> Self {
         Self {
@@ -164,19 +133,19 @@ where
     }
 }
 
-impl<S> Service<h2::Message> for PublishService<S>
+impl<S> Service<(), h2::Message> for PublishService<S>
 where
-    S: Service<ServerRequest, Response = ServerResponse, Error = ServerError> + 'static,
+    S: Service<(), ServerRequest, Res = ServerResponse, Error = ServerError> + 'static,
 {
-    type Response = ();
+    type Res = ();
     type Error = h2::StreamError;
 
     #[allow(clippy::await_holding_refcell_ref, clippy::too_many_lines)]
     async fn call(
         &self,
         msg: h2::Message,
-        ctx: ServiceCtx<'_, Self>,
-    ) -> Result<Self::Response, Self::Error> {
+        ctx: Ctx<'_, Self, ()>,
+    ) -> Result<Self::Res, Self::Error> {
         let id = msg.id();
         let h2::Message { stream, kind } = msg;
         let mut streams = self.streams.borrow_mut();

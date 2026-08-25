@@ -1,4 +1,6 @@
-use ntex::{SharedCfg, server::Server, service::ServiceFactory, util::HashMap};
+use std::convert::Infallible;
+
+use ntex::{ServiceFactory, SharedCfg, server::Server, util::HashMap};
 use ntex_grpc::server;
 
 mod helloworld;
@@ -38,13 +40,14 @@ impl GreeterServer {
     }
 }
 
-impl ServiceFactory<server::ServerRequest, SharedCfg> for GreeterServer {
-    type Response = server::ServerResponse;
+impl ServiceFactory<(), server::ServerRequest, SharedCfg> for GreeterServer {
+    type Res = server::ServerResponse;
     type Error = server::ServerError;
-    type InitError = ();
-    type Service = GreeterServer;
 
-    async fn create(&self, _: SharedCfg) -> Result<Self::Service, Self::InitError> {
+    type Service = GreeterServer;
+    type InitError = Infallible;
+
+    async fn create(&self, _: &SharedCfg) -> Result<Self::Service, Self::InitError> {
         Ok(GreeterServer)
     }
 }
@@ -67,12 +70,16 @@ async fn main() -> std::io::Result<()> {
 
     // bind to socket
     Server::builder()
-        .bind("helloworld", format!("0.0.0.0:{port}"), async move |_| {
-            // create service
-            server::GrpcServer::new(GreeterServer)
-        })?
+        .bind(
+            "svc",
+            format!("0.0.0.0:{port}"),
+            SharedCfg::new("GRPC"),
+            async move |_| {
+                // create service
+                server::GrpcServer::new(GreeterServer)
+            },
+        )?
         .workers(threads)
-        .config("helloworld", SharedCfg::new("GRPC"))
         .run()
         .await
 }

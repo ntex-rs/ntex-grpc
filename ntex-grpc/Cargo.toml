@@ -1,6 +1,6 @@
 [package]
 name = "ntex-grpc"
-version = "2.3.0"
+version = "3.0.0-beta.0"
 license = "MIT OR Apache-2.0"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 description = "GRPC Client/Server framework"
@@ -10,30 +10,30 @@ readme = "README.md"
 keywords = ["grpc"]
 categories = ["asynchronous", "network-programming"]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 
 [lib]
 name = "ntex_grpc"
 path = "src/lib.rs"
 
 [dependencies]
-ntex-grpc-derive = "2.0"
+ntex-grpc-derive = { workspace = true }
 
-ntex-error = "2.3"
-ntex-h2 = "3.12.1"
-ntex-http = "1.2"
-ntex-io = "3.13"
-ntex-net = "3.13"
-ntex-util = "3.6"
-ntex-bytes = "1.9"
-ntex-service = "4.6"
+ntex-error = { workspace = true }
+ntex-h2 = { workspace = true }
+ntex-http = { workspace = true }
+ntex-io = { workspace = true }
+ntex-net = { workspace = true }
+ntex-util = { workspace = true }
+ntex-bytes = { workspace = true }
+ntex-service = { workspace = true }
 
-bitflags = "2"
-log = "0.4"
-thiserror = "2"
-pin-project-lite = "0.2"
+bitflags = { workspace = true }
+log = { workspace = true }
+pin-project-lite = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-openssl = "0.10"
-env_logger = "0.11"
-ntex = { version = "3.10.0", features = ["openssl", "neon"] }
+ntex = { workspace = true , features = ["openssl", "neon"] }
+env_logger = { workspace = true }
+openssl = { workspace = true }

@@ -13,3 +13,37 @@ resolver = "3"
 ntex-grpc = { path = "./ntex-grpc" }
 ntex-grpc-derive = { path = "./ntex-grpc-derive" }
 ntex-prost-build = { path = "./prost-build" }
+
+[workspace.dependencies]
+ntex-grpc = "3.0.0-beta.0"
+ntex-grpc-derive = "3.0.0"
+ntex-grpc-codegen = "0.3.0"
+ntex-prost-build = "0.13.0"
+
+ntex = "4.0.0-beta.0"
+ntex-error = "2.5"
+ntex-h2 = "4.0.0-beta.0"
+ntex-http = "1.2"
+ntex-io = "4.0.0-beta.0"
+ntex-net = "4.0.0-beta.0"
+ntex-util = "4.0.0-beta.1"
+ntex-bytes = "1.9"
+ntex-service = "5.0.0-beta.2"
+
+bitflags = "2"
+clap = { version = "4.6", features = ["derive"] }
+env_logger = "0.11"
+heck = "0.5"
+itertools = "0.15"
+log = "0.4"
+multimap = "0.10"
+num_cpus = "1"
+openssl = "0.10"
+regex = "1.13"
+pin-project-lite = "0.2"
+proc-macro2 = "1"
+quote = "1"
+syn = "3"
+tempfile = "3"
+thiserror = "2"
+uuid = "1"

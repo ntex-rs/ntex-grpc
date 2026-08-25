@@ -12,10 +12,7 @@ async fn main() {
     let _ = env_logger::try_init();
 
     let client = GreeterClient::new(Client::new(
-        h2::ClientBuilder::with_default("127.0.0.1:50051")
-            .build(SharedCfg::default())
-            .await
-            .unwrap(),
+        h2::ClientBuilder::with_default("127.0.0.1:50051").build(SharedCfg::default()),
     ));
 
     let res = client

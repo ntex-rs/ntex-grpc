@@ -44,10 +44,7 @@ fn main() {
             let sys = System::new("client", ntex::rt::DefaultRuntime);
 
             sys.block_on(async move {
-                let h2client = h2::ClientBuilder::with_default(addr)
-                    .build(SharedCfg::default())
-                    .await
-                    .unwrap();
+                let h2client = h2::Client::builder(addr).build(SharedCfg::default());
                 let client = GreeterClient::new(Client::new(h2client));
 
                 for _ in 0..concurrency - 1 {

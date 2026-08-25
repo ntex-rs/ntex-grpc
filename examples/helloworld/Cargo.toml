@@ -1,8 +1,8 @@
 [package]
 name = "helloworld"
-version = "1.0.0"
+version = "3.0.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 
 [[bin]]
 name = "client"
@@ -13,14 +13,11 @@ name = "server"
 path = "src/server.rs"
 
 [dependencies]
-ntex = { version = "3", features = ["tokio"] }
-ntex-grpc = "2"
-ntex-h2 = "3"
+ntex = { workspace = true }
+ntex-grpc = { workspace = true }
+ntex-h2 = { workspace = true }
 
-clap = "2"
-log = "0.4"
-env_logger = "0.11"
-num_cpus = "1"
-
-[dev-dependencies]
-ntex = { version = "3.0", features = ["openssl", "tokio"] }
+clap = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+num_cpus = { workspace = true }

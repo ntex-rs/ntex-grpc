@@ -1,20 +1,17 @@
 [package]
 name = "custom"
-version = "1.0.0"
+version = "3.0.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 
 [[bin]]
 name = "client"
 path = "src/client.rs"
 
 [dependencies]
-ntex = "3.0"
-ntex-h2 = "3.10"
-ntex-grpc = "2.0"
+ntex = { workspace = true }
+ntex-h2 = { workspace = true }
+ntex-grpc = { workspace = true }
 
-env_logger = "0.11"
-uuid = { version = "1", features = ["v4"] }
-
-[dev-dependencies]
-ntex = { version = "3.0", features = ["openssl", "tokio"] }
+env_logger = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }

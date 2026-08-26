@@ -7,7 +7,7 @@ use std::hash::{BuildHasher, Hash};
 use std::{collections::HashMap, convert::TryFrom, fmt, mem, sync::Arc};
 
 use ntex_bytes::{Buf, BufMut, BytePages, ByteString, Bytes};
-use ntex_util::HashMapBase;
+use ntex_util::hash_map::HashMap as HashMapBase;
 
 pub use crate::encoding::WireType;
 use crate::encoding::{self, DecodeError};

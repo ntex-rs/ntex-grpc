@@ -57,16 +57,14 @@ async fn main() -> std::io::Result<()> {
     //std::env::set_var("RUST_LOG", "trace");
     let _ = env_logger::try_init();
 
-    let matches = clap::App::new("helloworld server")
+    let matches = clap::Command::new("helloworld server")
         .version("0.1")
-        .args_from_usage(
-            "<port> 'Helloworld server port'
-                -t, --threads=[NUMBER] 'number of threads to use'",
-        )
+        .arg(clap::arg!([port] "Helloworld server port"))
+        .arg(clap::arg!(-t --threads <NUMBER> "number of threads to use"))
         .get_matches();
 
-    let port = matches.value_of("port").unwrap().to_owned();
-    let threads = parse_usize_default(matches.value_of("threads"), num_cpus::get());
+    let port = matches.get_one::<String>("port").unwrap().to_owned();
+    let threads = parse_usize_default(matches.get_one::<String>("threads"), num_cpus::get());
 
     // bind to socket
     Server::builder()
@@ -84,7 +82,7 @@ async fn main() -> std::io::Result<()> {
         .await
 }
 
-fn parse_usize_default(input: Option<&str>, default: usize) -> usize {
+fn parse_usize_default(input: Option<&String>, default: usize) -> usize {
     input
         .map(|v| {
             v.parse()

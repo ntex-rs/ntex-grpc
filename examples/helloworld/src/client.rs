@@ -17,22 +17,20 @@ fn main() {
     // std::env::set_var("RUST_LOG", "ntex_h2=info");
     let _ = env_logger::try_init();
 
-    let matches = clap::App::new("helloworld client")
+    let matches = clap::Command::new("helloworld client")
         .version("0.1")
         .about("Applies load to helloworld server")
-        .args_from_usage(
-            "<ip> 'Helloworld server address'
-                -r, --report-rate=[SECONDS] 'seconds between average reports'
-                -c, --concurrency=[NUMBER] 'number of client connections to open and use concurrently for sending'
-                -t, --threads=[NUMBER] 'number of threads to use'",
-        )
+        .arg(clap::arg!([ip] "Helloworld server port"))
+        .arg(clap::arg!(-r --report-rate <SECONDS> "seconds between average reports"))
+        .arg(clap::arg!(-c --concurrency <NUMBER> "number of client connections to open and use concurrently for sending"))
+        .arg(clap::arg!(-t --threads <THREADS> "number of threads to use"))
         .get_matches();
 
-    let ip = matches.value_of("ip").unwrap().to_owned();
+    let ip = matches.get_one::<String>("ip").unwrap().to_owned();
 
-    let threads = parse_u64_default(matches.value_of("threads"), num_cpus::get() as u64);
-    let concurrency = parse_u64_default(matches.value_of("concurrency"), 1);
-    let report_rate = parse_u64_default(matches.value_of("report-rate"), 1) as usize;
+    let threads = parse_u64_default(matches.get_one::<String>("threads"), num_cpus::get() as u64);
+    let concurrency = parse_u64_default(matches.get_one::<String>("concurrency"), 1);
+    let report_rate = parse_u64_default(matches.get_one::<String>("report-rate"), 1) as usize;
     let perf_counters = Arc::new(PerfCounters::default());
 
     for t in 0..threads {
@@ -85,7 +83,7 @@ fn main() {
     start_report_thread(perf_counters, report_rate, threads, concurrency);
 }
 
-fn parse_u64_default(input: Option<&str>, default: u64) -> u64 {
+fn parse_u64_default(input: Option<&String>, default: u64) -> u64 {
     input
         .map(|v| v.parse().expect(&format!("not a valid number: {v}")))
         .unwrap_or(default)

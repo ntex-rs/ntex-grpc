@@ -34,14 +34,14 @@ impl<T> GrpcServer<T> {
     pub fn new(factory: T) -> Self {
         Self {
             factory: Rc::new(factory),
-            control: Pipeline::new(ControlService),
+            control: Pipeline::new((), ControlService),
         }
     }
 }
 
 impl<Sf> GrpcServer<Sf>
 where
-    Sf: ServiceFactory<(), ServerRequest, SharedCfg, Res = ServerResponse, Error = ServerError>
+    Sf: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError>
         + 'static,
     Sf::InitError: Into<Box<dyn Error>>,
 {
@@ -49,11 +49,11 @@ where
         let cfg = io.shared();
 
         // init server
-        let svc = self.factory.create(&cfg).await.map_err(Into::into)?;
+        let svc = self.factory.create(&()).await.map_err(Into::into)?;
 
         let _ = h2::server::handle_one(
             io,
-            Pipeline::with((), PublishService::new(svc, cfg)),
+            Pipeline::new((), PublishService::new(svc, cfg)),
             self.control.bind(),
         )
         .await;
@@ -65,7 +65,7 @@ where
 impl<Sf, F> Service<(), Io<F>> for GrpcServer<Sf>
 where
     F: Filter,
-    Sf: ServiceFactory<(), ServerRequest, SharedCfg, Res = ServerResponse, Error = ServerError>
+    Sf: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError>
         + 'static,
     Sf::InitError: Into<Box<dyn Error>>,
 {
@@ -79,7 +79,7 @@ where
 
 impl<Sf> Service<(), IoBoxed> for GrpcServer<Sf>
 where
-    Sf: ServiceFactory<(), ServerRequest, SharedCfg, Res = ServerResponse, Error = ServerError>
+    Sf: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError>
         + 'static,
     Sf::InitError: Into<Box<dyn Error>>,
 {

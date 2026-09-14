@@ -41,8 +41,7 @@ impl<T> GrpcServer<T> {
 
 impl<Sf> GrpcServer<Sf>
 where
-    Sf: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError>
-        + 'static,
+    Sf: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError> + 'static,
     Sf::InitError: Into<Box<dyn Error>>,
 {
     async fn run(&self, io: IoBoxed) -> Result<(), Box<dyn Error>> {
@@ -65,8 +64,7 @@ where
 impl<Sf, F> Service<(), Io<F>> for GrpcServer<Sf>
 where
     F: Filter,
-    Sf: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError>
-        + 'static,
+    Sf: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError> + 'static,
     Sf::InitError: Into<Box<dyn Error>>,
 {
     type Res = ();
@@ -79,8 +77,7 @@ where
 
 impl<Sf> Service<(), IoBoxed> for GrpcServer<Sf>
 where
-    Sf: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError>
-        + 'static,
+    Sf: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError> + 'static,
     Sf::InitError: Into<Box<dyn Error>>,
 {
     type Res = ();

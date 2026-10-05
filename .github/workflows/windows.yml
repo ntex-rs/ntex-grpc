@@ -16,6 +16,8 @@ jobs:
 
     name: ${{ matrix.version }} - x86_64-pc-windows-msvc
     runs-on: windows-latest
+    env:
+      RUSTFLAGS: "-C link-arg=advapi32.lib"
 
     steps:
       - uses: actions/checkout@v6

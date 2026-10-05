@@ -1,5 +1,12 @@
 # Changes
 
+## [Unreleased]
+
+* Update to ntex-error 3.0, ntex-h2 4.2 and ntex-http 2.0
+
+* Server resets a stream with `INTERNAL_ERROR` when its trailers exceed the peer's
+  `SETTINGS_MAX_HEADER_LIST_SIZE`
+
 ## [3.0.0] - 2026-09-14
 
 * Update to ntex 4.0

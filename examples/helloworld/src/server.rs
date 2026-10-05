@@ -40,14 +40,14 @@ impl GreeterServer {
     }
 }
 
-impl ServiceFactory<(), server::ServerRequest, SharedCfg> for GreeterServer {
+impl ServiceFactory<(), server::ServerRequest> for GreeterServer {
     type Res = server::ServerResponse;
     type Error = server::ServerError;
 
     type Service = GreeterServer;
     type InitError = Infallible;
 
-    async fn create(&self, _: &SharedCfg) -> Result<Self::Service, Self::InitError> {
+    async fn create(&self, (): &()) -> Result<Self::Service, Self::InitError> {
         Ok(GreeterServer)
     }
 }

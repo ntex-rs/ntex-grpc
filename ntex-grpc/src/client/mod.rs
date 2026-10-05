@@ -1,7 +1,7 @@
 #![allow(async_fn_in_trait)]
 
 use ntex_bytes::Bytes;
-use ntex_error::{ErrorDiagnostic, ResultType};
+use ntex_error::ErrorDiagnostic;
 use ntex_h2::{OperationError, StreamError, client};
 use ntex_http::{HeaderMap, StatusCode, error::Error as HttpError};
 
@@ -116,14 +116,6 @@ impl Clone for ClientError {
 }
 
 impl ErrorDiagnostic for ClientError {
-    fn typ(&self) -> ResultType {
-        if matches!(self, ClientError::Http(_)) {
-            ResultType::ClientError
-        } else {
-            ResultType::ServiceError
-        }
-    }
-
     fn signature(&self) -> &'static str {
         match self {
             ClientError::Client(err) => err.signature(),

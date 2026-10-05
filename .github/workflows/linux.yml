@@ -1,0 +1,52 @@
+name: CI (Linux)
+
+on: [push, pull_request]
+
+jobs:
+  build_and_test:
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - 1.97.0 # MSRV
+          - stable
+          - nightly
+
+    name: ${{ matrix.version }} - x86_64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@nextest
+
+      - name: Install ${{ matrix.version }}
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ matrix.version }}-x86_64-unknown-linux-gnu
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate Cargo.lock
+        run: cargo generate-lockfile
+
+      - name: Cache Dependencies
+        uses: Swatinem/rust-cache@v1.0.1
+
+      - name: Run tests [tokio]
+        timeout-minutes: 10
+        run: |
+          cargo nextest run --retries=3 --workspace --exclude ntex-prost-build --features="ntex/tokio"
+
+      - name: Run tests [neon-polling]
+        timeout-minutes: 10
+        run: |
+          cargo nextest run --retries=3 --workspace --exclude ntex-prost-build --features="ntex/neon-polling"
+
+      - name: Run tests [neon-uring]
+        timeout-minutes: 10
+        run: |
+          cargo nextest run --retries=3 --workspace --exclude ntex-prost-build --features="ntex/neon-uring"

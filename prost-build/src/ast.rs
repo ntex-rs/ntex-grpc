@@ -281,9 +281,6 @@ mod tests {
                 leading_detached_comments: vec![],
             };
             let comments = Comments::from_location(&loc);
-            #[cfg(feature = "cleanup-markdown")]
-            let expected = t.cleanedup_expected;
-            #[cfg(not(feature = "cleanup-markdown"))]
             let expected: Vec<&str> = t.input.lines().collect();
             assert_eq!(expected, comments.leading, "failed {}", t.name);
         }

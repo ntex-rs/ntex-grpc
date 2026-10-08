@@ -109,7 +109,7 @@ async fn send_request<T: MethodDef>(
     let (snd_stream, rcv_stream) = client
         .send(Method::POST, T::PATH, hdrs, false)
         .await
-        .map_err(|e| e.map(ClientError::from))?;
+        .map_err(|e| operation_error(e, HeaderMap::new(), Bytes::new()))?;
     if ctx.get_disconnect_on_drop() {
         snd_stream.disconnect_on_drop();
     }
@@ -120,7 +120,7 @@ async fn send_request<T: MethodDef>(
             *err,
             OperationError::RemoteReset(_) | OperationError::Closed(Some(_))
         ) {
-            return Err(err.map(ClientError::from));
+            return Err(operation_error(err, HeaderMap::new(), Bytes::new()));
         }
     }
 
@@ -238,7 +238,7 @@ async fn send_request<T: MethodDef>(
                     }
                 }
                 h2::MessageKind::Disconnect(err) => {
-                    return Err(err.map(ClientError::Operation));
+                    return Err(operation_error(err, hdrs, payload.get()));
                 }
             }
 
@@ -322,6 +322,30 @@ fn reset_error(reason: Reason, hdrs: HeaderMap, body: Bytes) -> Error<ClientErro
     synthesized_status(GrpcStatus::from(reason), hdrs, msg, body)
 }
 
+/// Maps a lost connection to `UNAVAILABLE`, as grpc-go does.
+///
+/// The connection closed, failed or is going away, the call may be retried
+/// on a new one. Other errors are reported as [`ClientError::Operation`].
+fn operation_error(
+    err: Error<OperationError>,
+    hdrs: HeaderMap,
+    body: Bytes,
+) -> Error<ClientError> {
+    if matches!(
+        *err,
+        OperationError::Connection(_)
+            | OperationError::Disconnected
+            | OperationError::Disconnecting
+            | OperationError::OverflowedStreamId
+    ) {
+        let msg = HeaderValue::try_from(err.to_string())
+            .unwrap_or_else(|_| HeaderValue::from_static("Connection is closed"));
+        err.map(|_| synthesized(GrpcStatus::Unavailable, hdrs, msg, body))
+    } else {
+        err.map(ClientError::Operation)
+    }
+}
+
 /// Checks the response message as data arrives.
 ///
 /// Fails on a message over the size limit, or on data after the message,
@@ -356,14 +380,23 @@ fn check_message(
 /// unless the server sent one.
 fn synthesized_status(
     status: GrpcStatus,
-    mut hdrs: HeaderMap,
+    hdrs: HeaderMap,
     msg: HeaderValue,
     body: Bytes,
 ) -> Error<ClientError> {
+    Error::from(synthesized(status, hdrs, msg, body))
+}
+
+fn synthesized(
+    status: GrpcStatus,
+    mut hdrs: HeaderMap,
+    msg: HeaderValue,
+    body: Bytes,
+) -> ClientError {
     if !hdrs.contains_key(consts::GRPC_MESSAGE) {
         hdrs.insert(consts::GRPC_MESSAGE, msg);
     }
-    Error::from(ClientError::GrpcStatus(status, hdrs, Some(body)))
+    ClientError::GrpcStatus(status, hdrs, Some(body))
 }
 
 /// Returns the length prefix of a request message, or the error if the
@@ -428,6 +461,46 @@ fn check_grpc_status(hdrs: &HeaderMap) -> Option<Result<GrpcStatus, HeaderValue>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_errors() {
+        let unavailable = |err: OperationError| {
+            let mut hdrs = HeaderMap::new();
+            hdrs.insert(header::CONTENT_TYPE, HeaderValue::from_static("x"));
+            let err = operation_error(Error::from(err), hdrs, Bytes::from_static(b"1"));
+            let ClientError::GrpcStatus(GrpcStatus::Unavailable, hdrs, Some(body)) = &*err else {
+                panic!("{err:?}");
+            };
+            assert_eq!(hdrs.get(header::CONTENT_TYPE).unwrap(), "x");
+            assert_eq!(body, &b"1"[..]);
+            hdrs.get(consts::GRPC_MESSAGE).unwrap().clone()
+        };
+        assert_eq!(
+            unavailable(OperationError::Connection(
+                h2::ConnectionError::KeepaliveTimeout
+            )),
+            "Keep-alive timeout"
+        );
+        assert_eq!(
+            unavailable(OperationError::Disconnected),
+            "Connection is closed"
+        );
+        assert_eq!(
+            unavailable(OperationError::Disconnecting),
+            "Connection is disconnecting"
+        );
+        assert_eq!(
+            unavailable(OperationError::OverflowedStreamId),
+            "The stream ID space is overflowed"
+        );
+
+        let err = operation_error(
+            Error::from(OperationError::Idle),
+            HeaderMap::new(),
+            Bytes::new(),
+        );
+        assert!(matches!(*err, ClientError::Operation(OperationError::Idle)));
+    }
 
     #[test]
     fn send_size_limit() {

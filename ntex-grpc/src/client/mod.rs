@@ -117,7 +117,10 @@ pub enum ClientError {
         #[source]
         DecodeError,
     ),
-    /// The HTTP/2 connection failed, e.g. it was closed during the call.
+    /// An HTTP/2 stream operation failed.
+    ///
+    /// A closed or failed connection is reported as [`ClientError::GrpcStatus`]
+    /// with `UNAVAILABLE`.
     #[error("HTTP2 Operation")]
     Operation(
         #[from]
@@ -166,6 +169,9 @@ pub enum ClientError {
     /// * a stream reset by the server is mapped as the gRPC spec says, e.g.
     ///   `REFUSED_STREAM` to `UNAVAILABLE` and `CANCEL` to `CANCELLED`. The
     ///   response headers take the place of the trailers here.
+    /// * a connection that is closed, fails or goes away before the call
+    ///   ends gives `UNAVAILABLE`, as in grpc-go. The response headers take
+    ///   the place of the trailers here.
     /// * a `content-type` other than `application/grpc` gives `UNKNOWN`.
     /// * a message over the size limit gives `RESOURCE_EXHAUSTED`, see
     ///   [`Request::max_message_size()`].

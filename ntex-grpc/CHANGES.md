@@ -2,6 +2,8 @@
 
 ## [3.2.0] - Unreleased
 
+* Client reports a connection that is closed, fails or goes away during a call as `ClientError::GrpcStatus` with `UNAVAILABLE` instead of `ClientError::Operation`
+
 * Client does not send a request message larger than 2 GiB - 1 and fails with `RESOURCE_EXHAUSTED`, a message of 4 GiB or more got a truncated length prefix. Add `Request::max_send_message_size()` and `RequestContext::max_send_message_size()` to change the limit
 
 * Add `Request::append_header()` and `RequestContext::append_header()` to send several values for one metadata key

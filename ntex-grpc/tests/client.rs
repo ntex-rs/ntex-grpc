@@ -33,6 +33,9 @@ method!(Html, "/test.Svc/Html");
 method!(HtmlError, "/test.Svc/HtmlError");
 method!(NoContentType, "/test.Svc/NoContentType");
 method!(Proto, "/test.Svc/Proto");
+method!(Busy, "/test.Svc/Busy");
+method!(Missing, "/test.Svc/Missing");
+method!(ProxyError, "/test.Svc/ProxyError");
 
 const X_TEST: HeaderName = HeaderName::from_static("x-test");
 const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
@@ -174,6 +177,35 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                             );
                             reply(&stream, hdrs, status_ok()).await;
                         }
+                        // an http error with a body, as a proxy would send
+                        "/test.Svc/Busy" => {
+                            let mut hdrs = grpc_headers();
+                            hdrs.insert(
+                                header::CONTENT_TYPE,
+                                HeaderValue::from_static("text/plain"),
+                            );
+                            stream
+                                .send_response(StatusCode::SERVICE_UNAVAILABLE, hdrs, false)
+                                .unwrap();
+                            stream
+                                .send_payload(Bytes::from_static(b"busy"), true)
+                                .await
+                                .unwrap();
+                        }
+                        // a headers-only http error
+                        "/test.Svc/Missing" => {
+                            stream
+                                .send_response(StatusCode::NOT_FOUND, grpc_headers(), true)
+                                .unwrap();
+                        }
+                        // a headers-only http error that carries the grpc status
+                        "/test.Svc/ProxyError" => {
+                            let mut hdrs = grpc_headers();
+                            hdrs.insert(GRPC_STATUS, HeaderValue::from_static("8"));
+                            stream
+                                .send_response(StatusCode::INTERNAL_SERVER_ERROR, hdrs, true)
+                                .unwrap();
+                        }
                         // never replies
                         "/test.Svc/Silent" => {}
                         _ => panic!("unexpected request {path}"),
@@ -233,7 +265,7 @@ async fn response_size() {
 async fn trailers_without_status() {
     let client = client();
     let err = send::<NoStatus>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, trailers) = &*err else {
+    let ClientError::GrpcStatus(status, trailers, body) = &*err else {
         panic!("{err:?}");
     };
     assert_eq!(*status, GrpcStatus::Unknown);
@@ -242,13 +274,14 @@ async fn trailers_without_status() {
         trailers.get(GRPC_MESSAGE).unwrap(),
         "Response trailers have no grpc-status"
     );
+    assert_eq!(body.as_deref(), Some(&b"\0\0\0\0\0"[..]));
 }
 
 #[ntex::test]
 async fn eof_without_trailers() {
     let client = client();
     let err = send::<NoTrailers>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, trailers) = &*err else {
+    let ClientError::GrpcStatus(status, trailers, body) = &*err else {
         panic!("{err:?}");
     };
     assert_eq!(*status, GrpcStatus::Internal);
@@ -257,13 +290,14 @@ async fn eof_without_trailers() {
         trailers.get(GRPC_MESSAGE).unwrap(),
         "Response ended without trailers"
     );
+    assert_eq!(body.as_deref(), Some(&b"\0\0\0\0\0"[..]));
 }
 
 #[ntex::test]
 async fn invalid_content_type() {
     let client = client();
     let err = send::<Html>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, trailers) = &*err else {
+    let ClientError::GrpcStatus(status, trailers, body) = &*err else {
         panic!("{err:?}");
     };
     assert_eq!(*status, GrpcStatus::Unknown);
@@ -272,9 +306,10 @@ async fn invalid_content_type() {
         trailers.get(GRPC_MESSAGE).unwrap(),
         "Invalid content-type: text/html"
     );
+    assert_eq!(body.as_deref(), Some(&b"\0\0\0\0\0"[..]));
 
     let err = send::<NoContentType>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, trailers) = &*err else {
+    let ClientError::GrpcStatus(status, trailers, body) = &*err else {
         panic!("{err:?}");
     };
     assert_eq!(*status, GrpcStatus::Unknown);
@@ -282,17 +317,49 @@ async fn invalid_content_type() {
         trailers.get(GRPC_MESSAGE).unwrap(),
         "Response has no content-type"
     );
+    assert!(body.is_some());
 
     // the server's own error status is kept
     let err = send::<HtmlError>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, trailers) = &*err else {
+    let ClientError::GrpcStatus(status, trailers, body) = &*err else {
         panic!("{err:?}");
     };
     assert_eq!(*status, GrpcStatus::Internal);
     assert!(trailers.get(GRPC_MESSAGE).is_none());
+    assert!(body.is_none());
 
     // the content-type may carry a suffix and is case-insensitive
     send::<Proto>(&client).await.unwrap();
+}
+
+#[ntex::test]
+async fn http_status() {
+    let client = client();
+    let err = send::<Busy>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Unavailable);
+    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
+    assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), "HTTP status 503");
+    assert_eq!(body.as_deref(), Some(&b"busy"[..]));
+
+    let err = send::<Missing>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Unimplemented);
+    assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), "HTTP status 404");
+    assert_eq!(body.as_deref(), Some(&b""[..]));
+
+    // grpc-status wins over the http status
+    let err = send::<ProxyError>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::ResourceExhausted);
+    assert!(hdrs.get(GRPC_MESSAGE).is_none());
+    assert!(body.is_none());
 }
 
 #[ntex::test]

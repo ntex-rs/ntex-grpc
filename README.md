@@ -124,7 +124,7 @@ match req.send().await {
     Ok(res) => println!("trailers: {:?}", res.trailers()),
     // the error derefs to `ClientError`
     Err(err) => match &*err {
-        ClientError::GrpcStatus(status, trailers) => {
+        ClientError::GrpcStatus(status, trailers, _) => {
             println!("failed with {status:?}, trailers: {trailers:?}")
         }
         _ => println!("request failed: {err}"),

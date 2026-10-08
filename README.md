@@ -189,7 +189,9 @@ async fn main() -> std::io::Result<()> {
 ```
 
 A method can take `server::Request<HelloRequest>` instead of the bare message
-when it needs the request headers. `Request` derefs to the message.
+when it needs the request headers. `Request` derefs to the message, but its own
+`name`, `headers` and `message` fields come first, so a message field with one
+of these names has to be read as `req.message.name`.
 
 A method can also return `Result<HelloReply, E>` if `E: Into<HelloReply>`. The
 error is turned into a reply, so the client still sees `grpc-status: 0`.

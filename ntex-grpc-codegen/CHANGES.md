@@ -2,6 +2,8 @@
 
 ## [0.3.1] - Unreleased
 
+* Fix multi-line service and method comments being joined into one doc line
+
 * Fence code examples from proto comments, so rustdoc does not run them as Rust doctests
 
 ## [0.2.13] - 2025-10-15

@@ -39,14 +39,14 @@ jobs:
       - name: Run tests [tokio]
         timeout-minutes: 10
         run: |
-          cargo nextest run --retries=3 --workspace --exclude ntex-prost-build --features="ntex/tokio"
+          cargo nextest run --retries=3 --workspace --exclude ntex-prost-build --features="ntex/tokio,ntex-grpc/compression"
 
       - name: Run tests [neon-polling]
         timeout-minutes: 10
         run: |
-          cargo nextest run --retries=3 --workspace --exclude ntex-prost-build --features="ntex/neon-polling"
+          cargo nextest run --retries=3 --workspace --exclude ntex-prost-build --features="ntex/neon-polling,ntex-grpc/compression"
 
       - name: Run tests [neon-uring]
         timeout-minutes: 10
         run: |
-          cargo nextest run --retries=3 --workspace --exclude ntex-prost-build --features="ntex/neon-uring"
+          cargo nextest run --retries=3 --workspace --exclude ntex-prost-build --features="ntex/neon-uring,ntex-grpc/compression"

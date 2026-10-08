@@ -2,6 +2,18 @@
 
 ## [3.2.0] - Unreleased
 
+* Add the `compression` feature with gzip and zstd message compression. Client
+  and server accept compressed messages and send
+  `grpc-accept-encoding: gzip,zstd`. `Request::compression()` and
+  `RequestContext::compression()` compress the request message, the server
+  compresses a response with the request's `grpc-encoding`. A message over the
+  size limit after decompression fails with `RESOURCE_EXHAUSTED`. Large
+  messages are compressed and decompressed on the blocking thread pool
+
+* Server rejects a request message larger than 4 MiB with
+  `RESOURCE_EXHAUSTED`. Add `GrpcServer::max_message_size()` to change the
+  limit
+
 * `Request::header()` and `RequestContext::header()` ignore headers the client
   sets itself: `content-type`, `user-agent`, `te`, `grpc-encoding`,
   `grpc-message-type`, `grpc-message`, `grpc-status` and `grpc-timeout`. They

@@ -96,11 +96,12 @@ pub fn decode_varint(buf: &mut Bytes) -> Result<u64, DecodeError> {
 /// [1]: https://github.com/google/protobuf/blob/3.3.x/src/google/protobuf/io/coded_stream.cc#L365-L406
 /// [2]: https://github.com/protocolbuffers/protobuf-go/blob/v1.27.1/encoding/protowire/wire.go#L358
 #[inline]
+#[allow(clippy::assert_is_empty)]
 fn decode_varint_slice(bytes: &[u8]) -> Result<(u64, usize), DecodeError> {
     // Fully unrolled varint decoding loop. Splitting into 32-bit pieces gives better performance.
 
     // Use assertions to ensure memory safety, but it should always be optimized after inline.
-    assert_ne!(bytes, []);
+    assert!(!bytes.is_empty());
     assert!(bytes.len() > 10 || bytes[bytes.len() - 1] < 0x80);
 
     let mut b: u8 = unsafe { *bytes.get_unchecked(0) };

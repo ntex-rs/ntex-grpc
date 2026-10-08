@@ -12,9 +12,18 @@ categories = ["asynchronous", "network-programming"]
 edition = "2024"
 rust-version = "1.97"
 
+[package.metadata.docs.rs]
+features = ["compression"]
+
 [lib]
 name = "ntex_grpc"
 path = "src/lib.rs"
+
+[features]
+default = []
+
+# gzip and zstd message compression
+compression = ["dep:flate2", "dep:zstd", "dep:ntex-rt"]
 
 [dependencies]
 ntex-grpc-derive = { workspace = true }
@@ -34,6 +43,10 @@ log = { workspace = true }
 pin-project-lite = { workspace = true }
 thiserror = { workspace = true }
 urly = { workspace = true }
+
+flate2 = { workspace = true, optional = true }
+ntex-rt = { workspace = true, optional = true }
+zstd = { workspace = true, optional = true }
 
 [dev-dependencies]
 ntex = { workspace = true , features = ["openssl"] }

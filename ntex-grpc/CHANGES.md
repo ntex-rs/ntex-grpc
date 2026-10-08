@@ -2,6 +2,8 @@
 
 ## [3.2.0] - Unreleased
 
+* Client sends `user-agent: grpc-rust-ntex/<version>` with the crate version, was `ntex-grpc/1.0.0`
+
 * Add `ClientError::grpc_message()`, returns the percent-decoded `grpc-message`
 
 * Client reports an unknown or invalid `grpc-status` as `ClientError::GrpcStatus` with `UNKNOWN` instead of `ClientError::Decode`

@@ -2,7 +2,9 @@
 use ntex_http::{HeaderName, HeaderValue};
 
 pub(crate) const HDRV_CT_GRPC: HeaderValue = HeaderValue::from_static("application/grpc");
-pub(crate) const HDRV_USER_AGENT: HeaderValue = HeaderValue::from_static("ntex-grpc/1.0.0");
+/// `grpc-<language>-<variant>/<version>`, as the gRPC spec suggests.
+pub(crate) const HDRV_USER_AGENT: HeaderValue =
+    HeaderValue::from_static(concat!("grpc-rust-ntex/", env!("CARGO_PKG_VERSION")));
 pub(crate) const HDRV_TRAILERS: HeaderValue = HeaderValue::from_static("trailers");
 
 pub const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");

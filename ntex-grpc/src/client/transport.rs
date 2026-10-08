@@ -127,6 +127,7 @@ async fn send_request<T: MethodDef>(
     let mut payload = Data::Empty;
     // the status to report if the response has no `grpc-status`
     let mut missing = None;
+    let max_size = ctx.get_max_message_size();
 
     async {
         loop {
@@ -176,12 +177,28 @@ async fn send_request<T: MethodDef>(
                 }
                 h2::MessageKind::Data(data, _cap) => {
                     payload.push(data);
+                    if let Some(msg) = check_size(status, &hdrs, &payload, max_size) {
+                        return Err(synthesized_status(
+                            GrpcStatus::ResourceExhausted,
+                            hdrs,
+                            msg,
+                            payload.get(),
+                        ));
+                    }
                     continue;
                 }
                 h2::MessageKind::Eof(data) => {
                     match data {
                         h2::StreamEof::Data(data, _cap) => {
                             payload.push(data);
+                            if let Some(msg) = check_size(status, &hdrs, &payload, max_size) {
+                                return Err(synthesized_status(
+                                    GrpcStatus::ResourceExhausted,
+                                    hdrs,
+                                    msg,
+                                    payload.get(),
+                                ));
+                            }
                             missing = Some((
                                 GrpcStatus::Internal,
                                 HeaderValue::from_static(NO_TRAILERS),
@@ -306,6 +323,32 @@ fn reset_error(reason: Reason, hdrs: HeaderMap, body: Bytes) -> Error<ClientErro
     let msg = HeaderValue::try_from(format!("Stream reset with {reason:?}"))
         .unwrap_or_else(|_| HeaderValue::from_static("Stream reset"));
     synthesized_status(GrpcStatus::from(reason), hdrs, msg, body)
+}
+
+/// Checks the length prefix of the response message against the limit.
+///
+/// Runs as data arrives, so a large message is not buffered. Only a grpc
+/// response has a length prefix.
+fn check_size(
+    status: Option<StatusCode>,
+    hdrs: &HeaderMap,
+    payload: &Data,
+    max_size: usize,
+) -> Option<HeaderValue> {
+    if status != Some(StatusCode::OK) || check_content_type(hdrs).is_some() {
+        return None;
+    }
+    let prefix = payload.as_slice().get(1..5)?;
+    let len = u32::from_be_bytes(prefix.try_into().ok()?) as usize;
+    if len > max_size {
+        let msg = format!("Received message larger than max ({len} vs. {max_size})");
+        Some(
+            HeaderValue::try_from(msg)
+                .unwrap_or_else(|_| HeaderValue::from_static("Received message larger than max")),
+        )
+    } else {
+        None
+    }
 }
 
 /// Reports a status the client picked, `msg` is added as `grpc-message`

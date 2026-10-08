@@ -167,6 +167,8 @@ pub enum ClientError {
     ///   `REFUSED_STREAM` to `UNAVAILABLE` and `CANCEL` to `CANCELLED`. The
     ///   response headers take the place of the trailers here.
     /// * a `content-type` other than `application/grpc` gives `UNKNOWN`.
+    /// * a message over the size limit gives `RESOURCE_EXHAUSTED`, see
+    ///   [`Request::max_message_size()`].
     /// * trailers without `grpc-status` give `UNKNOWN`.
     /// * a response that ends without trailers gives `INTERNAL`.
     ///

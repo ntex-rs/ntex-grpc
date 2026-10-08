@@ -21,6 +21,14 @@ impl Data {
         }
     }
 
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            Data::Chunk(data) => data,
+            Data::MutChunk(data) => data,
+            Data::Empty => &[],
+        }
+    }
+
     pub(crate) fn push(&mut self, data: Bytes) {
         if !data.is_empty() {
             *self = match mem::replace(self, Data::Empty) {

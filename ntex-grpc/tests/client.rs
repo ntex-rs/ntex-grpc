@@ -48,6 +48,10 @@ method!(Accepted, "/test.Svc/Accepted");
 method!(NoContent, "/test.Svc/NoContent");
 method!(Refused, "/test.Svc/Refused");
 method!(ResetAfterHeaders, "/test.Svc/ResetAfterHeaders");
+method!(Large, "/test.Svc/Large");
+method!(Sized, "/test.Svc/Sized");
+method!(SizedNoTrailers, "/test.Svc/SizedNoTrailers");
+method!(SizedHtml, "/test.Svc/SizedHtml");
 
 /// Replies before it reads the request.
 struct EarlyStatus;
@@ -294,7 +298,7 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                                 .send_response(StatusCode::ACCEPTED, grpc_headers(), false)
                                 .unwrap();
                             stream
-                                .send_payload(Bytes::from_static(b"\0\0\0\0\0"), false)
+                                .send_payload(Bytes::from_static(b"\0\0\0\0\x03abc"), false)
                                 .await
                                 .unwrap();
                             stream.send_trailers(status_ok()).unwrap();
@@ -317,6 +321,37 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                                 .await
                                 .unwrap();
                             stream.reset(Reason::ENHANCE_YOUR_CALM);
+                        }
+                        // declares a message over the default limit, never sends it
+                        "/test.Svc/Large" => {
+                            stream
+                                .send_response(StatusCode::OK, grpc_headers(), false)
+                                .unwrap();
+                            stream
+                                .send_payload(Bytes::from_static(b"\0\0\x40\0\x01"), false)
+                                .await
+                                .unwrap();
+                        }
+                        // a 3 byte message
+                        "/test.Svc/Sized" => {
+                            reply_with(&stream, grpc_headers(), b"\0\0\0\0\x03abc").await;
+                        }
+                        "/test.Svc/SizedHtml" => {
+                            let mut hdrs = grpc_headers();
+                            hdrs.insert(
+                                header::CONTENT_TYPE,
+                                HeaderValue::from_static("text/html"),
+                            );
+                            reply_with(&stream, hdrs, b"\0\0\0\0\x03abc").await;
+                        }
+                        "/test.Svc/SizedNoTrailers" => {
+                            stream
+                                .send_response(StatusCode::OK, grpc_headers(), false)
+                                .unwrap();
+                            stream
+                                .send_payload(Bytes::from_static(b"\0\0\0\0\x03abc"), true)
+                                .await
+                                .unwrap();
                         }
                         // never replies
                         "/test.Svc/Silent" => {}
@@ -754,4 +789,79 @@ fn duration_errors() {
         Duration::try_from(std::time::Duration::from_secs(u64::MAX)).unwrap_err();
     let err: Box<dyn std::error::Error> = err.into();
     assert_eq!(err.to_string(), "Duration is out of range");
+}
+
+#[ntex::test]
+async fn message_too_large() {
+    let (client, resets) = client_with_resets();
+    // the client fails on the length prefix, without waiting for the message
+    let err = ntex::time::timeout(Duration::from_secs(5), send::<Large>(&client))
+        .await
+        .expect("the client must not wait for the message")
+        .unwrap_err();
+    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::ResourceExhausted);
+    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
+    assert_eq!(
+        hdrs.get(GRPC_MESSAGE).unwrap(),
+        "Received message larger than max (4194305 vs. 4194304)"
+    );
+    assert_eq!(body.as_deref(), Some(&b"\0\0\x40\0\x01"[..]));
+
+    // the connection stays usable, the server sees the stream reset
+    let res = send::<Message>(&client).await.unwrap();
+    assert_eq!(res.res_size, 5);
+    assert_eq!(*resets.borrow(), [Reason::CANCEL]);
+}
+
+async fn send_limited<M: MethodDef<Input = ()>>(
+    client: &SimpleClient,
+    size: usize,
+) -> Result<Response<M>, Error<ClientError>> {
+    let mut req = Request::<_, M>::new(client, &());
+    req.max_message_size(size);
+    req.send().await
+}
+
+#[ntex::test]
+async fn max_message_size() {
+    let client = client();
+    let res = send_limited::<Sized>(&client, 3).await.unwrap();
+    assert_eq!(res.res_size, 8);
+
+    // the size is checked before the missing trailers
+    let errs = [
+        send_limited::<Sized>(&client, 2).await.map(drop),
+        send_limited::<SizedNoTrailers>(&client, 2).await.map(drop),
+    ];
+    for err in errs {
+        let err = err.unwrap_err();
+        let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(*status, GrpcStatus::ResourceExhausted);
+        assert_eq!(
+            hdrs.get(GRPC_MESSAGE).unwrap(),
+            "Received message larger than max (3 vs. 2)"
+        );
+        assert_eq!(body.as_deref(), Some(&b"\0\0\0\0\x03abc"[..]));
+    }
+
+    // a non-grpc response has no message to check
+    let accepted = send_limited::<Accepted>(&client, 2).await.map(drop);
+    let html = send_limited::<SizedHtml>(&client, 2).await.map(drop);
+    let errs = [
+        (accepted, "HTTP status 202"),
+        (html, "Invalid content-type: text/html"),
+    ];
+    for (err, msg) in errs {
+        let err = err.unwrap_err();
+        let ClientError::GrpcStatus(status, hdrs, _) = &*err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(*status, GrpcStatus::Unknown);
+        assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), msg);
+    }
 }

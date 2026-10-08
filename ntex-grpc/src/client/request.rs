@@ -15,8 +15,12 @@ pub struct RequestContext {
     err: Option<HttpError>,
     headers: HashMap<HeaderName, HeaderValue>,
     timeout: Option<time::Duration>,
+    max_message_size: usize,
     flags: Flags,
 }
+
+/// Default limit of a received message, the same as in grpc-go.
+const DEFAULT_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
 bitflags::bitflags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -32,6 +36,7 @@ impl RequestContext {
             err: None,
             headers: HashMap::default(),
             timeout: None,
+            max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
             flags: Flags::empty(),
         }
     }
@@ -57,6 +62,22 @@ impl RequestContext {
         let to = timeout.into();
         self.timeout = Some(to);
         self.header(consts::GRPC_TIMEOUT, duration_to_grpc_timeout(to));
+        self
+    }
+
+    /// Get the size limit of the response message.
+    pub fn get_max_message_size(&self) -> usize {
+        self.max_message_size
+    }
+
+    /// Set the size limit of the response message, 4 MiB by default.
+    ///
+    /// Built-in transports check the length the server declares for the
+    /// message. If it is over the limit, they reset the stream instead of
+    /// reading the message and return
+    /// [`GrpcStatus::ResourceExhausted`](crate::GrpcStatus::ResourceExhausted).
+    pub fn max_message_size(&mut self, size: usize) -> &mut Self {
+        self.max_message_size = size;
         self
     }
 
@@ -197,6 +218,16 @@ where
         time::Duration: From<U>,
     {
         self.ctx.timeout(timeout);
+        self
+    }
+
+    /// Set the size limit of the response message, 4 MiB by default.
+    ///
+    /// Built-in transports reset the stream and return
+    /// [`GrpcStatus::ResourceExhausted`](crate::GrpcStatus::ResourceExhausted)
+    /// once the server declares a larger message, without reading it.
+    pub fn max_message_size(&mut self, size: usize) -> &mut Self {
+        self.ctx.max_message_size(size);
         self
     }
 
@@ -341,6 +372,14 @@ mod tests {
         ctx.clear();
         assert_eq!(ctx.headers().len(), 0);
         assert_eq!(ctx.get_timeout(), None);
+    }
+
+    #[test]
+    fn context_max_message_size() {
+        let mut ctx = RequestContext::new();
+        assert_eq!(ctx.get_max_message_size(), 4 * 1024 * 1024);
+        ctx.max_message_size(10);
+        assert_eq!(ctx.get_max_message_size(), 10);
     }
 
     #[test]

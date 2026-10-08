@@ -12,7 +12,9 @@
 
 * Add `Display` for `ClientError::Client`
 
-* Rename `GrpcStatus::AlredyExists` to `GrpcStatus::AlreadyExists`, the old name is deprecated.
+* `RequestContext::clear()` also resets the timeout, it already removed the `grpc-timeout` header
+
+* Rename `GrpcStatus::AlredyExists` to `GrpcStatus::AlreadyExists`.
   `signature()` now returns `grpc-status-AlreadyExists`
 
 * Export `NegativeDurationError` and `OutOfRangeDurationError`, implement `Error` for both

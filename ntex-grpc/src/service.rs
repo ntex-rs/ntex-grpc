@@ -2,7 +2,7 @@ use ntex_bytes::{BytePages, ByteString, Bytes};
 
 use crate::{encoding::DecodeError, server::MethodResult, types::Message};
 
-/// Trait for service method definition
+/// Trait for grpc service definition
 pub trait ServiceDef {
     const NAME: &'static str;
 

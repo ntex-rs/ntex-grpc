@@ -20,7 +20,9 @@ pub trait Message: Default + Sized + fmt::Debug {
     /// Encodes and writes the message to a buffer
     fn write(&self, dst: &mut BytePages);
 
-    /// Returns the encoded length of the message with a length delimiter
+    /// Returns the encoded length of the message, without a length delimiter.
+    ///
+    /// This is the number of bytes [`write`](Self::write) produces.
     fn encoded_len(&self) -> usize;
 }
 

@@ -2,6 +2,8 @@
 
 ## [3.2.0] - Unreleased
 
+* Client fails a call with a zero timeout with `DeadlineExceeded` without sending it
+
 * Client accepts only HTTP status 200, other 2xx statuses are reported as `UNKNOWN`
 
 * Client sends `user-agent: grpc-rust-ntex/<version>` with the crate version, was `ntex-grpc/1.0.0`

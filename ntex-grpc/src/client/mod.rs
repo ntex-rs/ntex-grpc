@@ -155,7 +155,9 @@ pub enum ClientError {
     ///
     /// A response with no `grpc-status` is reported here as well: `UNKNOWN`
     /// if the trailers lack it, `INTERNAL` if there were no trailers at all.
-    /// The client adds a `grpc-message` describing the problem then.
+    /// So is a 2xx response whose `content-type` is not `application/grpc`,
+    /// as `UNKNOWN`. The client adds a `grpc-message` describing the problem
+    /// then.
     #[error("Grpc status")]
     GrpcStatus(GrpcStatus, HeaderMap),
 }

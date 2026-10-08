@@ -29,6 +29,10 @@ method!(Deadline, "/test.Svc/Deadline");
 method!(Silent, "/test.Svc/Silent");
 method!(NoStatus, "/test.Svc/NoStatus");
 method!(NoTrailers, "/test.Svc/NoTrailers");
+method!(Html, "/test.Svc/Html");
+method!(HtmlError, "/test.Svc/HtmlError");
+method!(NoContentType, "/test.Svc/NoContentType");
+method!(Proto, "/test.Svc/Proto");
 
 const X_TEST: HeaderName = HeaderName::from_static("x-test");
 const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
@@ -135,6 +139,41 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                                 .await
                                 .unwrap();
                         }
+                        // a regular reply with a non-grpc content-type
+                        "/test.Svc/Html" => {
+                            let mut hdrs = grpc_headers();
+                            hdrs.insert(
+                                header::CONTENT_TYPE,
+                                HeaderValue::from_static("text/html"),
+                            );
+                            reply(&stream, hdrs, status_ok()).await;
+                        }
+                        // a non-grpc content-type, but with an error status
+                        "/test.Svc/HtmlError" => {
+                            let mut hdrs = grpc_headers();
+                            hdrs.insert(
+                                header::CONTENT_TYPE,
+                                HeaderValue::from_static("text/html"),
+                            );
+                            let mut trailers = HeaderMap::new();
+                            trailers.insert(GRPC_STATUS, HeaderValue::from_static("13"));
+                            reply(&stream, hdrs, trailers).await;
+                        }
+                        // a regular reply without content-type
+                        "/test.Svc/NoContentType" => {
+                            let mut hdrs = grpc_headers();
+                            hdrs.remove(header::CONTENT_TYPE);
+                            reply(&stream, hdrs, status_ok()).await;
+                        }
+                        // a regular reply with a content-type suffix
+                        "/test.Svc/Proto" => {
+                            let mut hdrs = grpc_headers();
+                            hdrs.insert(
+                                header::CONTENT_TYPE,
+                                HeaderValue::from_static("Application/gRPC+proto"),
+                            );
+                            reply(&stream, hdrs, status_ok()).await;
+                        }
                         // never replies
                         "/test.Svc/Silent" => {}
                         _ => panic!("unexpected request {path}"),
@@ -159,6 +198,16 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
 
     let io = Io::new(cli, SharedCfg::new("CLI").build());
     (SimpleClient::new(io, false, "localhost".into()), resets)
+}
+
+/// Sends response headers, one empty message and trailers.
+async fn reply(stream: &h2::StreamRef, hdrs: HeaderMap, trailers: HeaderMap) {
+    stream.send_response(StatusCode::OK, hdrs, false).unwrap();
+    stream
+        .send_payload(Bytes::from_static(b"\0\0\0\0\0"), false)
+        .await
+        .unwrap();
+    stream.send_trailers(trailers).unwrap();
 }
 
 async fn send<M: MethodDef<Input = ()>>(
@@ -208,6 +257,42 @@ async fn eof_without_trailers() {
         trailers.get(GRPC_MESSAGE).unwrap(),
         "Response ended without trailers"
     );
+}
+
+#[ntex::test]
+async fn invalid_content_type() {
+    let client = client();
+    let err = send::<Html>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, trailers) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Unknown);
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+    assert_eq!(
+        trailers.get(GRPC_MESSAGE).unwrap(),
+        "Invalid content-type: text/html"
+    );
+
+    let err = send::<NoContentType>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, trailers) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Unknown);
+    assert_eq!(
+        trailers.get(GRPC_MESSAGE).unwrap(),
+        "Response has no content-type"
+    );
+
+    // the server's own error status is kept
+    let err = send::<HtmlError>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, trailers) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Internal);
+    assert!(trailers.get(GRPC_MESSAGE).is_none());
+
+    // the content-type may carry a suffix and is case-insensitive
+    send::<Proto>(&client).await.unwrap();
 }
 
 #[ntex::test]

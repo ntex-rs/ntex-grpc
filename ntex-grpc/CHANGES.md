@@ -2,6 +2,8 @@
 
 ## [3.2.0] - Unreleased
 
+* Document all public items, add crate level docs
+
 * Fix client `Response::res_size`, it reported the leftover bytes instead of the response size
 
 * Fix client panic on a response with a body shorter than the gRPC frame prefix

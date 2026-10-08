@@ -12,10 +12,21 @@ pub use self::request::{Request, RequestContext, Response};
 
 use crate::{encoding::DecodeError, service::MethodDef, status::GrpcStatus};
 
+/// Sends unary calls of method `T`.
+///
+/// Generated clients go through this trait for every call. Implement it to
+/// put something between the client and the connection, like metrics or
+/// retries. [`Client`], [`ntex_h2::client::Client`] and
+/// [`ntex_h2::client::SimpleClient`] implement it.
 pub trait Transport<T: MethodDef> {
     /// Errors produced by the transport.
     type Error;
 
+    /// Send `args` as the request message and wait for the reply.
+    ///
+    /// `ctx` holds the headers and timeout set on the [`Request`]. If
+    /// [`RequestContext::take_error()`] returns an error, return it without
+    /// sending anything.
     async fn request(
         &self,
         args: &T::Input,
@@ -38,6 +49,11 @@ pub trait ClientInformation<T> {
     fn into_inner(self) -> T;
 }
 
+/// [`Transport`] on top of an `ntex-h2` connection pool.
+///
+/// Cloning is cheap and clones share the pool. The pool itself,
+/// [`ntex_h2::client::Client`], is a transport as well, this type only gives
+/// it a name in this crate.
 #[derive(Clone)]
 pub struct Client(client::Client);
 
@@ -55,44 +71,86 @@ impl Client {
     }
 }
 
+/// Errors from the built-in transports.
+///
+/// Transports return it wrapped in [`ntex_error::Error`], which derefs to
+/// `ClientError`, so match on `&*err`:
+///
+/// ```rust,ignore
+/// match req.send().await {
+///     // `req` comes from a generated client, e.g. `client.say_hello(&msg)`
+///     Ok(res) => println!("{}", res.message),
+///     Err(err) => match &*err {
+///         // the server replied, but not with OK
+///         ClientError::GrpcStatus(status, trailers) => {
+///             println!("{status:?}: {:?}", trailers.get("grpc-message"));
+///         }
+///         // anything else is a transport or protocol problem
+///         _ => println!("call failed: {err}"),
+///     },
+/// }
+/// ```
 #[derive(thiserror::Error, Debug)]
 pub enum ClientError {
+    /// The connection pool could not provide a connection.
     #[error("HTTP2 Client")]
     Client(
         #[from]
         #[source]
         client::ClientError,
     ),
+    /// A request header has an invalid name or value, nothing was sent.
+    ///
+    /// See [`RequestContext::take_error()`].
     #[error("Http error {0:?}")]
     Http(
         #[from]
         #[source]
         HttpError,
     ),
+    /// The reply message could not be decoded, or the `grpc-status`
+    /// trailer is not a valid code.
     #[error("Decode")]
     Decode(
         #[from]
         #[source]
         DecodeError,
     ),
+    /// The HTTP/2 connection failed, e.g. it was closed during the call.
     #[error("HTTP2 Operation")]
     Operation(
         #[from]
         #[source]
         OperationError,
     ),
+    /// The HTTP/2 stream failed, e.g. the server reset it.
     #[error("HTTP2 Stream")]
     Stream(
         #[from]
         #[source]
         StreamError,
     ),
+    /// The server answered with a non-2xx HTTP status, or with no
+    /// response headers at all.
+    ///
+    /// Holds the HTTP status, the response headers and the body.
     #[error("Http response {0:?}, headers: {1:?}, body: {2:?}")]
     Response(Option<StatusCode>, HeaderMap, Bytes),
+    /// The response ended before a complete reply message arrived.
+    ///
+    /// Holds the HTTP status and the headers received so far.
     #[error("Got eof without payload")]
     UnexpectedEof(Option<StatusCode>, HeaderMap),
+    /// The server replied with `DEADLINE_EXCEEDED`.
+    ///
+    /// Holds the trailers. The client does not stop waiting by itself, the
+    /// server sends this when the request timeout runs out.
     #[error("Deadline exceeded")]
     DeadlineExceeded(HeaderMap),
+    /// The server replied with a status other than `OK`.
+    ///
+    /// Holds the status and the trailers, the error text is in the
+    /// `grpc-message` trailer.
     #[error("Grpc status")]
     GrpcStatus(GrpcStatus, HeaderMap),
 }

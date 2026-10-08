@@ -26,15 +26,22 @@ pub trait Message: Default + Sized + fmt::Debug {
     fn encoded_len(&self) -> usize;
 }
 
-/// Default type value
+/// How a field decides it holds its default value.
+///
+/// Protobuf leaves fields with default values out of the encoded message.
 pub enum DefaultValue<T> {
+    /// Never treat the value as default, always write it. Used for oneof
+    /// fields, where the chosen variant must be sent even when it is empty.
     Unknown,
+    /// Skip the field when [`NativeType::is_default()`] says so.
     Default,
+    /// Skip the field when it equals this value.
     Value(T),
 }
 
 /// Protobuf type serializer
 pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
+    /// Wire type the value is encoded with.
     const TYPE: WireType;
 
     #[inline]

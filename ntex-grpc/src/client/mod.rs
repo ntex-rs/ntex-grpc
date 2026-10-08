@@ -169,6 +169,8 @@ pub enum ClientError {
     /// * a `content-type` other than `application/grpc` gives `UNKNOWN`.
     /// * a message over the size limit gives `RESOURCE_EXHAUSTED`, see
     ///   [`Request::max_message_size()`].
+    /// * data after the response message gives `INTERNAL`, even if the
+    ///   server sent a status.
     /// * trailers without `grpc-status` give `UNKNOWN`.
     /// * a response that ends without trailers gives `INTERNAL`.
     ///

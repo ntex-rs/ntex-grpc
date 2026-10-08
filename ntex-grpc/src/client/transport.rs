@@ -177,13 +177,8 @@ async fn send_request<T: MethodDef>(
                 }
                 h2::MessageKind::Data(data, _cap) => {
                     payload.push(data);
-                    if let Some(msg) = check_size(status, &hdrs, &payload, max_size) {
-                        return Err(synthesized_status(
-                            GrpcStatus::ResourceExhausted,
-                            hdrs,
-                            msg,
-                            payload.get(),
-                        ));
+                    if let Some((st, msg)) = check_message(status, &hdrs, &payload, max_size) {
+                        return Err(synthesized_status(st, hdrs, msg, payload.get()));
                     }
                     continue;
                 }
@@ -191,13 +186,10 @@ async fn send_request<T: MethodDef>(
                     match data {
                         h2::StreamEof::Data(data, _cap) => {
                             payload.push(data);
-                            if let Some(msg) = check_size(status, &hdrs, &payload, max_size) {
-                                return Err(synthesized_status(
-                                    GrpcStatus::ResourceExhausted,
-                                    hdrs,
-                                    msg,
-                                    payload.get(),
-                                ));
+                            if let Some((st, msg)) =
+                                check_message(status, &hdrs, &payload, max_size)
+                            {
+                                return Err(synthesized_status(st, hdrs, msg, payload.get()));
                             }
                             missing = Some((
                                 GrpcStatus::Internal,
@@ -297,6 +289,7 @@ async fn send_request<T: MethodDef>(
 
 const NO_TRAILERS: &str = "Response ended without trailers";
 const NO_GRPC_STATUS: &str = "Response trailers have no grpc-status";
+const EXTRA_DATA: &str = "cardinality violation: expected <EOF> for non server-streaming RPCs, but received another message";
 
 /// Maps an HTTP status other than 200 of a response without `grpc-status`.
 ///
@@ -325,27 +318,31 @@ fn reset_error(reason: Reason, hdrs: HeaderMap, body: Bytes) -> Error<ClientErro
     synthesized_status(GrpcStatus::from(reason), hdrs, msg, body)
 }
 
-/// Checks the length prefix of the response message against the limit.
+/// Checks the response message as data arrives.
 ///
-/// Runs as data arrives, so a large message is not buffered. Only a grpc
-/// response has a length prefix.
-fn check_size(
+/// Fails on a message over the size limit, or on data after the message,
+/// a unary response has exactly one. Neither is buffered then. Only a grpc
+/// response is checked, other responses fail later anyway.
+fn check_message(
     status: Option<StatusCode>,
     hdrs: &HeaderMap,
     payload: &Data,
     max_size: usize,
-) -> Option<HeaderValue> {
+) -> Option<(GrpcStatus, HeaderValue)> {
     if status != Some(StatusCode::OK) || check_content_type(hdrs).is_some() {
         return None;
     }
-    let prefix = payload.as_slice().get(1..5)?;
-    let len = u32::from_be_bytes(prefix.try_into().ok()?) as usize;
+    let data = payload.as_slice();
+    let len = u32::from_be_bytes(data.get(1..5)?.try_into().ok()?) as usize;
     if len > max_size {
         let msg = format!("Received message larger than max ({len} vs. {max_size})");
-        Some(
+        Some((
+            GrpcStatus::ResourceExhausted,
             HeaderValue::try_from(msg)
                 .unwrap_or_else(|_| HeaderValue::from_static("Received message larger than max")),
-        )
+        ))
+    } else if data.len() - 5 > len {
+        Some((GrpcStatus::Internal, HeaderValue::from_static(EXTRA_DATA)))
     } else {
         None
     }

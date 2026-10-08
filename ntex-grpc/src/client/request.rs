@@ -1,7 +1,6 @@
 use std::{convert::TryFrom, fmt, ops, time};
 
 use ntex_http::{HeaderMap, HeaderName, HeaderValue, error::Error as HttpError};
-use ntex_util::HashMap;
 
 use crate::{client::Transport, consts, service::MethodDef};
 
@@ -13,7 +12,7 @@ use crate::{client::Transport, consts, service::MethodDef};
 #[derive(Debug)]
 pub struct RequestContext {
     err: Option<HttpError>,
-    headers: HashMap<HeaderName, HeaderValue>,
+    headers: HeaderMap,
     timeout: Option<time::Duration>,
     max_message_size: usize,
     flags: Flags,
@@ -34,7 +33,7 @@ impl RequestContext {
     fn new() -> Self {
         Self {
             err: None,
-            headers: HashMap::default(),
+            headers: HeaderMap::new(),
             timeout: None,
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
             flags: Flags::empty(),
@@ -90,8 +89,39 @@ impl RequestContext {
     /// Set a request header, replacing any existing value for the same name.
     ///
     /// An invalid name or value is not sent; the error is kept and returned
-    /// by [`take_error()`](Self::take_error).
+    /// by [`take_error()`](Self::take_error). Values of `-bin` headers are
+    /// sent as they are, encode them with
+    /// [`encode_binary_header()`](crate::encode_binary_header).
     pub fn header<K, V>(&mut self, key: K, value: V) -> &mut Self
+    where
+        HeaderName: TryFrom<K>,
+        HeaderValue: TryFrom<V>,
+        <HeaderName as TryFrom<K>>::Error: Into<HttpError>,
+        <HeaderValue as TryFrom<V>>::Error: Into<HttpError>,
+    {
+        if let Some((key, value)) = self.try_header(key, value) {
+            self.headers.insert(key, value);
+        }
+        self
+    }
+
+    /// Add a request header, keeping existing values for the same name.
+    ///
+    /// Errors are handled as in [`header()`](Self::header).
+    pub fn append_header<K, V>(&mut self, key: K, value: V) -> &mut Self
+    where
+        HeaderName: TryFrom<K>,
+        HeaderValue: TryFrom<V>,
+        <HeaderName as TryFrom<K>>::Error: Into<HttpError>,
+        <HeaderValue as TryFrom<V>>::Error: Into<HttpError>,
+    {
+        if let Some((key, value)) = self.try_header(key, value) {
+            self.headers.append(key, value);
+        }
+        self
+    }
+
+    fn try_header<K, V>(&mut self, key: K, value: V) -> Option<(HeaderName, HeaderValue)>
     where
         HeaderName: TryFrom<K>,
         HeaderValue: TryFrom<V>,
@@ -100,14 +130,12 @@ impl RequestContext {
     {
         match HeaderName::try_from(key) {
             Ok(key) => match HeaderValue::try_from(value) {
-                Ok(value) => {
-                    self.headers.insert(key, value);
-                }
+                Ok(value) => return Some((key, value)),
                 Err(e) => self.set_error(e),
             },
             Err(e) => self.set_error(e),
         }
-        self
+        None
     }
 
     fn set_error<T: Into<HttpError>>(&mut self, err: T) {
@@ -138,8 +166,12 @@ impl RequestContext {
     /// Headers set for the call, including `grpc-timeout`.
     ///
     /// A custom transport sends them with the request.
-    pub fn headers(&self) -> impl ExactSizeIterator<Item = (&HeaderName, &HeaderValue)> {
+    pub fn headers(&self) -> impl Iterator<Item = (&HeaderName, &HeaderValue)> {
         self.headers.iter()
+    }
+
+    pub(super) fn header_map(&self) -> &HeaderMap {
+        &self.headers
     }
 
     /// Check if the connection must be closed when the request is dropped.
@@ -201,6 +233,28 @@ where
         <HeaderValue as TryFrom<V>>::Error: Into<HttpError>,
     {
         self.ctx.header(key, value);
+        self
+    }
+
+    /// Add a request header, keeping existing values for the same name.
+    ///
+    /// gRPC metadata can have several values per key, they are sent as
+    /// separate headers.
+    ///
+    /// ```rust,ignore
+    /// let mut req = client.say_hello(&msg);
+    /// req.append_header("x-tag", "a").append_header("x-tag", "b");
+    /// // binary metadata is base64 encoded, the key ends with `-bin`
+    /// req.header("x-trace-bin", ntex_grpc::encode_binary_header(&[0, 1, 2]));
+    /// ```
+    pub fn append_header<K, V>(&mut self, key: K, value: V) -> &mut Self
+    where
+        HeaderName: TryFrom<K>,
+        HeaderValue: TryFrom<V>,
+        <HeaderName as TryFrom<K>>::Error: Into<HttpError>,
+        <HeaderValue as TryFrom<V>>::Error: Into<HttpError>,
+    {
+        self.ctx.append_header(key, value);
         self
     }
 
@@ -363,14 +417,25 @@ mod tests {
             )]
         );
 
+        ctx.append_header("x-a", "3");
+        let mut vals: Vec<_> = ctx.headers().map(|(_, v)| v.clone()).collect();
+        vals.sort();
+        assert_eq!(vals, ["2", "3"]);
+
+        // invalid values are not added
+        ctx.append_header("x-a", "\n");
+        assert!(ctx.take_error().is_some());
+        assert_eq!(ctx.headers().count(), 2);
+
+        ctx.header("x-a", "1");
         ctx.timeout(time::Duration::from_secs(1));
-        assert_eq!(ctx.headers().len(), 2);
+        assert_eq!(ctx.headers().count(), 2);
         assert!(
             ctx.headers()
                 .any(|(k, v)| k == consts::GRPC_TIMEOUT && v == "1000000u")
         );
         ctx.clear();
-        assert_eq!(ctx.headers().len(), 0);
+        assert_eq!(ctx.headers().count(), 0);
         assert_eq!(ctx.get_timeout(), None);
     }
 

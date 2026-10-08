@@ -7,6 +7,7 @@ use ntex_bytes::{ByteString, Bytes};
 use ntex_error::Error;
 use ntex_grpc::client::{ClientError, Request, Response};
 use ntex_grpc::{GrpcStatus, HashMap, MethodDef, google_types::BytesValue};
+use ntex_grpc::{decode_binary_header, encode_binary_header};
 use ntex_h2::{self as h2, client::SimpleClient, frame::Reason, frame::StreamId};
 use ntex_http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 
@@ -44,6 +45,7 @@ method!(BadStatus, "/test.Svc/BadStatus");
 method!(UnknownStatusOnly, "/test.Svc/UnknownStatusOnly");
 method!(EncodedMessage, "/test.Svc/EncodedMessage");
 method!(UserAgent, "/test.Svc/UserAgent");
+method!(Echo, "/test.Svc/Echo");
 method!(Accepted, "/test.Svc/Accepted");
 method!(NoContent, "/test.Svc/NoContent");
 method!(Refused, "/test.Svc/Refused");
@@ -291,6 +293,16 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                             let mut hdrs = grpc_headers();
                             if let Some(ua) = req.get(header::USER_AGENT) {
                                 hdrs.insert(header::USER_AGENT, ua.clone());
+                            }
+                            reply(&stream, hdrs, status_ok()).await;
+                        }
+                        // echoes the x- and user-agent request headers
+                        "/test.Svc/Echo" => {
+                            let mut hdrs = grpc_headers();
+                            for (key, val) in &req {
+                                if key.as_str().starts_with("x-") || key == header::USER_AGENT {
+                                    hdrs.append(key.clone(), val.clone());
+                                }
                             }
                             reply(&stream, hdrs, status_ok()).await;
                         }
@@ -596,6 +608,31 @@ async fn user_agent() {
         res.headers().get(header::USER_AGENT).unwrap(),
         concat!("grpc-rust-ntex/", env!("CARGO_PKG_VERSION"))
     );
+}
+
+#[ntex::test]
+async fn metadata() {
+    let client = client();
+    let mut req = Request::<_, Echo>::new(&client, &());
+    req.header("x-a", "1")
+        .header("x-a", "2")
+        .append_header("x-tag", "a")
+        .append_header("x-tag", "b")
+        .header("x-trace-bin", encode_binary_header(&[0, 0xff, 1]))
+        .header(header::USER_AGENT, "custom/1");
+    let res = req.send().await.unwrap();
+
+    let get_all = |name| {
+        let mut vals: Vec<_> = res.headers().get_all(name).cloned().collect();
+        vals.sort();
+        vals
+    };
+    assert_eq!(get_all("x-a"), ["2"]);
+    assert_eq!(get_all("x-tag"), ["a", "b"]);
+    assert_eq!(get_all("user-agent"), ["custom/1"]);
+    let bin = res.headers().get("x-trace-bin").unwrap();
+    assert_eq!(bin, "AP8B");
+    assert_eq!(decode_binary_header(bin).unwrap(), [0, 0xff, 1]);
 }
 
 #[ntex::test]

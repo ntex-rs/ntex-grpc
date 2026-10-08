@@ -151,7 +151,7 @@ async fn send_request<T: MethodDef>(
                             }
                             Some(Ok(_)) | None => {}
                         }
-                        if let Some(st) = pseudo.status.filter(|st| !st.is_success()) {
+                        if let Some(st) = pseudo.status.filter(|st| *st != StatusCode::OK) {
                             return Err(http_status_error(st, headers, Bytes::new()));
                         }
 
@@ -219,7 +219,7 @@ async fn send_request<T: MethodDef>(
             let mut data = payload.get();
             match status {
                 Some(st) => {
-                    if !st.is_success() {
+                    if st != StatusCode::OK {
                         return Err(http_status_error(st, hdrs, data));
                     }
                 }
@@ -268,7 +268,7 @@ async fn send_request<T: MethodDef>(
 const NO_TRAILERS: &str = "Response ended without trailers";
 const NO_GRPC_STATUS: &str = "Response trailers have no grpc-status";
 
-/// Maps a non-2xx HTTP status of a response without `grpc-status`.
+/// Maps an HTTP status other than 200 of a response without `grpc-status`.
 ///
 /// The response headers are reported in place of the trailers.
 fn http_status_error(st: StatusCode, hdrs: HeaderMap, body: Bytes) -> Error<ClientError> {
@@ -354,6 +354,7 @@ mod tests {
             (504, GrpcStatus::Unavailable),
             (500, GrpcStatus::Unknown),
             (302, GrpcStatus::Unknown),
+            (204, GrpcStatus::Unknown),
         ] {
             let st = StatusCode::from_u16(code).unwrap();
             let err = http_status_error(st, HeaderMap::new(), Bytes::new());

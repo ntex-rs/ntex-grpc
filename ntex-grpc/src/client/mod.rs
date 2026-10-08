@@ -134,7 +134,7 @@ pub enum ClientError {
     /// The response had no HTTP status.
     ///
     /// Holds the status, the headers and the body received. The status is
-    /// `None`, a non-2xx status is reported as [`ClientError::GrpcStatus`].
+    /// `None`, a status other than 200 is reported as [`ClientError::GrpcStatus`].
     #[error("Http response {0:?}, headers: {1:?}, body: {2:?}")]
     Response(Option<StatusCode>, HeaderMap, Bytes),
     /// The response ended before a complete reply message arrived.
@@ -158,7 +158,7 @@ pub enum ClientError {
     ///
     /// * an unknown or invalid `grpc-status` gives `UNKNOWN`, a
     ///   `grpc-message` from the server is kept.
-    /// * a non-2xx HTTP status is mapped as the gRPC spec says, e.g. 404 to
+    /// * an HTTP status other than 200 is mapped as the gRPC spec says, e.g. 404 to
     ///   `UNIMPLEMENTED` and 503 to `UNAVAILABLE`. The response headers take
     ///   the place of the trailers here.
     /// * a `content-type` other than `application/grpc` gives `UNKNOWN`.

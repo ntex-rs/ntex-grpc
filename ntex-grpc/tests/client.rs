@@ -43,6 +43,7 @@ method!(UnknownStatus, "/test.Svc/UnknownStatus");
 method!(BadStatus, "/test.Svc/BadStatus");
 method!(UnknownStatusOnly, "/test.Svc/UnknownStatusOnly");
 method!(EncodedMessage, "/test.Svc/EncodedMessage");
+method!(UserAgent, "/test.Svc/UserAgent");
 
 const X_TEST: HeaderName = HeaderName::from_static("x-test");
 const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
@@ -78,7 +79,8 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
     cli.remote_buffer_cap(1024 * 1024);
     srv.remote_buffer_cap(1024 * 1024);
 
-    let paths: Rc<RefCell<HashMap<StreamId, ByteString>>> = Rc::default();
+    // path and headers of each request
+    let paths: Rc<RefCell<HashMap<StreamId, (ByteString, HeaderMap)>>> = Rc::default();
     let resets: Rc<RefCell<Vec<Reason>>> = Rc::default();
     let resets2 = resets.clone();
     let publish = fn_service(move |msg: h2::Message| {
@@ -87,9 +89,11 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
         async move {
             let stream = msg.stream().clone();
             match msg.kind {
-                h2::MessageKind::Headers { pseudo, .. } => {
+                h2::MessageKind::Headers {
+                    pseudo, headers, ..
+                } => {
                     let path = pseudo.path.unwrap();
-                    paths.borrow_mut().insert(stream.id(), path);
+                    paths.borrow_mut().insert(stream.id(), (path, headers));
                 }
                 h2::MessageKind::Eof(h2::StreamEof::Error(err)) => {
                     if let h2::StreamError::Reset(reason) = *err {
@@ -97,7 +101,7 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                     }
                 }
                 h2::MessageKind::Eof(_) => {
-                    let path = paths.borrow_mut().remove(&stream.id()).unwrap();
+                    let (path, req) = paths.borrow_mut().remove(&stream.id()).unwrap();
                     match path.as_ref() {
                         // a regular reply: one empty message, then trailers
                         "/test.Svc/Message" => {
@@ -251,6 +255,14 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                                 HeaderValue::from_static("100%25 bad%0Ainput %E2%82%AC"),
                             );
                             reply(&stream, grpc_headers(), trailers).await;
+                        }
+                        // echoes the request user-agent
+                        "/test.Svc/UserAgent" => {
+                            let mut hdrs = grpc_headers();
+                            if let Some(ua) = req.get(header::USER_AGENT) {
+                                hdrs.insert(header::USER_AGENT, ua.clone());
+                            }
+                            reply(&stream, hdrs, status_ok()).await;
                         }
                         // never replies
                         "/test.Svc/Silent" => {}
@@ -447,6 +459,16 @@ async fn grpc_message_decoded() {
         ClientError::UnexpectedEof(None, HeaderMap::new())
             .grpc_message()
             .is_none()
+    );
+}
+
+#[ntex::test]
+async fn user_agent() {
+    let client = client();
+    let res = send::<UserAgent>(&client).await.unwrap();
+    assert_eq!(
+        res.headers().get(header::USER_AGENT).unwrap(),
+        concat!("grpc-rust-ntex/", env!("CARGO_PKG_VERSION"))
     );
 }
 

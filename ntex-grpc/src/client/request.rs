@@ -38,8 +38,8 @@ impl RequestContext {
 
     /// Set the max duration the request is allowed to take.
     ///
-    /// The duration will be formatted according to [the spec] and use the most precise
-    /// possible.
+    /// The duration is sent in the `grpc-timeout` header, formatted according
+    /// to [the spec] with the most precise unit that fits.
     ///
     /// [the spec]: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
     pub fn timeout<U>(&mut self, timeout: U) -> &mut Self
@@ -58,7 +58,10 @@ impl RequestContext {
         self
     }
 
-    /// Append a header to existing headers.
+    /// Set a request header, replacing any existing value for the same name.
+    ///
+    /// An invalid name or value is not sent; the error is kept and returned
+    /// by [`take_error()`](Self::take_error).
     pub fn header<K, V>(&mut self, key: K, value: V) -> &mut Self
     where
         HeaderName: TryFrom<K>,
@@ -94,9 +97,12 @@ impl RequestContext {
         self.err.take()
     }
 
-    /// Clear existing headers.
+    /// Clear existing headers and timeout.
+    ///
+    /// The timeout is sent as the `grpc-timeout` header, so it is removed too.
     pub fn clear(&mut self) -> &mut Self {
         self.headers.clear();
+        self.timeout = None;
         self
     }
 
@@ -133,17 +139,18 @@ where
         }
     }
 
-    /// Append a header to existing headers.
+    /// Set a request header, replacing any existing value for the same name.
     ///
-    /// ```rust
-    /// use ntex::http::{header, Request, Response};
+    /// An invalid name or value does not panic, [`send()`](Self::send) returns
+    /// the error instead.
     ///
-    /// fn index(req: Request) -> Response {
-    ///     Response::Ok()
-    ///         .header("X-TEST", "value")
-    ///         .header(header::CONTENT_TYPE, "application/json")
-    ///         .build()
-    /// }
+    /// ```rust,ignore
+    /// // `GreeterClient` and `HelloRequest` are generated from a .proto file
+    /// let msg = HelloRequest { name: "world".into(), ..Default::default() };
+    ///
+    /// let mut req = client.say_hello(&msg);
+    /// req.header("x-request-id", "42");
+    /// let res = req.send().await?;
     /// ```
     pub fn header<K, V>(&mut self, key: K, value: V) -> &mut Self
     where
@@ -158,18 +165,15 @@ where
 
     /// Set the max duration the request is allowed to take.
     ///
-    /// The duration will be formatted according to [the spec] and use the most precise
-    /// possible.
+    /// The duration is sent in the `grpc-timeout` header, formatted according
+    /// to [the spec] with the most precise unit that fits.
     ///
     /// [the spec]: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
     pub fn timeout<U>(&mut self, timeout: U) -> &mut Self
     where
         time::Duration: From<U>,
     {
-        let to = timeout.into();
-        self.ctx.timeout = Some(to);
-        self.ctx
-            .header(consts::GRPC_TIMEOUT, duration_to_grpc_timeout(to));
+        self.ctx.timeout(timeout);
         self
     }
 
@@ -279,6 +283,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_header_and_clear() {
+        let mut ctx = RequestContext::new();
+        ctx.header("x-a", "1").header("x-a", "2");
+        assert_eq!(ctx.headers().len(), 1);
+        assert_eq!(ctx.headers()[&HeaderName::from_static("x-a")], "2");
+
+        ctx.timeout(time::Duration::from_secs(1));
+        assert_eq!(ctx.headers().len(), 2);
+        ctx.clear();
+        assert!(ctx.headers().is_empty());
+        assert_eq!(ctx.get_timeout(), None);
+    }
 
     #[test]
     fn duration_to_grpc_timeout_less_than_second() {

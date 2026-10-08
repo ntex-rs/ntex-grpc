@@ -1,5 +1,5 @@
-/// protobuf encoding utils
-/// cloned from `<https://github.com/hyperium/tonic/>`
+//! protobuf encoding utils
+//! cloned from `<https://github.com/hyperium/tonic/>`
 use std::{borrow::Cow, cmp::min, convert::TryFrom, fmt, rc::Rc};
 
 use ntex_bytes::{Buf, BufMut, BytePages, Bytes};

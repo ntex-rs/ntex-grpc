@@ -31,7 +31,7 @@ pub trait ClientInformation<T> {
     /// Get reference to underlying transport
     fn transport(&self) -> &T;
 
-    /// Get mut referece to underlying transport
+    /// Get mut reference to underlying transport
     fn transport_mut(&mut self) -> &mut T;
 
     /// Consume client and return inner transport
@@ -43,7 +43,7 @@ pub struct Client(client::Client);
 
 impl Client {
     #[inline]
-    /// Get reference to h2 client
+    /// Create grpc client transport from h2 client
     pub fn new(client: client::Client) -> Self {
         Self(client)
     }

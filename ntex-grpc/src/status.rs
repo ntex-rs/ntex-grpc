@@ -124,11 +124,9 @@ mod tests {
     use super::*;
 
     #[test]
-    #[allow(deprecated)]
     fn already_exists() {
         let st = GrpcStatus::try_from(6).unwrap();
         assert_eq!(st, GrpcStatus::AlreadyExists);
         assert_eq!(st.signature(), "grpc-status-AlreadyExists");
-        assert!(matches!(st, GrpcStatus::AlredyExists));
     }
 }

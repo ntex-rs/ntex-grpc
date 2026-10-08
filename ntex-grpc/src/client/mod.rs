@@ -141,10 +141,11 @@ pub enum ClientError {
     /// Holds the HTTP status and the headers received so far.
     #[error("Got eof without payload")]
     UnexpectedEof(Option<StatusCode>, HeaderMap),
-    /// The server replied with `DEADLINE_EXCEEDED`.
+    /// The request timeout ran out.
     ///
-    /// Holds the trailers. The client does not stop waiting by itself, the
-    /// server sends this when the request timeout runs out.
+    /// Holds the trailers if the server replied with `DEADLINE_EXCEEDED`.
+    /// The headers are empty if the client stopped waiting by itself, the
+    /// stream is reset with `CANCEL` then.
     #[error("Deadline exceeded")]
     DeadlineExceeded(HeaderMap),
     /// The server replied with a status other than `OK`.

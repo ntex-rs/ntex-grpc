@@ -2,6 +2,8 @@
 
 ## [3.2.0] - Unreleased
 
+* Client enforces the request timeout, returns `ClientError::DeadlineExceeded` with empty headers and resets the stream
+
 * Make `RequestContext::headers()` and `get_disconnect_on_drop()` public, custom transports need them
 
 * Fix code examples in `google_types` docs being run as Rust doctests

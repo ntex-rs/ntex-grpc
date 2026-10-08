@@ -163,14 +163,20 @@ async fn send_request<T: MethodDef>(
                     match data {
                         h2::StreamEof::Data(data, _cap) => {
                             payload.push(data);
-                            missing = Some((GrpcStatus::Internal, NO_TRAILERS));
+                            missing = Some((
+                                GrpcStatus::Internal,
+                                HeaderValue::from_static(NO_TRAILERS),
+                            ));
                         }
                         h2::StreamEof::Trailers(hdrs) => {
                             // check grpc status
                             match check_grpc_status(&hdrs) {
                                 Some(Ok(GrpcStatus::Ok)) => Ok(()),
                                 None => {
-                                    missing = Some((GrpcStatus::Unknown, NO_GRPC_STATUS));
+                                    missing = Some((
+                                        GrpcStatus::Unknown,
+                                        HeaderValue::from_static(NO_GRPC_STATUS),
+                                    ));
                                     Ok(())
                                 }
                                 Some(Ok(GrpcStatus::DeadlineExceeded)) => {
@@ -204,9 +210,9 @@ async fn send_request<T: MethodDef>(
                 }
                 None => return Err(Error::from(ClientError::Response(None, hdrs, data))),
             }
-            if let Some((status, msg)) = missing {
+            if let Some((status, msg)) = check_content_type(&hdrs).or(missing) {
                 if !trailers.contains_key(consts::GRPC_MESSAGE) {
-                    trailers.insert(consts::GRPC_MESSAGE, HeaderValue::from_static(msg));
+                    trailers.insert(consts::GRPC_MESSAGE, msg);
                 }
                 return Err(Error::from(ClientError::GrpcStatus(status, trailers)));
             }
@@ -238,6 +244,35 @@ async fn send_request<T: MethodDef>(
 
 const NO_TRAILERS: &str = "Response ended without trailers";
 const NO_GRPC_STATUS: &str = "Response trailers have no grpc-status";
+
+/// Returns the status to report if the response is not a grpc response.
+///
+/// Accepts `application/grpc`, optionally followed by `+format` or `;params`.
+fn check_content_type(hdrs: &HeaderMap) -> Option<(GrpcStatus, HeaderValue)> {
+    let Some(val) = hdrs.get(header::CONTENT_TYPE) else {
+        return Some((
+            GrpcStatus::Unknown,
+            HeaderValue::from_static("Response has no content-type"),
+        ));
+    };
+    let ct = val.as_bytes();
+    let prefix = b"application/grpc";
+    if ct.len() >= prefix.len()
+        && ct[..prefix.len()].eq_ignore_ascii_case(prefix)
+        && matches!(ct.get(prefix.len()), None | Some(b'+' | b';'))
+    {
+        return None;
+    }
+
+    // grpc-message is percent-encoded, only use plain values verbatim
+    let msg = val
+        .to_str()
+        .ok()
+        .filter(|v| !v.contains(['%', '\t']))
+        .and_then(|v| HeaderValue::try_from(format!("Invalid content-type: {v}")).ok())
+        .unwrap_or_else(|| HeaderValue::from_static("Invalid content-type"));
+    Some((GrpcStatus::Unknown, msg))
+}
 
 fn check_grpc_status(hdrs: &HeaderMap) -> Option<Result<GrpcStatus, ()>> {
     // check grpc status

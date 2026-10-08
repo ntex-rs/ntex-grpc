@@ -56,12 +56,16 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
 
 /// Stop waiting once the request timeout runs out.
 ///
-/// The pending stream is dropped, which resets it with `CANCEL`.
+/// The pending stream is dropped, which resets it with `CANCEL`. A zero
+/// timeout has already run out, the request is not sent then.
 async fn with_deadline<R>(
     timeout: Option<Duration>,
     fut: impl Future<Output = Result<R, Error<ClientError>>>,
 ) -> Result<R, Error<ClientError>> {
     if let Some(timeout) = timeout {
+        if timeout.is_zero() {
+            return Err(Error::from(ClientError::DeadlineExceeded(HeaderMap::new())));
+        }
         time::timeout(timeout, fut)
             .await
             .unwrap_or_else(|()| Err(Error::from(ClientError::DeadlineExceeded(HeaderMap::new()))))

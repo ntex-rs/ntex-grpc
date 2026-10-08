@@ -606,6 +606,26 @@ async fn client_timeout() {
 }
 
 #[ntex::test]
+async fn zero_timeout() {
+    let (client, resets) = client_with_resets();
+    let mut req = Request::<_, Silent>::new(&client, &());
+    req.timeout(Duration::ZERO);
+    let err = ntex::time::timeout(Duration::from_secs(5), req.send())
+        .await
+        .expect("the deadline has already passed")
+        .unwrap_err();
+    let ClientError::DeadlineExceeded(ref hdrs) = *err else {
+        panic!("{err:?}")
+    };
+    assert!(hdrs.is_empty());
+
+    // nothing is sent, so there is no stream to reset
+    let res = send::<Message>(&client).await.unwrap();
+    assert_eq!(res.res_size, 5);
+    assert!(resets.borrow().is_empty());
+}
+
+#[ntex::test]
 async fn timeout_not_reached() {
     let client = client();
     let mut req = Request::<_, Message>::new(&client, &());

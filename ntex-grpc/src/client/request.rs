@@ -47,6 +47,7 @@ impl RequestContext {
     /// to [the spec] with the most precise unit that fits. Built-in transports
     /// also stop waiting when it runs out and return
     /// [`ClientError::DeadlineExceeded`](super::ClientError::DeadlineExceeded).
+    /// A zero timeout fails the call without sending it.
     ///
     /// [the spec]: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
     pub fn timeout<U>(&mut self, timeout: U) -> &mut Self
@@ -188,6 +189,7 @@ where
     /// to [the spec] with the most precise unit that fits. Built-in transports
     /// also stop waiting when it runs out and return
     /// [`ClientError::DeadlineExceeded`](super::ClientError::DeadlineExceeded).
+    /// A zero timeout fails the call without sending it.
     ///
     /// [the spec]: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
     pub fn timeout<U>(&mut self, timeout: U) -> &mut Self
@@ -362,5 +364,11 @@ mod tests {
         let one_hour = time::Duration::from_hours(1);
         let value = duration_to_grpc_timeout(one_hour);
         assert_eq!(value, format!("{}m", one_hour.as_millis()));
+
+        assert_eq!(duration_to_grpc_timeout(time::Duration::ZERO), "0n");
+        assert_eq!(
+            duration_to_grpc_timeout(time::Duration::from_nanos(1)),
+            "1n"
+        );
     }
 }

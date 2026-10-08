@@ -36,10 +36,17 @@ method!(Proto, "/test.Svc/Proto");
 method!(Busy, "/test.Svc/Busy");
 method!(Missing, "/test.Svc/Missing");
 method!(ProxyError, "/test.Svc/ProxyError");
+method!(Compressed, "/test.Svc/Compressed");
+method!(Gzip, "/test.Svc/Gzip");
+method!(BadFlag, "/test.Svc/BadFlag");
+method!(UnknownStatus, "/test.Svc/UnknownStatus");
+method!(BadStatus, "/test.Svc/BadStatus");
+method!(UnknownStatusOnly, "/test.Svc/UnknownStatusOnly");
 
 const X_TEST: HeaderName = HeaderName::from_static("x-test");
 const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
 const GRPC_MESSAGE: HeaderName = HeaderName::from_static("grpc-message");
+const GRPC_ENCODING: HeaderName = HeaderName::from_static("grpc-encoding");
 
 fn grpc_headers() -> HeaderMap {
     let mut hdrs = HeaderMap::new();
@@ -206,6 +213,35 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                                 .send_response(StatusCode::INTERNAL_SERVER_ERROR, hdrs, true)
                                 .unwrap();
                         }
+                        // compressed messages, the client only accepts identity
+                        "/test.Svc/Compressed" => {
+                            reply_with(&stream, grpc_headers(), b"\x01\0\0\0\0").await;
+                        }
+                        "/test.Svc/Gzip" => {
+                            let mut hdrs = grpc_headers();
+                            hdrs.insert(GRPC_ENCODING, HeaderValue::from_static("gzip"));
+                            reply_with(&stream, hdrs, b"\x01\0\0\0\0").await;
+                        }
+                        "/test.Svc/BadFlag" => {
+                            reply_with(&stream, grpc_headers(), b"\x02\0\0\0\0").await;
+                        }
+                        // status codes the client does not know
+                        "/test.Svc/UnknownStatus" => {
+                            let mut trailers = HeaderMap::new();
+                            trailers.insert(GRPC_STATUS, HeaderValue::from_static("17"));
+                            trailers.insert(GRPC_MESSAGE, HeaderValue::from_static("boom"));
+                            reply(&stream, grpc_headers(), trailers).await;
+                        }
+                        "/test.Svc/BadStatus" => {
+                            let mut trailers = HeaderMap::new();
+                            trailers.insert(GRPC_STATUS, HeaderValue::from_static("abc"));
+                            reply(&stream, grpc_headers(), trailers).await;
+                        }
+                        "/test.Svc/UnknownStatusOnly" => {
+                            let mut hdrs = grpc_headers();
+                            hdrs.insert(GRPC_STATUS, HeaderValue::from_static("999"));
+                            stream.send_response(StatusCode::OK, hdrs, true).unwrap();
+                        }
                         // never replies
                         "/test.Svc/Silent" => {}
                         _ => panic!("unexpected request {path}"),
@@ -230,6 +266,16 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
 
     let io = Io::new(cli, SharedCfg::new("CLI").build());
     (SimpleClient::new(io, false, "localhost".into()), resets)
+}
+
+/// Sends response headers, the body and an OK status.
+async fn reply_with(stream: &h2::StreamRef, hdrs: HeaderMap, body: &'static [u8]) {
+    stream.send_response(StatusCode::OK, hdrs, false).unwrap();
+    stream
+        .send_payload(Bytes::from_static(body), false)
+        .await
+        .unwrap();
+    stream.send_trailers(status_ok()).unwrap();
 }
 
 /// Sends response headers, one empty message and trailers.
@@ -333,6 +379,42 @@ async fn invalid_content_type() {
 }
 
 #[ntex::test]
+async fn unknown_grpc_status() {
+    let client = client();
+
+    // the server's message is kept
+    let err = send::<UnknownStatus>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, trailers, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Unknown);
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "17");
+    assert_eq!(trailers.get(GRPC_MESSAGE).unwrap(), "boom");
+    assert_eq!(body.as_deref(), Some(&b"\0\0\0\0\0"[..]));
+
+    let err = send::<BadStatus>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, trailers, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Unknown);
+    assert_eq!(
+        trailers.get(GRPC_MESSAGE).unwrap(),
+        "Unknown grpc-status: abc"
+    );
+    assert_eq!(body.as_deref(), Some(&b"\0\0\0\0\0"[..]));
+
+    // headers-only response
+    let err = send::<UnknownStatusOnly>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Unknown);
+    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
+    assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), "Unknown grpc-status: 999");
+    assert_eq!(body.as_deref(), Some(&b""[..]));
+}
+
+#[ntex::test]
 async fn http_status() {
     let client = client();
     let err = send::<Busy>(&client).await.unwrap_err();
@@ -360,6 +442,36 @@ async fn http_status() {
     assert_eq!(*status, GrpcStatus::ResourceExhausted);
     assert!(hdrs.get(GRPC_MESSAGE).is_none());
     assert!(body.is_none());
+}
+
+#[ntex::test]
+async fn compressed_flag() {
+    let client = client();
+    for (err, msg, body) in [
+        (
+            send::<Compressed>(&client).await.unwrap_err(),
+            "Compressed message without grpc-encoding",
+            &b"\x01\0\0\0\0"[..],
+        ),
+        (
+            send::<Gzip>(&client).await.unwrap_err(),
+            "Unsupported grpc-encoding: gzip",
+            &b"\x01\0\0\0\0"[..],
+        ),
+        (
+            send::<BadFlag>(&client).await.unwrap_err(),
+            "Invalid compressed flag 2",
+            &b"\x02\0\0\0\0"[..],
+        ),
+    ] {
+        let ClientError::GrpcStatus(status, trailers, data) = &*err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(*status, GrpcStatus::Internal);
+        assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+        assert_eq!(trailers.get(GRPC_MESSAGE).unwrap(), msg);
+        assert_eq!(data.as_deref(), Some(body));
+    }
 }
 
 #[ntex::test]

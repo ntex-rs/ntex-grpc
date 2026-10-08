@@ -7,7 +7,8 @@ use ntex_http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use ntex_util::time;
 
 use super::{Client, ClientError, Transport, request::RequestContext, request::Response};
-use crate::{DecodeError, GrpcStatus, Message, consts, service::MethodDef, utils::Data};
+use crate::utils::{self, Data, FlagError};
+use crate::{GrpcStatus, Message, consts, service::MethodDef};
 
 impl<T: MethodDef> Transport<T> for Client {
     type Error = Error<ClientError>;
@@ -140,10 +141,13 @@ async fn send_request<T: MethodDef>(
                                     status, headers, None,
                                 )));
                             }
-                            Some(Err(())) => {
-                                return Err(Error::from(ClientError::Decode(DecodeError::new(
-                                    "Cannot parse grpc status",
-                                ))));
+                            Some(Err(msg)) => {
+                                return Err(synthesized_status(
+                                    GrpcStatus::Unknown,
+                                    headers,
+                                    msg,
+                                    Bytes::new(),
+                                ));
                             }
                             Some(Ok(_)) | None => {}
                         }
@@ -176,13 +180,12 @@ async fn send_request<T: MethodDef>(
                         h2::StreamEof::Trailers(hdrs) => {
                             // check grpc status
                             match check_grpc_status(&hdrs) {
-                                Some(Ok(GrpcStatus::Ok)) => Ok(()),
+                                Some(Ok(GrpcStatus::Ok)) => {}
                                 None => {
                                     missing = Some((
                                         GrpcStatus::Unknown,
                                         HeaderValue::from_static(NO_GRPC_STATUS),
                                     ));
-                                    Ok(())
                                 }
                                 Some(Ok(GrpcStatus::DeadlineExceeded)) => {
                                     return Err(Error::from(ClientError::DeadlineExceeded(hdrs)));
@@ -192,10 +195,15 @@ async fn send_request<T: MethodDef>(
                                         st, hdrs, None,
                                     )));
                                 }
-                                Some(Err(())) => Err(Error::from(ClientError::Decode(
-                                    DecodeError::new("Cannot parse grpc status"),
-                                ))),
-                            }?;
+                                Some(Err(msg)) => {
+                                    return Err(synthesized_status(
+                                        GrpcStatus::Unknown,
+                                        hdrs,
+                                        msg,
+                                        payload.get(),
+                                    ));
+                                }
+                            }
                             trailers = hdrs;
                         }
                         h2::StreamEof::Error(err) => {
@@ -218,20 +226,24 @@ async fn send_request<T: MethodDef>(
                 None => return Err(Error::from(ClientError::Response(None, hdrs, data))),
             }
             if let Some((status, msg)) = check_content_type(&hdrs).or(missing) {
-                if !trailers.contains_key(consts::GRPC_MESSAGE) {
-                    trailers.insert(consts::GRPC_MESSAGE, msg);
-                }
-                return Err(Error::from(ClientError::GrpcStatus(
-                    status,
-                    trailers,
-                    Some(data),
-                )));
+                return Err(synthesized_status(status, trailers, msg, data));
             }
             let resp_size = data.len();
             if resp_size < 5 {
                 return Err(Error::from(ClientError::UnexpectedEof(status, hdrs)));
             }
-            let _compressed = data.get_u8();
+            // we only accept identity, a compliant server never compresses
+            if let Err(FlagError::Unsupported(msg) | FlagError::Invalid(msg)) =
+                utils::check_compressed_flag(data[0], &hdrs)
+            {
+                return Err(synthesized_status(
+                    GrpcStatus::Internal,
+                    trailers,
+                    msg,
+                    data,
+                ));
+            }
+            data.advance(1);
             let len = data.get_u32();
             let Some(mut block) = data.split_to_checked(len as usize) else {
                 return Err(Error::from(ClientError::UnexpectedEof(None, hdrs)));
@@ -259,7 +271,7 @@ const NO_GRPC_STATUS: &str = "Response trailers have no grpc-status";
 /// Maps a non-2xx HTTP status of a response without `grpc-status`.
 ///
 /// The response headers are reported in place of the trailers.
-fn http_status_error(st: StatusCode, mut hdrs: HeaderMap, body: Bytes) -> Error<ClientError> {
+fn http_status_error(st: StatusCode, hdrs: HeaderMap, body: Bytes) -> Error<ClientError> {
     let status = match st.as_u16() {
         400 => GrpcStatus::Internal,
         401 => GrpcStatus::Unauthenticated,
@@ -268,9 +280,20 @@ fn http_status_error(st: StatusCode, mut hdrs: HeaderMap, body: Bytes) -> Error<
         429 | 502 | 503 | 504 => GrpcStatus::Unavailable,
         _ => GrpcStatus::Unknown,
     };
-    if !hdrs.contains_key(consts::GRPC_MESSAGE)
-        && let Ok(msg) = HeaderValue::try_from(format!("HTTP status {}", st.as_u16()))
-    {
+    let msg = HeaderValue::try_from(format!("HTTP status {}", st.as_u16()))
+        .unwrap_or_else(|_| HeaderValue::from_static("HTTP error"));
+    synthesized_status(status, hdrs, msg, body)
+}
+
+/// Reports a status the client picked, `msg` is added as `grpc-message`
+/// unless the server sent one.
+fn synthesized_status(
+    status: GrpcStatus,
+    mut hdrs: HeaderMap,
+    msg: HeaderValue,
+    body: Bytes,
+) -> Error<ClientError> {
+    if !hdrs.contains_key(consts::GRPC_MESSAGE) {
         hdrs.insert(consts::GRPC_MESSAGE, msg);
     }
     Error::from(ClientError::GrpcStatus(status, hdrs, Some(body)))
@@ -295,32 +318,23 @@ fn check_content_type(hdrs: &HeaderMap) -> Option<(GrpcStatus, HeaderValue)> {
         return None;
     }
 
-    // grpc-message is percent-encoded, only use plain values verbatim
-    let msg = val
-        .to_str()
-        .ok()
-        .filter(|v| !v.contains(['%', '\t']))
-        .and_then(|v| HeaderValue::try_from(format!("Invalid content-type: {v}")).ok())
-        .unwrap_or_else(|| HeaderValue::from_static("Invalid content-type"));
-    Some((GrpcStatus::Unknown, msg))
+    Some((
+        GrpcStatus::Unknown,
+        utils::grpc_message("Invalid content-type", val),
+    ))
 }
 
-fn check_grpc_status(hdrs: &HeaderMap) -> Option<Result<GrpcStatus, ()>> {
-    // check grpc status
-    if let Some(val) = hdrs.get(consts::GRPC_STATUS) {
-        if let Ok(status) = val
-            .to_str()
-            .map_err(|_| ())
-            .and_then(|v| u8::from_str(v).map_err(|_| ()))
-            .and_then(GrpcStatus::try_from)
-        {
-            Some(Ok(status))
-        } else {
-            Some(Err(()))
-        }
-    } else {
-        None
-    }
+/// Reads `grpc-status`, an unknown or invalid code is an error with the
+/// `grpc-message` to report it with `UNKNOWN`.
+fn check_grpc_status(hdrs: &HeaderMap) -> Option<Result<GrpcStatus, HeaderValue>> {
+    let val = hdrs.get(consts::GRPC_STATUS)?;
+    Some(
+        val.to_str()
+            .ok()
+            .and_then(|v| u8::from_str(v).ok())
+            .and_then(|v| GrpcStatus::try_from(v).ok())
+            .ok_or_else(|| utils::grpc_message("Unknown grpc-status", val)),
+    )
 }
 
 #[cfg(test)]

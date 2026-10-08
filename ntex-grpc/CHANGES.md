@@ -2,6 +2,14 @@
 
 ## [3.2.0] - Unreleased
 
+* Client reports an unknown or invalid `grpc-status` as `ClientError::GrpcStatus` with `UNKNOWN` instead of `ClientError::Decode`
+
+* Client fails a compressed reply with `ClientError::GrpcStatus` and `INTERNAL`, only identity is supported
+
+* Server answers a compressed request with `UNIMPLEMENTED`, or `INTERNAL` if `grpc-encoding` is missing, and sends `grpc-accept-encoding: identity`
+
+* Server no longer panics on a request body shorter than 5 bytes
+
 * Client maps a non-2xx HTTP status without `grpc-status` to a gRPC code as the spec says and returns `ClientError::GrpcStatus` instead of `ClientError::Response`
 
 * `ClientError::GrpcStatus` holds the response body when the client picked the status

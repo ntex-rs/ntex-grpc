@@ -153,8 +153,10 @@ pub enum ClientError {
     /// Holds the status and the trailers, the error text is in the
     /// `grpc-message` trailer.
     ///
-    /// If the server sent no `grpc-status`, the client picks one:
+    /// If the server sent no valid `grpc-status`, the client picks one:
     ///
+    /// * an unknown or invalid `grpc-status` gives `UNKNOWN`, a
+    ///   `grpc-message` from the server is kept.
     /// * a non-2xx HTTP status is mapped as the gRPC spec says, e.g. 404 to
     ///   `UNIMPLEMENTED` and 503 to `UNAVAILABLE`. The response headers take
     ///   the place of the trailers here.

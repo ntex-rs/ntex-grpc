@@ -111,11 +111,15 @@ impl RequestContext {
         self
     }
 
-    pub(crate) fn headers(&self) -> &HashMap<HeaderName, HeaderValue> {
-        &self.headers
+    /// Headers set for the call, including `grpc-timeout`.
+    ///
+    /// A custom transport sends them with the request.
+    pub fn headers(&self) -> impl ExactSizeIterator<Item = (&HeaderName, &HeaderValue)> {
+        self.headers.iter()
     }
 
-    pub(crate) fn get_disconnect_on_drop(&self) -> bool {
+    /// Check if the connection must be closed when the request is dropped.
+    pub fn get_disconnect_on_drop(&self) -> bool {
         self.flags.contains(Flags::DISCONNECT_ON_DROP)
     }
 }
@@ -313,14 +317,32 @@ mod tests {
     fn context_header_and_clear() {
         let mut ctx = RequestContext::new();
         ctx.header("x-a", "1").header("x-a", "2");
-        assert_eq!(ctx.headers().len(), 1);
-        assert_eq!(ctx.headers()[&HeaderName::from_static("x-a")], "2");
+        let hdrs: Vec<_> = ctx.headers().collect();
+        assert_eq!(
+            hdrs,
+            [(
+                &HeaderName::from_static("x-a"),
+                &HeaderValue::from_static("2")
+            )]
+        );
 
         ctx.timeout(time::Duration::from_secs(1));
         assert_eq!(ctx.headers().len(), 2);
+        assert!(
+            ctx.headers()
+                .any(|(k, v)| k == consts::GRPC_TIMEOUT && v == "1000000u")
+        );
         ctx.clear();
-        assert!(ctx.headers().is_empty());
+        assert_eq!(ctx.headers().len(), 0);
         assert_eq!(ctx.get_timeout(), None);
+    }
+
+    #[test]
+    fn context_disconnect_on_drop() {
+        let mut ctx = RequestContext::new();
+        assert!(!ctx.get_disconnect_on_drop());
+        ctx.disconnect_on_drop();
+        assert!(ctx.get_disconnect_on_drop());
     }
 
     #[test]

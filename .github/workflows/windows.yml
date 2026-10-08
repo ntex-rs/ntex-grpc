@@ -89,11 +89,11 @@ jobs:
         timeout-minutes: 10
         with:
           command: test
-          args: --workspace --exclude ntex-prost-build --lib --bins --tests -- --nocapture
+          args: --workspace --exclude ntex-prost-build --lib --bins --tests
 
       - name: Run tests [tokio]
         uses: actions-rs/cargo@v1
         timeout-minutes: 10
         with:
           command: test
-          args: --workspace --exclude ntex-prost-build --lib --bins --tests --features=ntex/tokio -- --nocapture
+          args: --workspace --exclude ntex-prost-build --lib --bins --tests --features=ntex/tokio

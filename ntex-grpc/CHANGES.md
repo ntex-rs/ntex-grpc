@@ -2,6 +2,8 @@
 
 ## [3.2.0] - Unreleased
 
+* Add `ClientError::grpc_message()`, returns the percent-decoded `grpc-message`
+
 * Client reports an unknown or invalid `grpc-status` as `ClientError::GrpcStatus` with `UNKNOWN` instead of `ClientError::Decode`
 
 * Client fails a compressed reply with `ClientError::GrpcStatus` and `INTERNAL`, only identity is supported

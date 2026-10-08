@@ -124,7 +124,9 @@ pub enum ClientError {
         #[source]
         OperationError,
     ),
-    /// The HTTP/2 stream failed, e.g. the server reset it.
+    /// The HTTP/2 stream failed, e.g. the server broke the protocol.
+    ///
+    /// A reset from the server is reported as [`ClientError::GrpcStatus`].
     #[error("HTTP2 Stream")]
     Stream(
         #[from]
@@ -161,6 +163,9 @@ pub enum ClientError {
     /// * an HTTP status other than 200 is mapped as the gRPC spec says, e.g. 404 to
     ///   `UNIMPLEMENTED` and 503 to `UNAVAILABLE`. The response headers take
     ///   the place of the trailers here.
+    /// * a stream reset by the server is mapped as the gRPC spec says, e.g.
+    ///   `REFUSED_STREAM` to `UNAVAILABLE` and `CANCEL` to `CANCELLED`. The
+    ///   response headers take the place of the trailers here.
     /// * a `content-type` other than `application/grpc` gives `UNKNOWN`.
     /// * trailers without `grpc-status` give `UNKNOWN`.
     /// * a response that ends without trailers gives `INTERNAL`.

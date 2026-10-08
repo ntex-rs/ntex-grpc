@@ -6,7 +6,7 @@ use ntex::testing::IoTest;
 use ntex_bytes::{ByteString, Bytes};
 use ntex_error::Error;
 use ntex_grpc::client::{ClientError, Request, Response};
-use ntex_grpc::{GrpcStatus, HashMap, MethodDef};
+use ntex_grpc::{GrpcStatus, HashMap, MethodDef, google_types::BytesValue};
 use ntex_h2::{self as h2, client::SimpleClient, frame::Reason, frame::StreamId};
 use ntex_http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 
@@ -46,6 +46,18 @@ method!(EncodedMessage, "/test.Svc/EncodedMessage");
 method!(UserAgent, "/test.Svc/UserAgent");
 method!(Accepted, "/test.Svc/Accepted");
 method!(NoContent, "/test.Svc/NoContent");
+method!(Refused, "/test.Svc/Refused");
+method!(ResetAfterHeaders, "/test.Svc/ResetAfterHeaders");
+
+/// Replies before it reads the request.
+struct EarlyStatus;
+
+impl MethodDef for EarlyStatus {
+    const NAME: &'static str = "EarlyStatus";
+    const PATH: ByteString = ByteString::from_static("/test.Svc/EarlyStatus");
+    type Input = BytesValue;
+    type Output = ();
+}
 
 const X_TEST: HeaderName = HeaderName::from_static("x-test");
 const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
@@ -95,6 +107,16 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                     pseudo, headers, ..
                 } => {
                     let path = pseudo.path.unwrap();
+                    if path == "/test.Svc/EarlyStatus" {
+                        let mut trailers = HeaderMap::new();
+                        trailers.insert(GRPC_STATUS, HeaderValue::from_static("3"));
+                        stream
+                            .send_response(StatusCode::OK, grpc_headers(), false)
+                            .unwrap();
+                        stream.send_trailers(trailers).unwrap();
+                        stream.reset(Reason::NO_ERROR);
+                        return Ok(());
+                    }
                     paths.borrow_mut().insert(stream.id(), (path, headers));
                 }
                 h2::MessageKind::Eof(h2::StreamEof::Error(err)) => {
@@ -282,6 +304,19 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                             stream
                                 .send_response(StatusCode::NO_CONTENT, grpc_headers(), true)
                                 .unwrap();
+                        }
+                        "/test.Svc/Refused" => {
+                            stream.reset(Reason::REFUSED_STREAM);
+                        }
+                        "/test.Svc/ResetAfterHeaders" => {
+                            stream
+                                .send_response(StatusCode::OK, grpc_headers(), false)
+                                .unwrap();
+                            stream
+                                .send_payload(Bytes::from_static(b"\0\0"), false)
+                                .await
+                                .unwrap();
+                            stream.reset(Reason::ENHANCE_YOUR_CALM);
                         }
                         // never replies
                         "/test.Svc/Silent" => {}
@@ -603,6 +638,55 @@ async fn client_timeout() {
     let res = send::<Message>(&client).await.unwrap();
     assert_eq!(res.res_size, 5);
     assert_eq!(*resets.borrow(), [Reason::CANCEL]);
+}
+
+#[ntex::test]
+async fn stream_reset() {
+    let client = client();
+    let err = send::<Refused>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Unavailable);
+    assert_eq!(
+        hdrs.get(GRPC_MESSAGE).unwrap(),
+        "Stream reset with REFUSED_STREAM"
+    );
+    assert_eq!(body.as_deref(), Some(&b""[..]));
+
+    // the headers and the payload received before the reset are kept
+    let err = send::<ResetAfterHeaders>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::ResourceExhausted);
+    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
+    assert_eq!(
+        hdrs.get(GRPC_MESSAGE).unwrap(),
+        "Stream reset with ENHANCE_YOUR_CALM"
+    );
+    assert_eq!(body.as_deref(), Some(&b"\0\0"[..]));
+}
+
+#[ntex::test]
+async fn early_reply() {
+    let client = client();
+    let input = BytesValue {
+        value: Bytes::from(vec![0; 1024 * 1024]),
+    };
+    let err = Request::<_, EarlyStatus>::new(&client, &input)
+        .send()
+        .await
+        .unwrap_err();
+    let ClientError::GrpcStatus(status, _, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::InvalidArgument);
+    assert!(body.is_none());
+
+    // the connection stays usable
+    let res = send::<Message>(&client).await.unwrap();
+    assert_eq!(res.res_size, 5);
 }
 
 #[ntex::test]

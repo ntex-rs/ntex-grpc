@@ -2,7 +2,7 @@ use std::{convert::TryFrom, future::Future, str::FromStr, time::Duration};
 
 use ntex_bytes::{Buf, BufMut, BytePages, Bytes};
 use ntex_error::Error;
-use ntex_h2::{self as h2};
+use ntex_h2::{self as h2, OperationError, frame::Reason};
 use ntex_http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use ntex_util::time;
 
@@ -109,10 +109,16 @@ async fn send_request<T: MethodDef>(
     if ctx.get_disconnect_on_drop() {
         snd_stream.disconnect_on_drop();
     }
-    snd_stream
-        .send_pages(buf, true)
-        .await
-        .map_err(|e| e.map(ClientError::from))?;
+    if let Err(err) = snd_stream.send_pages(buf, true).await {
+        // the server can reply and reset the stream before it reads the
+        // whole request, the reply or the reset is in the receive queue
+        if !matches!(
+            *err,
+            OperationError::RemoteReset(_) | OperationError::Closed(Some(_))
+        ) {
+            return Err(err.map(ClientError::from));
+        }
+    }
 
     // read response
     let mut status = None;
@@ -211,6 +217,9 @@ async fn send_request<T: MethodDef>(
                             trailers = hdrs;
                         }
                         h2::StreamEof::Error(err) => {
+                            if let h2::StreamError::Reset(reason) = *err {
+                                return Err(reset_error(reason, hdrs, payload.get()));
+                            }
                             return Err(err.map(ClientError::Stream));
                         }
                     }
@@ -287,6 +296,16 @@ fn http_status_error(st: StatusCode, hdrs: HeaderMap, body: Bytes) -> Error<Clie
     let msg = HeaderValue::try_from(format!("HTTP status {}", st.as_u16()))
         .unwrap_or_else(|_| HeaderValue::from_static("HTTP error"));
     synthesized_status(status, hdrs, msg, body)
+}
+
+/// Maps a stream reset by the server.
+///
+/// The response headers received so far are reported in place of the
+/// trailers.
+fn reset_error(reason: Reason, hdrs: HeaderMap, body: Bytes) -> Error<ClientError> {
+    let msg = HeaderValue::try_from(format!("Stream reset with {reason:?}"))
+        .unwrap_or_else(|_| HeaderValue::from_static("Stream reset"));
+    synthesized_status(GrpcStatus::from(reason), hdrs, msg, body)
 }
 
 /// Reports a status the client picked, `msg` is added as `grpc-message`

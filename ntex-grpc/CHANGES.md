@@ -2,57 +2,90 @@
 
 ## [3.2.0] - Unreleased
 
-* Client reports a connection that is closed, fails or goes away during a call as `ClientError::GrpcStatus` with `UNAVAILABLE` instead of `ClientError::Operation`
+* `Request::header()` and `RequestContext::header()` ignore headers the client
+  sets itself: `content-type`, `user-agent`, `te`, `grpc-encoding`,
+  `grpc-message-type`, `grpc-message`, `grpc-status` and `grpc-timeout`. They
+  replaced the client's values before. Other headers are sent after the client's
+  ones, a `grpc-accept-encoding` set by the user is sent along with `identity`
 
-* Client does not send a request message larger than 2 GiB - 1 and fails with `RESOURCE_EXHAUSTED`, a message of 4 GiB or more got a truncated length prefix. Add `Request::max_send_message_size()` and `RequestContext::max_send_message_size()` to change the limit
+* Client reports a connection that is closed, fails or goes away during a call
+  as `ClientError::GrpcStatus` with `UNAVAILABLE` instead of
+  `ClientError::Operation`
 
-* Add `Request::append_header()` and `RequestContext::append_header()` to send several values for one metadata key
+* Client does not send a request message larger than 2 GiB - 1 and fails with
+  `RESOURCE_EXHAUSTED`, a message of 4 GiB or more got a truncated length
+  prefix. Add `Request::max_send_message_size()` and
+  `RequestContext::max_send_message_size()` to change the limit
 
-* Add `encode_binary_header()` and `decode_binary_header()` for `-bin` metadata values, which are base64 encoded
+* Add `Request::append_header()` and `RequestContext::append_header()` to send
+  several values for one metadata key
 
-* `RequestContext::headers()` returns `impl Iterator` instead of `impl ExactSizeIterator`, it yields every value of a key
+* Add `encode_binary_header()` and `decode_binary_header()` for `-bin` metadata
+  values, which are base64 encoded
 
-* Client fails a response with data after the message with `INTERNAL`, it was ignored
+* `RequestContext::headers()` returns `impl Iterator` instead of
+  `impl ExactSizeIterator`, it yields every value of a key
 
-* Client limits the size of a received message to 4 MiB, larger messages fail with `RESOURCE_EXHAUSTED`. Add `Request::max_message_size()` and `RequestContext::max_message_size()` to change it
+* Client fails a response with data after the message with `INTERNAL`, it was
+  ignored
 
-* Client maps a stream reset by the server to a gRPC code as the spec says and returns `ClientError::GrpcStatus` instead of `ClientError::Stream`
+* Client limits the size of a received message to 4 MiB, larger messages fail
+  with `RESOURCE_EXHAUSTED`. Add `Request::max_message_size()` and
+  `RequestContext::max_message_size()` to change it
 
-* Client reads the reply if the server resets the stream before the request is sent, a server can reply early
+* Client maps a stream reset by the server to a gRPC code as the spec says and
+  returns `ClientError::GrpcStatus` instead of `ClientError::Stream`
 
-* Client fails a call with a zero timeout with `DeadlineExceeded` without sending it
+* Client reads the reply if the server resets the stream before the request is
+  sent, a server can reply early
 
-* Client accepts only HTTP status 200, other 2xx statuses are reported as `UNKNOWN`
+* Client fails a call with a zero timeout with `DeadlineExceeded` without
+  sending it
 
-* Client sends `user-agent: grpc-rust-ntex/<version>` with the crate version, was `ntex-grpc/1.0.0`
+* Client accepts only HTTP status 200, other 2xx statuses are reported as
+  `UNKNOWN`
+
+* Client sends `user-agent: grpc-rust-ntex/<version>` with the crate version,
+  was `ntex-grpc/1.0.0`
 
 * Add `ClientError::grpc_message()`, returns the percent-decoded `grpc-message`
 
-* Client reports an unknown or invalid `grpc-status` as `ClientError::GrpcStatus` with `UNKNOWN` instead of `ClientError::Decode`
+* Client reports an unknown or invalid `grpc-status` as
+  `ClientError::GrpcStatus` with `UNKNOWN` instead of `ClientError::Decode`
 
-* Client fails a compressed reply with `ClientError::GrpcStatus` and `INTERNAL`, only identity is supported
+* Client fails a compressed reply with `ClientError::GrpcStatus` and `INTERNAL`,
+  only identity is supported
 
-* Server answers a compressed request with `UNIMPLEMENTED`, or `INTERNAL` if `grpc-encoding` is missing, and sends `grpc-accept-encoding: identity`
+* Server answers a compressed request with `UNIMPLEMENTED`, or `INTERNAL` if
+  `grpc-encoding` is missing, and sends `grpc-accept-encoding: identity`
 
 * Server no longer panics on a request body shorter than 5 bytes
 
-* Client maps an HTTP status other than 200 without `grpc-status` to a gRPC code as the spec says and returns `ClientError::GrpcStatus` instead of `ClientError::Response`
+* Client maps an HTTP status other than 200 without `grpc-status` to a gRPC code
+  as the spec says and returns `ClientError::GrpcStatus` instead of
+  `ClientError::Response`
 
-* `ClientError::GrpcStatus` holds the response body when the client picked the status
+* `ClientError::GrpcStatus` holds the response body when the client picked the
+  status
 
-* Client fails a response without `grpc-status` with `ClientError::GrpcStatus`, `UNKNOWN` if the trailers lack it, `INTERNAL` if there are no trailers
+* Client fails a response without `grpc-status` with `ClientError::GrpcStatus`,
+  `UNKNOWN` if the trailers lack it, `INTERNAL` if there are no trailers
 
-* Client fails a response whose `content-type` is not `application/grpc` with `ClientError::GrpcStatus` and `UNKNOWN`
+* Client fails a response whose `content-type` is not `application/grpc` with
+  `ClientError::GrpcStatus` and `UNKNOWN`
 
-* Client enforces the request timeout, returns `ClientError::DeadlineExceeded` with empty headers and resets the stream
+* Client enforces the request timeout, returns `ClientError::DeadlineExceeded`
+  with empty headers and resets the stream
 
-* Make `RequestContext::headers()` and `get_disconnect_on_drop()` public, custom transports need them
+* Make `RequestContext::headers()` and `get_disconnect_on_drop()` public, custom
+  transports need them
 
 * Fix code examples in `google_types` docs being run as Rust doctests
 
 * Document all public items, add crate level docs
 
-* Fix client `Response::res_size`, it reported the leftover bytes instead of the response size
+* Fix client `Response::res_size`, it reported the leftover bytes instead of the
+  response size
 
 * Fix client panic on a response with a body shorter than the gRPC frame prefix
 
@@ -62,18 +95,20 @@
 
 * Add `Display` for `ClientError::Client`
 
-* `RequestContext::clear()` also resets the timeout, it already removed the `grpc-timeout` header
+* `RequestContext::clear()` also resets the timeout, it already removed the
+  `grpc-timeout` header
 
 * Rename `GrpcStatus::AlredyExists` to `GrpcStatus::AlreadyExists`.
   `signature()` now returns `grpc-status-AlreadyExists`
 
-* Export `NegativeDurationError` and `OutOfRangeDurationError`, implement `Error` for both
+* Export `NegativeDurationError` and `OutOfRangeDurationError`, implement
+  `Error` for both
 
-* Server resets a stream with `INTERNAL_ERROR` when its trailers exceed the peer's
-  `SETTINGS_MAX_HEADER_LIST_SIZE`
+* Server resets a stream with `INTERNAL_ERROR` when its trailers exceed the
+  peer's `SETTINGS_MAX_HEADER_LIST_SIZE`
 
-* Client returns `ClientError::Http` for an invalid request header instead of dropping it,
-  add `RequestContext::take_error()`
+* Client returns `ClientError::Http` for an invalid request header instead of
+  dropping it, add `RequestContext::take_error()`
 
 * Update to ntex-error 3.0, ntex-h2 4.2 and ntex-http 2.0
 

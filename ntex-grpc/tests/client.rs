@@ -46,6 +46,7 @@ method!(UnknownStatusOnly, "/test.Svc/UnknownStatusOnly");
 method!(EncodedMessage, "/test.Svc/EncodedMessage");
 method!(UserAgent, "/test.Svc/UserAgent");
 method!(Echo, "/test.Svc/Echo");
+method!(EchoAll, "/test.Svc/EchoAll");
 method!(Accepted, "/test.Svc/Accepted");
 method!(NoContent, "/test.Svc/NoContent");
 method!(Refused, "/test.Svc/Refused");
@@ -333,6 +334,15 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                                 if key.as_str().starts_with("x-") || key == header::USER_AGENT {
                                     hdrs.append(key.clone(), val.clone());
                                 }
+                            }
+                            reply(&stream, hdrs, status_ok()).await;
+                        }
+                        // echoes all request headers with a `req-` prefix
+                        "/test.Svc/EchoAll" => {
+                            let mut hdrs = grpc_headers();
+                            for (key, val) in &req {
+                                let key = HeaderName::try_from(format!("req-{key}")).unwrap();
+                                hdrs.append(key, val.clone());
                             }
                             reply(&stream, hdrs, status_ok()).await;
                         }
@@ -666,8 +676,7 @@ async fn metadata() {
         .header("x-a", "2")
         .append_header("x-tag", "a")
         .append_header("x-tag", "b")
-        .header("x-trace-bin", encode_binary_header(&[0, 0xff, 1]))
-        .header(header::USER_AGENT, "custom/1");
+        .header("x-trace-bin", encode_binary_header(&[0, 0xff, 1]));
     let res = req.send().await.unwrap();
 
     let get_all = |name| {
@@ -677,7 +686,6 @@ async fn metadata() {
     };
     assert_eq!(get_all("x-a"), ["2"]);
     assert_eq!(get_all("x-tag"), ["a", "b"]);
-    assert_eq!(get_all("user-agent"), ["custom/1"]);
     let bin = res.headers().get("x-trace-bin").unwrap();
     assert_eq!(bin, "AP8B");
     assert_eq!(decode_binary_header(bin).unwrap(), [0, 0xff, 1]);
@@ -1096,4 +1104,50 @@ async fn go_away() {
         hdrs.get(GRPC_MESSAGE).unwrap(),
         "Go away: not a result of an error"
     );
+}
+
+#[ntex::test]
+async fn reserved_headers() {
+    let client = client();
+    let mut req = Request::<_, EchoAll>::new(&client, &());
+    for key in [
+        "content-type",
+        "user-agent",
+        "te",
+        "grpc-encoding",
+        "grpc-message-type",
+        "grpc-message",
+        "grpc-status",
+        "grpc-timeout",
+    ] {
+        req.header(key, "custom");
+    }
+    req.header("grpc-accept-encoding", "gzip")
+        .header("x-a", "1")
+        .timeout(Duration::from_secs(1));
+    let res = req.send().await.unwrap();
+
+    let get_all = |name: &str| {
+        let mut vals: Vec<_> = res
+            .headers()
+            .get_all(format!("req-{name}").as_str())
+            .cloned()
+            .collect();
+        vals.sort();
+        vals
+    };
+    assert_eq!(get_all("content-type"), ["application/grpc"]);
+    assert_eq!(
+        get_all("user-agent"),
+        [concat!("grpc-rust-ntex/", env!("CARGO_PKG_VERSION"))]
+    );
+    assert_eq!(get_all("te"), ["trailers"]);
+    assert_eq!(get_all("grpc-encoding"), ["identity"]);
+    assert!(get_all("grpc-message-type").is_empty());
+    assert!(get_all("grpc-message").is_empty());
+    assert!(get_all("grpc-status").is_empty());
+    assert_eq!(get_all("grpc-timeout"), ["1000000u"]);
+    // sent along with the client's value, as grpc-go does
+    assert_eq!(get_all("grpc-accept-encoding"), ["gzip", "identity"]);
+    assert_eq!(get_all("x-a"), ["1"]);
 }

@@ -65,7 +65,10 @@ impl RequestContext {
     {
         let to = timeout.into();
         self.timeout = Some(to);
-        self.header(consts::GRPC_TIMEOUT, duration_to_grpc_timeout(to));
+        // always valid, the value holds only digits and a unit
+        if let Ok(val) = HeaderValue::try_from(duration_to_grpc_timeout(to)) {
+            self.headers.insert(consts::GRPC_TIMEOUT, val);
+        }
         self
     }
 
@@ -113,6 +116,11 @@ impl RequestContext {
     /// by [`take_error()`](Self::take_error). Values of `-bin` headers are
     /// sent as they are, encode them with
     /// [`encode_binary_header()`](crate::encode_binary_header).
+    ///
+    /// Headers the client sets itself are ignored, as in grpc-go:
+    /// `content-type`, `user-agent`, `te`, `grpc-encoding`,
+    /// `grpc-message-type`, `grpc-message`, `grpc-status` and `grpc-timeout`.
+    /// Use [`timeout()`](Self::timeout) for the timeout.
     pub fn header<K, V>(&mut self, key: K, value: V) -> &mut Self
     where
         HeaderName: TryFrom<K>,
@@ -151,6 +159,7 @@ impl RequestContext {
     {
         match HeaderName::try_from(key) {
             Ok(key) => match HeaderValue::try_from(value) {
+                Ok(_) if is_reserved(&key) => {}
                 Ok(value) => return Some((key, value)),
                 Err(e) => self.set_error(e),
             },
@@ -189,10 +198,6 @@ impl RequestContext {
     /// A custom transport sends them with the request.
     pub fn headers(&self) -> impl Iterator<Item = (&HeaderName, &HeaderValue)> {
         self.headers.iter()
-    }
-
-    pub(super) fn header_map(&self) -> &HeaderMap {
-        &self.headers
     }
 
     /// Check if the connection must be closed when the request is dropped.
@@ -236,7 +241,9 @@ where
     /// Set a request header, replacing any existing value for the same name.
     ///
     /// An invalid name or value does not panic, [`send()`](Self::send) returns
-    /// the error instead.
+    /// the error instead. Headers the client sets itself, such as
+    /// `content-type` or `grpc-timeout`, are ignored, see
+    /// [`RequestContext::header()`].
     ///
     /// ```rust,ignore
     /// // `GreeterClient` and `HelloRequest` are generated from a .proto file
@@ -326,6 +333,21 @@ where
 
         transport.request(input, &mut ctx).await
     }
+}
+
+/// Checks if the client sets the header itself, the list is from grpc-go.
+fn is_reserved(key: &HeaderName) -> bool {
+    matches!(
+        key.as_str(),
+        "content-type"
+            | "user-agent"
+            | "te"
+            | "grpc-encoding"
+            | "grpc-message-type"
+            | "grpc-message"
+            | "grpc-status"
+            | "grpc-timeout"
+    )
 }
 
 fn duration_to_grpc_timeout(duration: time::Duration) -> String {
@@ -468,6 +490,44 @@ mod tests {
         ctx.clear();
         assert_eq!(ctx.headers().count(), 0);
         assert_eq!(ctx.get_timeout(), None);
+    }
+
+    #[test]
+    fn reserved_headers() {
+        let mut ctx = RequestContext::new();
+        for key in [
+            "content-type",
+            "User-Agent",
+            "te",
+            "grpc-encoding",
+            "grpc-message-type",
+            "grpc-message",
+            "grpc-status",
+            "grpc-timeout",
+        ] {
+            ctx.header(key, "1").append_header(key, "2");
+        }
+        assert_eq!(ctx.headers().count(), 0);
+        assert!(ctx.take_error().is_none());
+
+        // the value is still checked
+        ctx.header("te", "\n");
+        assert!(ctx.take_error().is_some());
+
+        // not reserved in grpc-go either
+        ctx.header("grpc-accept-encoding", "gzip")
+            .header("grpc-previous-rpc-attempts", "1")
+            .header("x-te", "1");
+        assert_eq!(ctx.headers().count(), 3);
+
+        ctx.timeout(time::Duration::from_secs(1));
+        ctx.header("grpc-timeout", "1S");
+        let timeout: Vec<_> = ctx
+            .headers()
+            .filter(|(k, _)| *k == consts::GRPC_TIMEOUT)
+            .collect();
+        assert_eq!(timeout.len(), 1);
+        assert_eq!(timeout[0].1, "1000000u");
     }
 
     #[test]

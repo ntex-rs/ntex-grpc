@@ -5,6 +5,11 @@ use ntex_util::HashMap;
 
 use crate::{client::Transport, consts, service::MethodDef};
 
+/// Headers, timeout and flags of a single call.
+///
+/// [`Request`] collects them and passes them to
+/// [`Transport::request()`]. A custom transport that wraps a built-in one
+/// passes the context on unchanged.
 #[derive(Debug)]
 pub struct RequestContext {
     err: Option<HttpError>,
@@ -115,6 +120,11 @@ impl RequestContext {
     }
 }
 
+/// A call that is ready to be sent.
+///
+/// Generated client methods return it. Set headers or a timeout if you need
+/// them, then [`send()`](Self::send) it. The request borrows its message, so
+/// keep the message in a variable rather than building it inline.
 pub struct Request<'a, T, M>
 where
     T: Transport<M>,
@@ -131,6 +141,9 @@ where
     T: Transport<M>,
     M: MethodDef,
 {
+    /// Create a call that sends `input` through `transport`.
+    ///
+    /// Generated clients do this for you.
     pub fn new(transport: &'a T, input: &'a M::Input) -> Self {
         Self {
             input,
@@ -223,31 +236,43 @@ fn duration_to_grpc_timeout(duration: time::Duration) -> String {
         .expect("duration is unrealistically large")
 }
 
+/// Successful reply to a call.
+///
+/// Derefs to the reply message, so its fields can be used directly.
 pub struct Response<T: MethodDef> {
+    /// The reply message.
     pub output: T::Output,
+    /// Response headers.
     pub headers: HeaderMap,
+    /// Trailers sent after the message, `grpc-status` is one of them.
     pub trailers: HeaderMap,
+    /// Size of the request body in bytes, with the 5-byte message prefix.
     pub req_size: usize,
+    /// Size of the response body in bytes, with the 5-byte message prefix.
     pub res_size: usize,
 }
 
 impl<T: MethodDef> Response<T> {
     #[inline]
+    /// Response headers.
     pub fn headers(&self) -> &HeaderMap {
         &self.headers
     }
 
     #[inline]
+    /// Trailers sent after the message.
     pub fn trailers(&self) -> &HeaderMap {
         &self.trailers
     }
 
     #[inline]
+    /// Take the reply message and drop the headers.
     pub fn into_inner(self) -> T::Output {
         self.output
     }
 
     #[inline]
+    /// Split into the reply message, headers and trailers.
     pub fn into_parts(self) -> (T::Output, HeaderMap, HeaderMap) {
         (self.output, self.headers, self.trailers)
     }

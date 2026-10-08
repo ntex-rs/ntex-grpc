@@ -20,6 +20,7 @@ macro_rules! gen_error_code {
         }
 
         impl $name {
+            /// Status name, e.g. `"NotFound"`.
             #[inline]
             pub const fn as_str(&self) -> &'static str {
                 match self {
@@ -27,6 +28,11 @@ macro_rules! gen_error_code {
                 }
             }
 
+            /// Status name with a `grpc-status-` prefix, e.g.
+            /// `"grpc-status-NotFound"`.
+            ///
+            /// Used as the error signature of
+            /// [`ClientError::GrpcStatus`](crate::client::ClientError::GrpcStatus).
             #[inline]
             pub const fn signature(&self) -> &'static str {
                 match self {
@@ -34,6 +40,7 @@ macro_rules! gen_error_code {
                 }
             }
 
+            /// Numeric code, e.g. `5` for `NotFound`.
             #[inline]
             pub const fn code(&self) -> u8 {
                 match self {
@@ -41,6 +48,7 @@ macro_rules! gen_error_code {
                 }
             }
 
+            /// Numeric code as text, the way it is sent in `grpc-status`.
             #[inline]
             pub const fn code_str(&self) -> &'static str {
                 match self {
@@ -77,24 +85,53 @@ macro_rules! gen_error_code {
 }
 
 gen_error_code! {
+    /// gRPC status code.
+    ///
+    /// The server sends it in the `grpc-status` trailer. On the client a
+    /// status other than `Ok` shows up as
+    /// [`ClientError::GrpcStatus`](crate::client::ClientError::GrpcStatus),
+    /// or [`ClientError::DeadlineExceeded`](crate::client::ClientError::DeadlineExceeded).
+    /// A server returns one with [`ServerError`](crate::server::ServerError).
     #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub enum GrpcStatus {
+        /// The call succeeded.
         Ok = 0,
+        /// The call was cancelled, usually by the caller.
         Cancelled = 1,
+        /// An error that fits no other status, e.g. a status from another
+        /// system that this one doesn't know.
         Unknown = 2,
+        /// The request itself is invalid, whatever the state of the system.
         InvalidArgument = 3,
+        /// The deadline passed before the call finished.
         DeadlineExceeded = 4,
+        /// The requested entity does not exist.
         NotFound = 5,
+        /// The entity the client tried to create already exists.
         AlreadyExists = 6,
+        /// The caller is known but not allowed to do this. Use
+        /// `Unauthenticated` when the caller could not be identified.
         PermissionDenied = 7,
+        /// Something ran out, like a quota or disk space.
         ResourceExhausted = 8,
+        /// The system is not in the state the operation needs, e.g. deleting
+        /// a directory that is not empty.
         FailedPrecondition = 9,
+        /// The operation was aborted, usually by a concurrency conflict.
         Aborted = 10,
+        /// The operation went past the valid range, e.g. reading past the
+        /// end of a file.
         OutOfRange = 11,
+        /// The method is not implemented or not supported.
         Unimplemented = 12,
+        /// Something the server relies on is broken.
         Internal = 13,
+        /// The service can't be reached right now. Usually temporary, the
+        /// call can be retried.
         Unavailable = 14,
+        /// Data was lost or corrupted and can't be recovered.
         DataLoss = 15,
+        /// The request has no valid credentials.
         Unauthenticated = 16
     }
 }

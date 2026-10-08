@@ -6,6 +6,11 @@ const NANOS_PER_SECOND: i32 = 1_000_000_000;
 const NANOS_MAX: i32 = NANOS_PER_SECOND - 1;
 
 impl Duration {
+    /// Bring the value into its canonical form.
+    ///
+    /// Whole seconds move out of `nanos`, and `nanos` gets the same sign as
+    /// `seconds`. A value that doesn't fit is clamped to the largest or
+    /// smallest duration.
     pub fn normalize(&mut self) {
         // Make sure nanos is in the range.
         if self.nanos <= -NANOS_PER_SECOND || self.nanos >= NANOS_PER_SECOND {

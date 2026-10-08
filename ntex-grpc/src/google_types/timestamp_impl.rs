@@ -4,6 +4,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::Timestamp;
 
 impl Timestamp {
+    /// The current time.
+    ///
+    /// Inside an ntex runtime this reads the timer's cached clock, which is
+    /// refreshed about every 150 ms, so the value can lag a little behind
+    /// the real time.
     pub fn now() -> Self {
         let dt = ntex_util::time::system_time()
             .duration_since(SystemTime::UNIX_EPOCH)

@@ -1,5 +1,7 @@
 use std::{borrow::Cow, mem};
 
+use base64::engine::Engine;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 use ntex_bytes::{Bytes, BytesMut};
 use ntex_http::{HeaderMap, HeaderValue};
 use urly::quoting::{Component, unquote};
@@ -44,6 +46,43 @@ impl Data {
                 Data::Empty => Data::Chunk(data),
             };
         }
+    }
+}
+
+/// Encode a binary metadata value.
+///
+/// gRPC sends values of headers whose name ends with `-bin` as base64,
+/// without padding.
+///
+/// ```
+/// let val = ntex_grpc::encode_binary_header(&[0xff, 0x00]);
+/// assert_eq!(val, "/wA");
+/// ```
+pub fn encode_binary_header(value: &[u8]) -> HeaderValue {
+    let encoded = STANDARD_NO_PAD.encode(value);
+    // SAFETY: base64 output is visible ASCII, which is a valid header value
+    unsafe { HeaderValue::from_shared_unchecked(encoded.into()) }
+}
+
+/// Decode a binary metadata value, the value of a header whose name ends
+/// with `-bin`.
+///
+/// Accepts base64 with or without padding. Returns `None` if the value is
+/// not valid base64.
+///
+/// ```
+/// use ntex_grpc::{HeaderValue, decode_binary_header};
+///
+/// let val = HeaderValue::from_static("/wA=");
+/// assert_eq!(decode_binary_header(&val).unwrap(), [0xff, 0x00]);
+/// ```
+pub fn decode_binary_header(value: &HeaderValue) -> Option<Vec<u8>> {
+    let value = value.as_bytes();
+    // padded base64 is a multiple of 4 bytes long, as in grpc-go
+    if value.len().is_multiple_of(4) {
+        STANDARD.decode(value).ok()
+    } else {
+        STANDARD_NO_PAD.decode(value).ok()
     }
 }
 
@@ -101,6 +140,27 @@ pub(crate) fn percent_decode(val: &HeaderValue) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_header() {
+        assert_eq!(encode_binary_header(b""), "");
+        assert_eq!(encode_binary_header(b"a"), "YQ");
+        assert_eq!(encode_binary_header(b"ab"), "YWI");
+        assert_eq!(encode_binary_header(b"abc"), "YWJj");
+
+        let dec = |v: &'static str| decode_binary_header(&HeaderValue::from_static(v));
+        assert_eq!(dec("YQ").unwrap(), b"a");
+        assert_eq!(dec("YQ==").unwrap(), b"a");
+        assert_eq!(dec("YWI=").unwrap(), b"ab");
+        assert_eq!(dec("YWJj").unwrap(), b"abc");
+        assert_eq!(dec("").unwrap(), b"");
+        assert_eq!(dec("/+8").unwrap(), [0xff, 0xef]);
+        // url-safe alphabet and bad padding are rejected
+        assert!(dec("_-8").is_none());
+        assert!(dec("YQ=").is_none());
+        assert!(dec("Y").is_none());
+        assert!(dec("YQ=\t").is_none());
+    }
 
     #[test]
     fn percent_decode_message() {

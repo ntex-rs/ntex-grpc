@@ -2,6 +2,12 @@
 
 ## [3.2.0] - Unreleased
 
+* Add `Request::append_header()` and `RequestContext::append_header()` to send several values for one metadata key
+
+* Add `encode_binary_header()` and `decode_binary_header()` for `-bin` metadata values, which are base64 encoded
+
+* `RequestContext::headers()` returns `impl Iterator` instead of `impl ExactSizeIterator`, it yields every value of a key
+
 * Client fails a response with data after the message with `INTERNAL`, it was ignored
 
 * Client limits the size of a received message to 4 MiB, larger messages fail with `RESOURCE_EXHAUSTED`. Add `Request::max_message_size()` and `RequestContext::max_message_size()` to change it

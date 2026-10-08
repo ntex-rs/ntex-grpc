@@ -44,6 +44,8 @@ method!(BadStatus, "/test.Svc/BadStatus");
 method!(UnknownStatusOnly, "/test.Svc/UnknownStatusOnly");
 method!(EncodedMessage, "/test.Svc/EncodedMessage");
 method!(UserAgent, "/test.Svc/UserAgent");
+method!(Accepted, "/test.Svc/Accepted");
+method!(NoContent, "/test.Svc/NoContent");
 
 const X_TEST: HeaderName = HeaderName::from_static("x-test");
 const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
@@ -263,6 +265,23 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                                 hdrs.insert(header::USER_AGENT, ua.clone());
                             }
                             reply(&stream, hdrs, status_ok()).await;
+                        }
+                        // a valid reply, but with 202
+                        "/test.Svc/Accepted" => {
+                            stream
+                                .send_response(StatusCode::ACCEPTED, grpc_headers(), false)
+                                .unwrap();
+                            stream
+                                .send_payload(Bytes::from_static(b"\0\0\0\0\0"), false)
+                                .await
+                                .unwrap();
+                            stream.send_trailers(status_ok()).unwrap();
+                        }
+                        // headers only 204
+                        "/test.Svc/NoContent" => {
+                            stream
+                                .send_response(StatusCode::NO_CONTENT, grpc_headers(), true)
+                                .unwrap();
                         }
                         // never replies
                         "/test.Svc/Silent" => {}
@@ -491,6 +510,20 @@ async fn http_status() {
     assert_eq!(*status, GrpcStatus::Unimplemented);
     assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), "HTTP status 404");
     assert_eq!(body.as_deref(), Some(&b""[..]));
+
+    // only 200 is accepted
+    fn assert_unknown(err: &Error<ClientError>, code: u16) {
+        let ClientError::GrpcStatus(status, hdrs, _) = &**err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(*status, GrpcStatus::Unknown);
+        assert_eq!(
+            hdrs.get(GRPC_MESSAGE).unwrap(),
+            &format!("HTTP status {code}")
+        );
+    }
+    assert_unknown(&send::<Accepted>(&client).await.unwrap_err(), 202);
+    assert_unknown(&send::<NoContent>(&client).await.unwrap_err(), 204);
 
     // grpc-status wins over the http status
     let err = send::<ProxyError>(&client).await.unwrap_err();

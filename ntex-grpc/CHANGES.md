@@ -2,6 +2,8 @@
 
 ## [3.2.0] - Unreleased
 
+* Client accepts only HTTP status 200, other 2xx statuses are reported as `UNKNOWN`
+
 * Client sends `user-agent: grpc-rust-ntex/<version>` with the crate version, was `ntex-grpc/1.0.0`
 
 * Add `ClientError::grpc_message()`, returns the percent-decoded `grpc-message`
@@ -14,7 +16,7 @@
 
 * Server no longer panics on a request body shorter than 5 bytes
 
-* Client maps a non-2xx HTTP status without `grpc-status` to a gRPC code as the spec says and returns `ClientError::GrpcStatus` instead of `ClientError::Response`
+* Client maps an HTTP status other than 200 without `grpc-status` to a gRPC code as the spec says and returns `ClientError::GrpcStatus` instead of `ClientError::Response`
 
 * `ClientError::GrpcStatus` holds the response body when the client picked the status
 

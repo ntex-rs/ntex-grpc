@@ -55,6 +55,10 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
         val.write(&mut buf);
         let req_size = buf.len();
 
+        if let Some(err) = ctx.take_error() {
+            return Err(Error::from(ClientError::Http(err)).with_service(self.service()));
+        }
+
         let mut hdrs = HeaderMap::new();
         hdrs.append(header::CONTENT_TYPE, consts::HDRV_CT_GRPC);
         hdrs.append(header::USER_AGENT, consts::HDRV_USER_AGENT);
@@ -100,7 +104,9 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
                             // check grpc status
                             match check_grpc_status(&headers) {
                                 Some(Ok(GrpcStatus::DeadlineExceeded)) => {
-                                    return Err(Error::from(ClientError::DeadlineExceeded(hdrs)));
+                                    return Err(Error::from(ClientError::DeadlineExceeded(
+                                        headers,
+                                    )));
                                 }
                                 Some(Ok(status)) if status != GrpcStatus::Ok => {
                                     return Err(Error::from(ClientError::GrpcStatus(
@@ -172,6 +178,10 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
                     }
                     None => return Err(Error::from(ClientError::Response(None, hdrs, data))),
                 }
+                let resp_size = data.len();
+                if resp_size < 5 {
+                    return Err(Error::from(ClientError::UnexpectedEof(status, hdrs)));
+                }
                 let _compressed = data.get_u8();
                 let len = data.get_u32();
                 let Some(mut block) = data.split_to_checked(len as usize) else {
@@ -184,7 +194,7 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
                         trailers,
                         req_size,
                         headers: hdrs,
-                        res_size: data.len(),
+                        res_size: resp_size,
                     }),
                     Err(e) => Err(Error::from(ClientError::Decode(e))),
                 };

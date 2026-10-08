@@ -1,11 +1,29 @@
 # Changes
 
-## [Unreleased]
+## [3.2.0] - Unreleased
 
-* Update to ntex-error 3.0, ntex-h2 4.2 and ntex-http 2.0
+* Fix client `Response::res_size`, it reported the leftover bytes instead of the response size
+
+* Fix client panic on a response with a body shorter than the gRPC frame prefix
+
+* Fix `ClientError::DeadlineExceeded` headers for headers-only responses
+
+* Fix `Debug` for client `Response` printing headers as trailers
+
+* Add `Display` for `ClientError::Client`
+
+* Rename `GrpcStatus::AlredyExists` to `GrpcStatus::AlreadyExists`, the old name is deprecated.
+  `signature()` now returns `grpc-status-AlreadyExists`
+
+* Export `NegativeDurationError` and `OutOfRangeDurationError`, implement `Error` for both
 
 * Server resets a stream with `INTERNAL_ERROR` when its trailers exceed the peer's
   `SETTINGS_MAX_HEADER_LIST_SIZE`
+
+* Client returns `ClientError::Http` for an invalid request header instead of dropping it,
+  add `RequestContext::take_error()`
+
+* Update to ntex-error 3.0, ntex-h2 4.2 and ntex-http 2.0
 
 ## [3.0.0] - 2026-09-14
 

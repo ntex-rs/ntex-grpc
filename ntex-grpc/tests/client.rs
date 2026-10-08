@@ -1,0 +1,196 @@
+use std::{cell::RefCell, rc::Rc};
+
+use ntex::io::Io;
+use ntex::service::{Pipeline, cfg::SharedCfg, fn_service};
+use ntex::testing::IoTest;
+use ntex_bytes::{ByteString, Bytes};
+use ntex_error::Error;
+use ntex_grpc::client::{ClientError, Request, Response};
+use ntex_grpc::{HashMap, MethodDef};
+use ntex_h2::{self as h2, client::SimpleClient, frame::StreamId};
+use ntex_http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
+
+macro_rules! method {
+    ($name:ident, $path:literal) => {
+        struct $name;
+
+        impl MethodDef for $name {
+            const NAME: &'static str = stringify!($name);
+            const PATH: ByteString = ByteString::from_static($path);
+            type Input = ();
+            type Output = ();
+        }
+    };
+}
+
+method!(Message, "/test.Svc/Message");
+method!(Short, "/test.Svc/Short");
+method!(Deadline, "/test.Svc/Deadline");
+
+const X_TEST: HeaderName = HeaderName::from_static("x-test");
+const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
+
+fn grpc_headers() -> HeaderMap {
+    let mut hdrs = HeaderMap::new();
+    hdrs.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/grpc"),
+    );
+    hdrs.insert(X_TEST, HeaderValue::from_static("headers"));
+    hdrs
+}
+
+fn status_ok() -> HeaderMap {
+    let mut hdrs = HeaderMap::new();
+    hdrs.insert(GRPC_STATUS, HeaderValue::from_static("0"));
+    hdrs
+}
+
+/// Connects a client to an h2 server that answers each request
+/// with a crafted response, selected by the request path.
+fn client() -> SimpleClient {
+    let (cli, srv) = IoTest::create();
+    cli.remote_buffer_cap(1024 * 1024);
+    srv.remote_buffer_cap(1024 * 1024);
+
+    let paths: Rc<RefCell<HashMap<StreamId, ByteString>>> = Rc::default();
+    let publish = fn_service(move |msg: h2::Message| {
+        let paths = paths.clone();
+        async move {
+            let stream = msg.stream().clone();
+            match msg.kind {
+                h2::MessageKind::Headers { pseudo, .. } => {
+                    let path = pseudo.path.unwrap();
+                    paths.borrow_mut().insert(stream.id(), path);
+                }
+                h2::MessageKind::Eof(_) => {
+                    let path = paths.borrow_mut().remove(&stream.id()).unwrap();
+                    match path.as_ref() {
+                        // a regular reply: one empty message, then trailers
+                        "/test.Svc/Message" => {
+                            stream
+                                .send_response(StatusCode::OK, grpc_headers(), false)
+                                .unwrap();
+                            stream
+                                .send_payload(Bytes::from_static(b"\0\0\0\0\0"), false)
+                                .await
+                                .unwrap();
+                            stream.send_trailers(status_ok()).unwrap();
+                        }
+                        // the body is shorter than the 5 byte frame prefix
+                        "/test.Svc/Short" => {
+                            stream
+                                .send_response(StatusCode::OK, grpc_headers(), false)
+                                .unwrap();
+                            stream
+                                .send_payload(Bytes::from_static(b"\0\0"), false)
+                                .await
+                                .unwrap();
+                            stream.send_trailers(status_ok()).unwrap();
+                        }
+                        // a headers-only reply that carries the grpc status
+                        "/test.Svc/Deadline" => {
+                            let mut hdrs = grpc_headers();
+                            hdrs.insert(GRPC_STATUS, HeaderValue::from_static("4"));
+                            stream.send_response(StatusCode::OK, hdrs, true).unwrap();
+                        }
+                        _ => panic!("unexpected request {path}"),
+                    }
+                }
+                _ => {}
+            }
+            Ok::<_, h2::StreamError>(())
+        }
+    });
+    let control = fn_service(async |msg: h2::Control<h2::StreamError>| Ok::<_, ()>(msg.ack()));
+
+    let srv = Io::new(srv, SharedCfg::new("SRV").build());
+    ntex::rt::spawn(async move {
+        let _ = h2::server::handle_one(
+            srv.into(),
+            Pipeline::new((), publish),
+            Pipeline::new((), control),
+        )
+        .await;
+    });
+
+    let io = Io::new(cli, SharedCfg::new("CLI").build());
+    SimpleClient::new(io, false, "localhost".into())
+}
+
+async fn send<M: MethodDef<Input = ()>>(
+    client: &SimpleClient,
+) -> Result<Response<M>, Error<ClientError>> {
+    Request::<_, M>::new(client, &()).send().await
+}
+
+#[ntex::test]
+async fn response_size() {
+    let client = client();
+    let res = send::<Message>(&client).await.unwrap();
+    assert_eq!(res.req_size, 5);
+    assert_eq!(res.res_size, 5);
+    assert_eq!(res.headers().get(X_TEST).unwrap(), "headers");
+    assert_eq!(res.trailers().get(GRPC_STATUS).unwrap(), "0");
+
+    let dbg = format!("{res:?}");
+    assert!(dbg.contains("trailers: {\"grpc-status\""), "{dbg}");
+}
+
+#[ntex::test]
+async fn short_body() {
+    let client = client();
+    let err = send::<Short>(&client).await.unwrap_err();
+    assert!(
+        matches!(*err, ClientError::UnexpectedEof(Some(StatusCode::OK), _)),
+        "{err:?}"
+    );
+}
+
+#[ntex::test]
+async fn deadline_headers() {
+    let client = client();
+    let err = send::<Deadline>(&client).await.unwrap_err();
+    let ClientError::DeadlineExceeded(ref hdrs) = *err else {
+        panic!("{err:?}")
+    };
+    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
+}
+
+#[ntex::test]
+async fn invalid_header() {
+    let client = client();
+    let mut req = Request::<_, Message>::new(&client, &());
+    req.header("bad header", "value");
+    let err = req.send().await.unwrap_err();
+    assert!(matches!(*err, ClientError::Http(_)), "{err:?}");
+
+    // the bad header is not sent and the connection stays usable
+    let res = send::<Message>(&client).await.unwrap();
+    assert_eq!(res.res_size, 5);
+}
+
+#[test]
+fn client_error_display() {
+    let err = ClientError::from(ntex_h2::client::ClientError::Disconnected(
+        std::io::Error::other("test"),
+    ));
+    assert_eq!(err.to_string(), "HTTP2 Client");
+}
+
+#[test]
+fn duration_errors() {
+    use ntex_grpc::google_types::{Duration, NegativeDurationError, OutOfRangeDurationError};
+
+    let err: NegativeDurationError = std::time::Duration::try_from(Duration {
+        seconds: -1,
+        nanos: 0,
+    })
+    .unwrap_err();
+    assert_eq!(err.to_string(), "Duration is negative: -1s");
+
+    let err: OutOfRangeDurationError =
+        Duration::try_from(std::time::Duration::from_secs(u64::MAX)).unwrap_err();
+    let err: Box<dyn std::error::Error> = err.into();
+    assert_eq!(err.to_string(), "Duration is out of range");
+}

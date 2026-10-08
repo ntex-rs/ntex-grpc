@@ -95,3 +95,19 @@ pub struct NegativeDurationError(pub time::Duration);
 /// exceeds that representable by Duration.
 #[derive(Debug)]
 pub struct OutOfRangeDurationError;
+
+impl std::fmt::Display for NegativeDurationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Duration is negative: -{:?}", self.0)
+    }
+}
+
+impl std::error::Error for NegativeDurationError {}
+
+impl std::fmt::Display for OutOfRangeDurationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Duration is out of range")
+    }
+}
+
+impl std::error::Error for OutOfRangeDurationError {}

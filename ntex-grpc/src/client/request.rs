@@ -71,11 +71,27 @@ impl RequestContext {
                 Ok(value) => {
                     self.headers.insert(key, value);
                 }
-                Err(e) => self.err = Some(log_error(e)),
+                Err(e) => self.set_error(e),
             },
-            Err(e) => self.err = Some(log_error(e)),
+            Err(e) => self.set_error(e),
         }
         self
+    }
+
+    fn set_error<T: Into<HttpError>>(&mut self, err: T) {
+        if self.err.is_none() {
+            self.err = Some(err.into());
+        }
+    }
+
+    /// Take the first error recorded while building the request.
+    ///
+    /// [`header()`](Self::header) does not fail on an invalid name or value, it
+    /// remembers the error instead. Built-in transports return it as
+    /// [`ClientError::Http`](super::ClientError::Http) before sending anything,
+    /// custom transports should do the same.
+    pub fn take_error(&mut self) -> Option<HttpError> {
+        self.err.take()
     }
 
     /// Clear existing headers.
@@ -91,12 +107,6 @@ impl RequestContext {
     pub(crate) fn get_disconnect_on_drop(&self) -> bool {
         self.flags.contains(Flags::DISCONNECT_ON_DROP)
     }
-}
-
-fn log_error<T: Into<HttpError>>(err: T) -> HttpError {
-    let e = err.into();
-    log::error!("Error in Grpc Request {e}");
-    e
 }
 
 pub struct Request<'a, T, M>
@@ -261,7 +271,7 @@ where
         f.debug_struct(format!("ResponseFor<{}>", T::NAME).as_str())
             .field("output", &self.output)
             .field("headers", &self.headers)
-            .field("translers", &self.headers)
+            .field("trailers", &self.trailers)
             .finish()
     }
 }

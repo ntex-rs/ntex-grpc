@@ -2,6 +2,8 @@
 
 ## [3.2.0] - Unreleased
 
+* Client fails a response with data after the message with `INTERNAL`, it was ignored
+
 * Client limits the size of a received message to 4 MiB, larger messages fail with `RESOURCE_EXHAUSTED`. Add `Request::max_message_size()` and `RequestContext::max_message_size()` to change it
 
 * Client maps a stream reset by the server to a gRPC code as the spec says and returns `ClientError::GrpcStatus` instead of `ClientError::Stream`

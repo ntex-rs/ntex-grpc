@@ -52,6 +52,8 @@ method!(Large, "/test.Svc/Large");
 method!(Sized, "/test.Svc/Sized");
 method!(SizedNoTrailers, "/test.Svc/SizedNoTrailers");
 method!(SizedHtml, "/test.Svc/SizedHtml");
+method!(TwoMessages, "/test.Svc/TwoMessages");
+method!(ExtraData, "/test.Svc/ExtraData");
 
 /// Replies before it reads the request.
 struct EarlyStatus;
@@ -350,6 +352,41 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                                 .unwrap();
                             stream
                                 .send_payload(Bytes::from_static(b"\0\0\0\0\x03abc"), true)
+                                .await
+                                .unwrap();
+                        }
+                        // two messages, then an error status
+                        "/test.Svc/TwoMessages" => {
+                            let mut trailers = HeaderMap::new();
+                            trailers.insert(GRPC_STATUS, HeaderValue::from_static("3"));
+                            stream
+                                .send_response(StatusCode::OK, grpc_headers(), false)
+                                .unwrap();
+                            stream
+                                .send_payload(
+                                    Bytes::from_static(b"\0\0\0\0\x01a\0\0\0\0\0"),
+                                    false,
+                                )
+                                .await
+                                .unwrap();
+                            stream.send_trailers(trailers).unwrap();
+                        }
+                        // a message split over two frames, then one more byte,
+                        // the stream is never closed
+                        "/test.Svc/ExtraData" => {
+                            stream
+                                .send_response(StatusCode::OK, grpc_headers(), false)
+                                .unwrap();
+                            stream
+                                .send_payload(Bytes::from_static(b"\0\0\0\0\x02a"), false)
+                                .await
+                                .unwrap();
+                            stream
+                                .send_payload(Bytes::from_static(b"b"), false)
+                                .await
+                                .unwrap();
+                            stream
+                                .send_payload(Bytes::from_static(b"\0"), false)
                                 .await
                                 .unwrap();
                         }
@@ -864,4 +901,37 @@ async fn max_message_size() {
         assert_eq!(*status, GrpcStatus::Unknown);
         assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), msg);
     }
+}
+
+const EXTRA_DATA: &str = "cardinality violation: expected <EOF> for non server-streaming RPCs, but received another message";
+
+#[ntex::test]
+async fn extra_data() {
+    let (client, resets) = client_with_resets();
+    // the status from the server is not used, the response is invalid
+    let err = send::<TwoMessages>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Internal);
+    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
+    assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), EXTRA_DATA);
+    assert_eq!(body.as_deref(), Some(&b"\0\0\0\0\x01a\0\0\0\0\0"[..]));
+
+    // the client fails on the first extra byte, without waiting for the end
+    let err = ntex::time::timeout(Duration::from_secs(5), send::<ExtraData>(&client))
+        .await
+        .expect("the client must not wait for the end of the stream")
+        .unwrap_err();
+    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Internal);
+    assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), EXTRA_DATA);
+    assert_eq!(body.as_deref(), Some(&b"\0\0\0\0\x02ab\0"[..]));
+
+    // the connection stays usable, the server sees the stream reset
+    let res = send::<Message>(&client).await.unwrap();
+    assert_eq!(res.res_size, 5);
+    assert_eq!(*resets.borrow(), [Reason::CANCEL]);
 }

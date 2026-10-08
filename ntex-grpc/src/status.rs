@@ -85,7 +85,7 @@ gen_error_code! {
         InvalidArgument = 3,
         DeadlineExceeded = 4,
         NotFound = 5,
-        AlredyExists = 6,
+        AlreadyExists = 6,
         PermissionDenied = 7,
         ResourceExhausted = 8,
         FailedPrecondition = 9,
@@ -116,5 +116,19 @@ impl From<Reason> for GrpcStatus {
             Reason::INADEQUATE_SECURITY => GrpcStatus::PermissionDenied,
             _ => GrpcStatus::Unknown,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(deprecated)]
+    fn already_exists() {
+        let st = GrpcStatus::try_from(6).unwrap();
+        assert_eq!(st, GrpcStatus::AlreadyExists);
+        assert_eq!(st.signature(), "grpc-status-AlreadyExists");
+        assert!(matches!(st, GrpcStatus::AlredyExists));
     }
 }

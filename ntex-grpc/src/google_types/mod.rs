@@ -14,5 +14,6 @@ mod timestamp_impl;
 mod wrappers;
 
 pub use self::duration::Duration;
+pub use self::duration_impl::{NegativeDurationError, OutOfRangeDurationError};
 pub use self::timestamp::Timestamp;
 pub use self::wrappers::*;

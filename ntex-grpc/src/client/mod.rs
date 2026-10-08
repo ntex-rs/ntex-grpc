@@ -57,7 +57,7 @@ impl Client {
 
 #[derive(thiserror::Error, Debug)]
 pub enum ClientError {
-    #[error("")]
+    #[error("HTTP2 Client")]
     Client(
         #[from]
         #[source]

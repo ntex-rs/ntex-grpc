@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use ntex::io::Io;
 use ntex::service::{Pipeline, cfg::SharedCfg, fn_service};
@@ -7,7 +7,7 @@ use ntex_bytes::{ByteString, Bytes};
 use ntex_error::Error;
 use ntex_grpc::client::{ClientError, Request, Response};
 use ntex_grpc::{HashMap, MethodDef};
-use ntex_h2::{self as h2, client::SimpleClient, frame::StreamId};
+use ntex_h2::{self as h2, client::SimpleClient, frame::Reason, frame::StreamId};
 use ntex_http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 
 macro_rules! method {
@@ -26,6 +26,7 @@ macro_rules! method {
 method!(Message, "/test.Svc/Message");
 method!(Short, "/test.Svc/Short");
 method!(Deadline, "/test.Svc/Deadline");
+method!(Silent, "/test.Svc/Silent");
 
 const X_TEST: HeaderName = HeaderName::from_static("x-test");
 const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
@@ -46,22 +47,36 @@ fn status_ok() -> HeaderMap {
     hdrs
 }
 
+fn client() -> SimpleClient {
+    client_with_resets().0
+}
+
 /// Connects a client to an h2 server that answers each request
 /// with a crafted response, selected by the request path.
-fn client() -> SimpleClient {
+///
+/// Also returns the reasons of streams reset by the client.
+fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
     let (cli, srv) = IoTest::create();
     cli.remote_buffer_cap(1024 * 1024);
     srv.remote_buffer_cap(1024 * 1024);
 
     let paths: Rc<RefCell<HashMap<StreamId, ByteString>>> = Rc::default();
+    let resets: Rc<RefCell<Vec<Reason>>> = Rc::default();
+    let resets2 = resets.clone();
     let publish = fn_service(move |msg: h2::Message| {
         let paths = paths.clone();
+        let resets = resets2.clone();
         async move {
             let stream = msg.stream().clone();
             match msg.kind {
                 h2::MessageKind::Headers { pseudo, .. } => {
                     let path = pseudo.path.unwrap();
                     paths.borrow_mut().insert(stream.id(), path);
+                }
+                h2::MessageKind::Eof(h2::StreamEof::Error(err)) => {
+                    if let h2::StreamError::Reset(reason) = *err {
+                        resets.borrow_mut().push(reason);
+                    }
                 }
                 h2::MessageKind::Eof(_) => {
                     let path = paths.borrow_mut().remove(&stream.id()).unwrap();
@@ -94,6 +109,8 @@ fn client() -> SimpleClient {
                             hdrs.insert(GRPC_STATUS, HeaderValue::from_static("4"));
                             stream.send_response(StatusCode::OK, hdrs, true).unwrap();
                         }
+                        // never replies
+                        "/test.Svc/Silent" => {}
                         _ => panic!("unexpected request {path}"),
                     }
                 }
@@ -115,7 +132,7 @@ fn client() -> SimpleClient {
     });
 
     let io = Io::new(cli, SharedCfg::new("CLI").build());
-    SimpleClient::new(io, false, "localhost".into())
+    (SimpleClient::new(io, false, "localhost".into()), resets)
 }
 
 async fn send<M: MethodDef<Input = ()>>(
@@ -155,6 +172,35 @@ async fn deadline_headers() {
         panic!("{err:?}")
     };
     assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
+}
+
+#[ntex::test]
+async fn client_timeout() {
+    let (client, resets) = client_with_resets();
+    let mut req = Request::<_, Silent>::new(&client, &());
+    req.timeout(Duration::from_millis(50));
+    let err = ntex::time::timeout(Duration::from_secs(5), req.send())
+        .await
+        .expect("the client must stop waiting by itself")
+        .unwrap_err();
+    let ClientError::DeadlineExceeded(ref hdrs) = *err else {
+        panic!("{err:?}")
+    };
+    assert!(hdrs.is_empty());
+
+    // the connection stays usable, the server sees the stream reset
+    let res = send::<Message>(&client).await.unwrap();
+    assert_eq!(res.res_size, 5);
+    assert_eq!(*resets.borrow(), [Reason::CANCEL]);
+}
+
+#[ntex::test]
+async fn timeout_not_reached() {
+    let client = client();
+    let mut req = Request::<_, Message>::new(&client, &());
+    req.timeout(Duration::from_secs(5));
+    let res = req.send().await.unwrap();
+    assert_eq!(res.res_size, 5);
 }
 
 #[ntex::test]

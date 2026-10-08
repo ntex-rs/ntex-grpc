@@ -44,7 +44,9 @@ impl RequestContext {
     /// Set the max duration the request is allowed to take.
     ///
     /// The duration is sent in the `grpc-timeout` header, formatted according
-    /// to [the spec] with the most precise unit that fits.
+    /// to [the spec] with the most precise unit that fits. Built-in transports
+    /// also stop waiting when it runs out and return
+    /// [`ClientError::DeadlineExceeded`](super::ClientError::DeadlineExceeded).
     ///
     /// [the spec]: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
     pub fn timeout<U>(&mut self, timeout: U) -> &mut Self
@@ -183,7 +185,9 @@ where
     /// Set the max duration the request is allowed to take.
     ///
     /// The duration is sent in the `grpc-timeout` header, formatted according
-    /// to [the spec] with the most precise unit that fits.
+    /// to [the spec] with the most precise unit that fits. Built-in transports
+    /// also stop waiting when it runs out and return
+    /// [`ClientError::DeadlineExceeded`](super::ClientError::DeadlineExceeded).
     ///
     /// [the spec]: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
     pub fn timeout<U>(&mut self, timeout: U) -> &mut Self

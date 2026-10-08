@@ -118,7 +118,7 @@ use ntex_grpc::client::ClientError;
 let msg = HelloRequest { name: "world".into() };
 let mut req = client.say_hello(&msg);
 req.header("x-request-id", "42")
-    .timeout(Duration::from_secs(1)); // sent as `grpc-timeout`
+    .timeout(Duration::from_secs(1)); // sent as `grpc-timeout`, enforced locally too
 
 match req.send().await {
     Ok(res) => println!("trailers: {:?}", res.trailers()),
@@ -133,6 +133,8 @@ match req.send().await {
 ```
 
 A non-OK status from the server comes back as `ClientError::GrpcStatus`.
+If the timeout runs out, you get `ClientError::DeadlineExceeded`, whether the
+server reported it or the client gave up first.
 Connection, HTTP/2 and decoding failures have their own `ClientError` variants.
 
 ## Server

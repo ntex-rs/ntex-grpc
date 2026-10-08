@@ -82,7 +82,7 @@ impl Client {
 ///     Ok(res) => println!("{}", res.message),
 ///     Err(err) => match &*err {
 ///         // the server replied, but not with OK
-///         ClientError::GrpcStatus(status, trailers) => {
+///         ClientError::GrpcStatus(status, trailers, _) => {
 ///             println!("{status:?}: {:?}", trailers.get("grpc-message"));
 ///         }
 ///         // anything else is a transport or protocol problem
@@ -130,10 +130,10 @@ pub enum ClientError {
         #[source]
         StreamError,
     ),
-    /// The server answered with a non-2xx HTTP status, or with no
-    /// response headers at all.
+    /// The response had no HTTP status.
     ///
-    /// Holds the HTTP status, the response headers and the body.
+    /// Holds the status, the headers and the body received. The status is
+    /// `None`, a non-2xx status is reported as [`ClientError::GrpcStatus`].
     #[error("Http response {0:?}, headers: {1:?}, body: {2:?}")]
     Response(Option<StatusCode>, HeaderMap, Bytes),
     /// The response ended before a complete reply message arrived.
@@ -153,13 +153,20 @@ pub enum ClientError {
     /// Holds the status and the trailers, the error text is in the
     /// `grpc-message` trailer.
     ///
-    /// A response with no `grpc-status` is reported here as well: `UNKNOWN`
-    /// if the trailers lack it, `INTERNAL` if there were no trailers at all.
-    /// So is a 2xx response whose `content-type` is not `application/grpc`,
-    /// as `UNKNOWN`. The client adds a `grpc-message` describing the problem
-    /// then.
+    /// If the server sent no `grpc-status`, the client picks one:
+    ///
+    /// * a non-2xx HTTP status is mapped as the gRPC spec says, e.g. 404 to
+    ///   `UNIMPLEMENTED` and 503 to `UNAVAILABLE`. The response headers take
+    ///   the place of the trailers here.
+    /// * a `content-type` other than `application/grpc` gives `UNKNOWN`.
+    /// * trailers without `grpc-status` give `UNKNOWN`.
+    /// * a response that ends without trailers gives `INTERNAL`.
+    ///
+    /// The client adds a `grpc-message` describing the problem then, and
+    /// keeps the response body in the third field. The body is `None` if the
+    /// status came from the server.
     #[error("Grpc status")]
-    GrpcStatus(GrpcStatus, HeaderMap),
+    GrpcStatus(GrpcStatus, HeaderMap, Option<Bytes>),
 }
 
 impl Clone for ClientError {
@@ -175,7 +182,7 @@ impl Clone for ClientError {
             }
             Self::UnexpectedEof(st, hdrs) => Self::UnexpectedEof(*st, hdrs.clone()),
             Self::DeadlineExceeded(hdrs) => Self::DeadlineExceeded(hdrs.clone()),
-            Self::GrpcStatus(st, hdrs) => Self::GrpcStatus(*st, hdrs.clone()),
+            Self::GrpcStatus(st, hdrs, body) => Self::GrpcStatus(*st, hdrs.clone(), body.clone()),
         }
     }
 }
@@ -191,7 +198,7 @@ impl ErrorDiagnostic for ClientError {
             ClientError::Response(_, _, _) => "grpc-Response",
             ClientError::UnexpectedEof(_, _) => "grpc-UnexpectedEof",
             ClientError::DeadlineExceeded(_) => "grpc-BackendCallTimedout",
-            ClientError::GrpcStatus(status, _) => status.signature(),
+            ClientError::GrpcStatus(status, _, _) => status.signature(),
         }
     }
 }

@@ -2,6 +2,10 @@
 
 ## [3.2.0] - Unreleased
 
+* Client maps a non-2xx HTTP status without `grpc-status` to a gRPC code as the spec says and returns `ClientError::GrpcStatus` instead of `ClientError::Response`
+
+* `ClientError::GrpcStatus` holds the response body when the client picked the status
+
 * Client fails a response without `grpc-status` with `ClientError::GrpcStatus`, `UNKNOWN` if the trailers lack it, `INTERNAL` if there are no trailers
 
 * Client fails a response whose `content-type` is not `application/grpc` with `ClientError::GrpcStatus` and `UNKNOWN`

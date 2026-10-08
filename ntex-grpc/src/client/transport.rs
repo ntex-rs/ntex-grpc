@@ -1,9 +1,9 @@
 use std::{convert::TryFrom, future::Future, str::FromStr, time::Duration};
 
-use ntex_bytes::{Buf, BufMut, BytePages};
+use ntex_bytes::{Buf, BufMut, BytePages, Bytes};
 use ntex_error::Error;
 use ntex_h2::{self as h2};
-use ntex_http::{HeaderMap, HeaderValue, Method, header};
+use ntex_http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use ntex_util::time;
 
 use super::{Client, ClientError, Transport, request::RequestContext, request::Response};
@@ -136,7 +136,9 @@ async fn send_request<T: MethodDef>(
                                 return Err(Error::from(ClientError::DeadlineExceeded(headers)));
                             }
                             Some(Ok(status)) if status != GrpcStatus::Ok => {
-                                return Err(Error::from(ClientError::GrpcStatus(status, headers)));
+                                return Err(Error::from(ClientError::GrpcStatus(
+                                    status, headers, None,
+                                )));
                             }
                             Some(Err(())) => {
                                 return Err(Error::from(ClientError::Decode(DecodeError::new(
@@ -144,6 +146,9 @@ async fn send_request<T: MethodDef>(
                                 ))));
                             }
                             Some(Ok(_)) | None => {}
+                        }
+                        if let Some(st) = pseudo.status.filter(|st| !st.is_success()) {
+                            return Err(http_status_error(st, headers, Bytes::new()));
                         }
 
                         return Err(Error::from(ClientError::UnexpectedEof(
@@ -183,7 +188,9 @@ async fn send_request<T: MethodDef>(
                                     return Err(Error::from(ClientError::DeadlineExceeded(hdrs)));
                                 }
                                 Some(Ok(st)) => {
-                                    return Err(Error::from(ClientError::GrpcStatus(st, hdrs)));
+                                    return Err(Error::from(ClientError::GrpcStatus(
+                                        st, hdrs, None,
+                                    )));
                                 }
                                 Some(Err(())) => Err(Error::from(ClientError::Decode(
                                     DecodeError::new("Cannot parse grpc status"),
@@ -205,7 +212,7 @@ async fn send_request<T: MethodDef>(
             match status {
                 Some(st) => {
                     if !st.is_success() {
-                        return Err(Error::from(ClientError::Response(Some(st), hdrs, data)));
+                        return Err(http_status_error(st, hdrs, data));
                     }
                 }
                 None => return Err(Error::from(ClientError::Response(None, hdrs, data))),
@@ -214,7 +221,11 @@ async fn send_request<T: MethodDef>(
                 if !trailers.contains_key(consts::GRPC_MESSAGE) {
                     trailers.insert(consts::GRPC_MESSAGE, msg);
                 }
-                return Err(Error::from(ClientError::GrpcStatus(status, trailers)));
+                return Err(Error::from(ClientError::GrpcStatus(
+                    status,
+                    trailers,
+                    Some(data),
+                )));
             }
             let resp_size = data.len();
             if resp_size < 5 {
@@ -244,6 +255,26 @@ async fn send_request<T: MethodDef>(
 
 const NO_TRAILERS: &str = "Response ended without trailers";
 const NO_GRPC_STATUS: &str = "Response trailers have no grpc-status";
+
+/// Maps a non-2xx HTTP status of a response without `grpc-status`.
+///
+/// The response headers are reported in place of the trailers.
+fn http_status_error(st: StatusCode, mut hdrs: HeaderMap, body: Bytes) -> Error<ClientError> {
+    let status = match st.as_u16() {
+        400 => GrpcStatus::Internal,
+        401 => GrpcStatus::Unauthenticated,
+        403 => GrpcStatus::PermissionDenied,
+        404 => GrpcStatus::Unimplemented,
+        429 | 502 | 503 | 504 => GrpcStatus::Unavailable,
+        _ => GrpcStatus::Unknown,
+    };
+    if !hdrs.contains_key(consts::GRPC_MESSAGE)
+        && let Ok(msg) = HeaderValue::try_from(format!("HTTP status {}", st.as_u16()))
+    {
+        hdrs.insert(consts::GRPC_MESSAGE, msg);
+    }
+    Error::from(ClientError::GrpcStatus(status, hdrs, Some(body)))
+}
 
 /// Returns the status to report if the response is not a grpc response.
 ///
@@ -289,5 +320,37 @@ fn check_grpc_status(hdrs: &HeaderMap) -> Option<Result<GrpcStatus, ()>> {
         }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_status_mapping() {
+        for (code, status) in [
+            (400, GrpcStatus::Internal),
+            (401, GrpcStatus::Unauthenticated),
+            (403, GrpcStatus::PermissionDenied),
+            (404, GrpcStatus::Unimplemented),
+            (429, GrpcStatus::Unavailable),
+            (502, GrpcStatus::Unavailable),
+            (503, GrpcStatus::Unavailable),
+            (504, GrpcStatus::Unavailable),
+            (500, GrpcStatus::Unknown),
+            (302, GrpcStatus::Unknown),
+        ] {
+            let st = StatusCode::from_u16(code).unwrap();
+            let err = http_status_error(st, HeaderMap::new(), Bytes::new());
+            let ClientError::GrpcStatus(s, hdrs, _) = &*err else {
+                panic!("{err:?}");
+            };
+            assert_eq!(*s, status, "{code}");
+            assert_eq!(
+                hdrs.get(consts::GRPC_MESSAGE).unwrap(),
+                &format!("HTTP status {code}")
+            );
+        }
     }
 }

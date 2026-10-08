@@ -1,4 +1,4 @@
-use ntex_prost_build::{Method, Service, ServiceGenerator};
+use ntex_prost_build::{Comments, Method, Service, ServiceGenerator};
 
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct GrpcServiceGenerator;
@@ -67,14 +67,7 @@ fn generate_client(service: &Service, buf: &mut String, priv_buf: &mut String) {
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    let comments: Vec<_> = service
-        .comments
-        .leading
-        .clone()
-        .into_iter()
-        .map(|s| format!("///{s}"))
-        .collect();
-    let comments = comments.join("");
+    let comments = doc_comments(&service.comments);
 
     let stream = format!(
         "#[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,12 +83,7 @@ fn generate_client(service: &Service, buf: &mut String, priv_buf: &mut String) {
         pub struct {}<T>(T);
 
         {}",
-        service_ident,
-        service_methods_name,
-        service_methods,
-        comments.trim_end(),
-        client_ident,
-        methods,
+        service_ident, service_methods_name, service_methods, comments, client_ident, methods,
     );
     buf.push_str(&stream);
 
@@ -173,14 +161,7 @@ fn gen_method(method: &Method, service: &Service) -> (String, String) {
         format!("super::{}", method.input_type)
     };
     let output_type = method.output_type.to_string();
-    let comments: Vec<_> = method
-        .comments
-        .leading
-        .clone()
-        .into_iter()
-        .map(|s| format!("///{s}"))
-        .collect();
-    let comments = comments.join("");
+    let comments = doc_comments(&method.comments);
 
     (
         format!(
@@ -201,4 +182,73 @@ fn gen_method(method: &Method, service: &Service) -> (String, String) {
             }}
         }}"),
     )
+}
+
+/// Proto comments as rustdoc, one `///` line per comment line.
+fn doc_comments(comments: &Comments) -> String {
+    let mut buf = String::new();
+    comments.append_with_indent(0, &mut buf);
+    buf.truncate(buf.trim_end().len());
+    buf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn comments(lines: &[&str]) -> Comments {
+        Comments {
+            leading_detached: Vec::new(),
+            leading: lines.iter().map(|s| (*s).to_string()).collect(),
+            trailing: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn multiline_comments() {
+        let method = Method {
+            name: "hello".into(),
+            proto_name: "Hello".into(),
+            comments: comments(&[" Says hello.", " Second line.", "", "     example"]),
+            input_type: "Req".into(),
+            output_type: "Req".into(),
+            input_proto_type: ".demo.Req".into(),
+            output_proto_type: ".demo.Req".into(),
+            options: prost_types::MethodOptions::default(),
+            client_streaming: false,
+            server_streaming: false,
+            input_type_extern: false,
+        };
+        let service = Service {
+            name: "Demo".into(),
+            proto_name: "Demo".into(),
+            package: "demo".into(),
+            comments: comments(&[" The demo service.", "", " Second paragraph."]),
+            methods: vec![method],
+            options: prost_types::ServiceOptions::default(),
+        };
+
+        let (mut buf, mut priv_buf) = (String::new(), String::new());
+        generate_client(&service, &mut buf, &mut priv_buf);
+        let all = format!("{buf}{priv_buf}");
+        let docs: Vec<_> = all
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("///"))
+            .collect();
+
+        for lines in [
+            &["///  The demo service.", "///", "///  Second paragraph."][..],
+            &[
+                "///  Says hello.",
+                "///  Second line.",
+                "///",
+                "///  ```text",
+                "///  example",
+                "///  ```",
+            ][..],
+        ] {
+            assert!(docs.windows(lines.len()).any(|w| w == lines), "{docs:#?}");
+        }
+    }
 }

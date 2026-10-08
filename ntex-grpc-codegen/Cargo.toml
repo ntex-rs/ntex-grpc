@@ -22,3 +22,6 @@ ntex-prost-build = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 log = { workspace = true }
 env_logger = { workspace = true }
+
+[dev-dependencies]
+prost-types = { version = "0.14", default-features = false }

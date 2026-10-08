@@ -2,6 +2,8 @@
 
 ## [3.2.0] - Unreleased
 
+* Client fails a response without `grpc-status` with `ClientError::GrpcStatus`, `UNKNOWN` if the trailers lack it, `INTERNAL` if there are no trailers
+
 * Client enforces the request timeout, returns `ClientError::DeadlineExceeded` with empty headers and resets the stream
 
 * Make `RequestContext::headers()` and `get_disconnect_on_drop()` public, custom transports need them

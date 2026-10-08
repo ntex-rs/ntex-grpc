@@ -3,7 +3,7 @@ use std::{convert::TryFrom, future::Future, str::FromStr, time::Duration};
 use ntex_bytes::{Buf, BufMut, BytePages};
 use ntex_error::Error;
 use ntex_h2::{self as h2};
-use ntex_http::{HeaderMap, Method, header};
+use ntex_http::{HeaderMap, HeaderValue, Method, header};
 use ntex_util::time;
 
 use super::{Client, ClientError, Transport, request::RequestContext, request::Response};
@@ -114,6 +114,8 @@ async fn send_request<T: MethodDef>(
     let mut hdrs = HeaderMap::default();
     let mut trailers = HeaderMap::default();
     let mut payload = Data::Empty;
+    // the status to report if the response has no `grpc-status`
+    let mut missing = None;
 
     async {
         loop {
@@ -161,11 +163,16 @@ async fn send_request<T: MethodDef>(
                     match data {
                         h2::StreamEof::Data(data, _cap) => {
                             payload.push(data);
+                            missing = Some((GrpcStatus::Internal, NO_TRAILERS));
                         }
                         h2::StreamEof::Trailers(hdrs) => {
                             // check grpc status
                             match check_grpc_status(&hdrs) {
-                                Some(Ok(GrpcStatus::Ok)) | None => Ok(()),
+                                Some(Ok(GrpcStatus::Ok)) => Ok(()),
+                                None => {
+                                    missing = Some((GrpcStatus::Unknown, NO_GRPC_STATUS));
+                                    Ok(())
+                                }
                                 Some(Ok(GrpcStatus::DeadlineExceeded)) => {
                                     return Err(Error::from(ClientError::DeadlineExceeded(hdrs)));
                                 }
@@ -197,6 +204,12 @@ async fn send_request<T: MethodDef>(
                 }
                 None => return Err(Error::from(ClientError::Response(None, hdrs, data))),
             }
+            if let Some((status, msg)) = missing {
+                if !trailers.contains_key(consts::GRPC_MESSAGE) {
+                    trailers.insert(consts::GRPC_MESSAGE, HeaderValue::from_static(msg));
+                }
+                return Err(Error::from(ClientError::GrpcStatus(status, trailers)));
+            }
             let resp_size = data.len();
             if resp_size < 5 {
                 return Err(Error::from(ClientError::UnexpectedEof(status, hdrs)));
@@ -222,6 +235,9 @@ async fn send_request<T: MethodDef>(
     .await
     .map_err(|e| e.with_service(client.service()))
 }
+
+const NO_TRAILERS: &str = "Response ended without trailers";
+const NO_GRPC_STATUS: &str = "Response trailers have no grpc-status";
 
 fn check_grpc_status(hdrs: &HeaderMap) -> Option<Result<GrpcStatus, ()>> {
     // check grpc status

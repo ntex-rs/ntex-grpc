@@ -2,6 +2,10 @@
 
 ## [3.2.0] - Unreleased
 
+* Client maps a stream reset by the server to a gRPC code as the spec says and returns `ClientError::GrpcStatus` instead of `ClientError::Stream`
+
+* Client reads the reply if the server resets the stream before the request is sent, a server can reply early
+
 * Client fails a call with a zero timeout with `DeadlineExceeded` without sending it
 
 * Client accepts only HTTP status 200, other 2xx statuses are reported as `UNKNOWN`

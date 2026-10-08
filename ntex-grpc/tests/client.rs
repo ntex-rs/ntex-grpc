@@ -57,6 +57,16 @@ method!(SizedHtml, "/test.Svc/SizedHtml");
 method!(TwoMessages, "/test.Svc/TwoMessages");
 method!(ExtraData, "/test.Svc/ExtraData");
 
+/// Replies with a message, takes an input.
+struct Upload;
+
+impl MethodDef for Upload {
+    const NAME: &'static str = "Upload";
+    const PATH: ByteString = ByteString::from_static("/test.Svc/Message");
+    type Input = BytesValue;
+    type Output = ();
+}
+
 /// Replies before it reads the request.
 struct EarlyStatus;
 
@@ -897,6 +907,32 @@ async fn send_limited<M: MethodDef<Input = ()>>(
     let mut req = Request::<_, M>::new(client, &());
     req.max_message_size(size);
     req.send().await
+}
+
+#[ntex::test]
+async fn max_send_message_size() {
+    let client = client();
+    // encoded as a tag, a length and 2 bytes
+    let input = BytesValue {
+        value: Bytes::from_static(b"ab"),
+    };
+    let mut req = Request::<_, Upload>::new(&client, &input);
+    req.max_send_message_size(4);
+    assert_eq!(req.send().await.unwrap().res_size, 5);
+
+    let mut req = Request::<_, Upload>::new(&client, &input);
+    req.max_send_message_size(3);
+    let err = req.send().await.unwrap_err();
+    // nothing came from the server
+    let ClientError::GrpcStatus(status, hdrs, None) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::ResourceExhausted);
+    assert_eq!(hdrs.len(), 1);
+    assert_eq!(
+        hdrs.get(GRPC_MESSAGE).unwrap(),
+        "trying to send message larger than max (4 vs. 3)"
+    );
 }
 
 #[ntex::test]

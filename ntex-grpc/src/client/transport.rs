@@ -80,16 +80,17 @@ async fn send_request<T: MethodDef>(
     val: &T::Input,
     ctx: &mut RequestContext,
 ) -> Result<Response<T>, Error<ClientError>> {
-    let len = val.encoded_len();
-    let mut buf = BytePages::default();
-    buf.put_u8(0); // compression
-    buf.put_u32(len as u32); // length
-    val.write(&mut buf);
-    let req_size = buf.len();
-
     if let Some(err) = ctx.take_error() {
         return Err(Error::from(ClientError::Http(err)).with_service(client.service()));
     }
+
+    let len = send_size(val.encoded_len(), ctx.get_max_send_message_size())
+        .map_err(|e| Error::from(e).with_service(client.service()))?;
+    let mut buf = BytePages::default();
+    buf.put_u8(0); // compression
+    buf.put_u32(len); // length
+    val.write(&mut buf);
+    let req_size = buf.len();
 
     let mut hdrs = HeaderMap::new();
     hdrs.append(header::CONTENT_TYPE, consts::HDRV_CT_GRPC);
@@ -365,6 +366,27 @@ fn synthesized_status(
     Error::from(ClientError::GrpcStatus(status, hdrs, Some(body)))
 }
 
+/// Returns the length prefix of a request message, or the error if the
+/// message must not be sent. The messages are the ones grpc-go uses.
+fn send_size(len: usize, max_size: usize) -> Result<u32, ClientError> {
+    let msg = if len > max_size {
+        format!("trying to send message larger than max ({len} vs. {max_size})")
+    } else if let Ok(len) = u32::try_from(len) {
+        return Ok(len);
+    } else {
+        format!("grpc: message too large ({len} bytes)")
+    };
+    let msg = HeaderValue::try_from(msg)
+        .unwrap_or_else(|_| HeaderValue::from_static("grpc: message too large"));
+    let mut hdrs = HeaderMap::new();
+    hdrs.insert(consts::GRPC_MESSAGE, msg);
+    Err(ClientError::GrpcStatus(
+        GrpcStatus::ResourceExhausted,
+        hdrs,
+        None,
+    ))
+}
+
 /// Returns the status to report if the response is not a grpc response.
 ///
 /// Accepts `application/grpc`, optionally followed by `+format` or `;params`.
@@ -406,6 +428,31 @@ fn check_grpc_status(hdrs: &HeaderMap) -> Option<Result<GrpcStatus, HeaderValue>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn send_size_limit() {
+        let msg = |res: Result<u32, ClientError>| match res.unwrap_err() {
+            ClientError::GrpcStatus(GrpcStatus::ResourceExhausted, hdrs, None) => {
+                assert_eq!(hdrs.len(), 1);
+                hdrs.get(consts::GRPC_MESSAGE).unwrap().clone()
+            }
+            err => panic!("{err:?}"),
+        };
+        assert_eq!(send_size(0, 0).unwrap(), 0);
+        assert_eq!(send_size(3, 3).unwrap(), 3);
+        assert_eq!(
+            msg(send_size(4, 3)),
+            "trying to send message larger than max (4 vs. 3)"
+        );
+
+        let max = u32::MAX as usize;
+        assert_eq!(send_size(max, usize::MAX).unwrap(), u32::MAX);
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            msg(send_size(max + 1, usize::MAX)),
+            "grpc: message too large (4294967296 bytes)"
+        );
+    }
 
     #[test]
     fn http_status_mapping() {

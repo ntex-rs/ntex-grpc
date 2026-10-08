@@ -15,11 +15,15 @@ pub struct RequestContext {
     headers: HeaderMap,
     timeout: Option<time::Duration>,
     max_message_size: usize,
+    max_send_message_size: usize,
     flags: Flags,
 }
 
 /// Default limit of a received message, the same as in grpc-go.
 const DEFAULT_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+
+/// Default limit of a sent message, the same as in grpc-go.
+const DEFAULT_MAX_SEND_MESSAGE_SIZE: usize = i32::MAX as usize;
 
 bitflags::bitflags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -36,6 +40,7 @@ impl RequestContext {
             headers: HeaderMap::new(),
             timeout: None,
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
+            max_send_message_size: DEFAULT_MAX_SEND_MESSAGE_SIZE,
             flags: Flags::empty(),
         }
     }
@@ -77,6 +82,22 @@ impl RequestContext {
     /// [`GrpcStatus::ResourceExhausted`](crate::GrpcStatus::ResourceExhausted).
     pub fn max_message_size(&mut self, size: usize) -> &mut Self {
         self.max_message_size = size;
+        self
+    }
+
+    /// Get the size limit of the request message.
+    pub fn get_max_send_message_size(&self) -> usize {
+        self.max_send_message_size
+    }
+
+    /// Set the size limit of the request message, 2 GiB - 1 by default.
+    ///
+    /// Built-in transports do not send a larger message and return
+    /// [`GrpcStatus::ResourceExhausted`](crate::GrpcStatus::ResourceExhausted).
+    /// A message is never sent if it is 4 GiB or larger, its length does
+    /// not fit the length prefix.
+    pub fn max_send_message_size(&mut self, size: usize) -> &mut Self {
+        self.max_send_message_size = size;
         self
     }
 
@@ -285,6 +306,16 @@ where
         self
     }
 
+    /// Set the size limit of the request message, 2 GiB - 1 by default.
+    ///
+    /// Built-in transports return
+    /// [`GrpcStatus::ResourceExhausted`](crate::GrpcStatus::ResourceExhausted)
+    /// for a larger message, without sending it.
+    pub fn max_send_message_size(&mut self, size: usize) -> &mut Self {
+        self.ctx.max_send_message_size(size);
+        self
+    }
+
     /// Send request
     pub async fn send(self) -> Result<Response<M>, T::Error> {
         let Request {
@@ -444,6 +475,11 @@ mod tests {
         let mut ctx = RequestContext::new();
         assert_eq!(ctx.get_max_message_size(), 4 * 1024 * 1024);
         ctx.max_message_size(10);
+        assert_eq!(ctx.get_max_message_size(), 10);
+
+        assert_eq!(ctx.get_max_send_message_size(), 2_147_483_647);
+        ctx.max_send_message_size(20);
+        assert_eq!(ctx.get_max_send_message_size(), 20);
         assert_eq!(ctx.get_max_message_size(), 10);
     }
 

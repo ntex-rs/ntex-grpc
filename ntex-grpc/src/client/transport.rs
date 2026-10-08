@@ -7,7 +7,9 @@ use ntex_http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use ntex_util::time;
 
 use super::{Client, ClientError, Transport, request::RequestContext, request::Response};
-use crate::utils::{self, Data, FlagError};
+#[cfg(feature = "compression")]
+use crate::Compression;
+use crate::utils::{self, Data};
 use crate::{GrpcStatus, Message, consts, service::MethodDef};
 
 impl<T: MethodDef> Transport<T> for Client {
@@ -84,20 +86,23 @@ async fn send_request<T: MethodDef>(
         return Err(Error::from(ClientError::Http(err)).with_service(client.service()));
     }
 
-    let len = send_size(val.encoded_len(), ctx.get_max_send_message_size())
+    let buf = encode_message(val, ctx)
+        .await
         .map_err(|e| Error::from(e).with_service(client.service()))?;
-    let mut buf = BytePages::default();
-    buf.put_u8(0); // compression
-    buf.put_u32(len); // length
-    val.write(&mut buf);
     let req_size = buf.len();
 
     let mut hdrs = HeaderMap::new();
     hdrs.append(header::CONTENT_TYPE, consts::HDRV_CT_GRPC);
     hdrs.append(header::USER_AGENT, consts::HDRV_USER_AGENT);
     hdrs.insert(header::TE, consts::HDRV_TRAILERS);
-    hdrs.insert(consts::GRPC_ENCODING, consts::IDENTITY);
-    hdrs.insert(consts::GRPC_ACCEPT_ENCODING, consts::IDENTITY);
+    #[cfg(feature = "compression")]
+    let enc = ctx
+        .get_compression()
+        .map_or(consts::IDENTITY, Compression::header);
+    #[cfg(not(feature = "compression"))]
+    let enc = consts::IDENTITY;
+    hdrs.insert(consts::GRPC_ENCODING, enc);
+    hdrs.insert(consts::GRPC_ACCEPT_ENCODING, consts::ACCEPT_ENCODING);
     // the context holds no reserved headers, see `RequestContext::header()`
     for (key, val) in ctx.headers() {
         hdrs.append(key.clone(), val.clone());
@@ -256,21 +261,27 @@ async fn send_request<T: MethodDef>(
             if resp_size < 5 {
                 return Err(Error::from(ClientError::UnexpectedEof(status, hdrs)));
             }
-            // we only accept identity, a compliant server never compresses
-            if let Err(FlagError::Unsupported(msg) | FlagError::Invalid(msg)) =
-                utils::check_compressed_flag(data[0], &hdrs)
-            {
-                return Err(synthesized_status(
-                    GrpcStatus::Internal,
-                    trailers,
-                    msg,
-                    data,
-                ));
-            }
-            data.advance(1);
+            let body = data.clone();
+            let flag = data.get_u8();
             let len = data.get_u32();
-            let Some(mut block) = data.split_to_checked(len as usize) else {
+            let Some(block) = data.split_to_checked(len as usize) else {
                 return Err(Error::from(ClientError::UnexpectedEof(None, hdrs)));
+            };
+            // a message in an unknown encoding is an internal error
+            let max_size = ctx.get_max_message_size();
+            let mut block = match utils::read_message(
+                flag,
+                &hdrs,
+                block,
+                max_size,
+                GrpcStatus::Internal,
+            )
+            .await
+            {
+                Ok(block) => block,
+                Err((status, msg)) => {
+                    return Err(synthesized_status(status, trailers, msg, body));
+                }
             };
 
             return match <T::Output as Message>::read(&mut block) {
@@ -320,7 +331,7 @@ fn reset_error(reason: Reason, hdrs: HeaderMap, body: Bytes) -> Error<ClientErro
     synthesized_status(GrpcStatus::from(reason), hdrs, msg, body)
 }
 
-/// Maps a lost connection to `UNAVAILABLE`, as grpc-go does.
+/// Maps a lost connection to `UNAVAILABLE`.
 ///
 /// The connection closed, failed or is going away, the call may be retried
 /// on a new one. Other errors are reported as [`ClientError::Operation`].
@@ -397,8 +408,49 @@ fn synthesized(
     ClientError::GrpcStatus(status, hdrs, Some(body))
 }
 
+/// Encodes the request message with its length prefix.
+///
+/// An empty message is never compressed.
+#[cfg_attr(not(feature = "compression"), allow(clippy::unused_async))]
+async fn encode_message<M: Message>(
+    val: &M,
+    ctx: &RequestContext,
+) -> Result<BytePages, ClientError> {
+    let max_size = ctx.get_max_send_message_size();
+    let mut buf = BytePages::default();
+
+    #[cfg(feature = "compression")]
+    if let Some(enc) = ctx.get_compression() {
+        let len = val.encoded_len();
+        if len != 0 {
+            // the uncompressed message must fit the length prefix too
+            send_size(len, usize::MAX)?;
+            let mut msg = BytePages::default();
+            val.write(&mut msg);
+            let msg = enc.compress(msg.freeze()).await.map_err(|err| {
+                let msg = HeaderValue::try_from(format!("grpc: error while compressing: {err}"))
+                    .unwrap_or_else(|_| HeaderValue::from_static("grpc: error while compressing"));
+                let mut hdrs = HeaderMap::new();
+                hdrs.insert(consts::GRPC_MESSAGE, msg);
+                ClientError::GrpcStatus(GrpcStatus::Internal, hdrs, None)
+            })?;
+            let len = send_size(msg.len(), max_size)?;
+            buf.put_u8(1);
+            buf.put_u32(len);
+            buf.append(msg);
+            return Ok(buf);
+        }
+    }
+
+    let len = send_size(val.encoded_len(), max_size)?;
+    buf.put_u8(0);
+    buf.put_u32(len);
+    val.write(&mut buf);
+    Ok(buf)
+}
+
 /// Returns the length prefix of a request message, or the error if the
-/// message must not be sent. The messages are the ones grpc-go uses.
+/// message must not be sent.
 fn send_size(len: usize, max_size: usize) -> Result<u32, ClientError> {
     let msg = if len > max_size {
         format!("trying to send message larger than max ({len} vs. {max_size})")

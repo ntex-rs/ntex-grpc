@@ -20,6 +20,8 @@
     clippy::must_use_candidate,
     clippy::unused_async_trait_impl
 )]
+#[cfg(feature = "compression")]
+mod compression;
 mod consts;
 mod service;
 mod status;
@@ -42,6 +44,8 @@ pub mod server;
 /// Protobuf encoding traits used by generated code.
 pub mod types;
 
+#[cfg(feature = "compression")]
+pub use crate::compression::Compression;
 pub use crate::encoding::DecodeError;
 pub use crate::service::{MethodDef, ServiceDef};
 pub use crate::status::GrpcStatus;

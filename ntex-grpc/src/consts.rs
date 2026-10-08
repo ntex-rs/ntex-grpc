@@ -15,3 +15,8 @@ pub(crate) const GRPC_ENCODING: HeaderName = HeaderName::from_static("grpc-encod
 pub(crate) const GRPC_ACCEPT_ENCODING: HeaderName =
     HeaderName::from_static("grpc-accept-encoding");
 pub(crate) const IDENTITY: HeaderValue = HeaderValue::from_static("identity");
+/// The `grpc-accept-encoding` we send, only the encodings we support.
+#[cfg(feature = "compression")]
+pub(crate) const ACCEPT_ENCODING: HeaderValue = HeaderValue::from_static("gzip,zstd");
+#[cfg(not(feature = "compression"))]
+pub(crate) const ACCEPT_ENCODING: HeaderValue = IDENTITY;

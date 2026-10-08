@@ -39,6 +39,7 @@ method!(Missing, "/test.Svc/Missing");
 method!(ProxyError, "/test.Svc/ProxyError");
 method!(Compressed, "/test.Svc/Compressed");
 method!(Gzip, "/test.Svc/Gzip");
+method!(Snappy, "/test.Svc/Snappy");
 method!(BadFlag, "/test.Svc/BadFlag");
 method!(UnknownStatus, "/test.Svc/UnknownStatus");
 method!(BadStatus, "/test.Svc/BadStatus");
@@ -68,6 +69,18 @@ impl MethodDef for Upload {
     const PATH: ByteString = ByteString::from_static("/test.Svc/Message");
     type Input = BytesValue;
     type Output = ();
+}
+
+/// Replies with the request message and its `grpc-encoding`.
+#[cfg(feature = "compression")]
+struct EchoBody;
+
+#[cfg(feature = "compression")]
+impl MethodDef for EchoBody {
+    const NAME: &'static str = "EchoBody";
+    const PATH: ByteString = ByteString::from_static("/test.Svc/EchoBody");
+    type Input = BytesValue;
+    type Output = BytesValue;
 }
 
 /// Replies before it reads the request.
@@ -121,17 +134,20 @@ fn client() -> SimpleClient {
 /// Also returns the reasons of streams reset by the client.
 fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
     let (cli, srv) = IoTest::create();
-    cli.remote_buffer_cap(1024 * 1024);
-    srv.remote_buffer_cap(1024 * 1024);
+    cli.remote_buffer_cap(64 * 1024 * 1024);
+    srv.remote_buffer_cap(64 * 1024 * 1024);
     // dropping a clone closes the connection, so it is shared
     let peer = Rc::new(srv.clone());
 
     // path and headers of each request
     let paths: Rc<RefCell<HashMap<StreamId, (ByteString, HeaderMap)>>> = Rc::default();
+    // request bodies
+    let bodies: Rc<RefCell<HashMap<StreamId, Vec<u8>>>> = Rc::default();
     let resets: Rc<RefCell<Vec<Reason>>> = Rc::default();
     let resets2 = resets.clone();
     let publish = fn_service(move |msg: h2::Message| {
         let paths = paths.clone();
+        let bodies = bodies.clone();
         let resets = resets2.clone();
         let peer = peer.clone();
         async move {
@@ -163,8 +179,19 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                         resets.borrow_mut().push(reason);
                     }
                 }
-                h2::MessageKind::Eof(_) => {
+                h2::MessageKind::Data(data, _) => {
+                    bodies
+                        .borrow_mut()
+                        .entry(stream.id())
+                        .or_default()
+                        .extend_from_slice(&data);
+                }
+                h2::MessageKind::Eof(eof) => {
                     let (path, req) = paths.borrow_mut().remove(&stream.id()).unwrap();
+                    let mut body = bodies.borrow_mut().remove(&stream.id()).unwrap_or_default();
+                    if let h2::StreamEof::Data(data, _) = eof {
+                        body.extend_from_slice(&data);
+                    }
                     match path.as_ref() {
                         // a regular reply: one empty message, then trailers
                         "/test.Svc/Message" => {
@@ -281,7 +308,7 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                                 .send_response(StatusCode::INTERNAL_SERVER_ERROR, hdrs, true)
                                 .unwrap();
                         }
-                        // compressed messages, the client only accepts identity
+                        // compressed messages, an empty gzip message is invalid
                         "/test.Svc/Compressed" => {
                             reply_with(&stream, grpc_headers(), b"\x01\0\0\0\0").await;
                         }
@@ -290,8 +317,23 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                             hdrs.insert(GRPC_ENCODING, HeaderValue::from_static("gzip"));
                             reply_with(&stream, hdrs, b"\x01\0\0\0\0").await;
                         }
+                        "/test.Svc/Snappy" => {
+                            let mut hdrs = grpc_headers();
+                            hdrs.insert(GRPC_ENCODING, HeaderValue::from_static("snappy"));
+                            reply_with(&stream, hdrs, b"\x01\0\0\0\0").await;
+                        }
                         "/test.Svc/BadFlag" => {
                             reply_with(&stream, grpc_headers(), b"\x02\0\0\0\0").await;
+                        }
+                        // replies with the request body and grpc-encoding
+                        "/test.Svc/EchoBody" => {
+                            let mut hdrs = grpc_headers();
+                            if let Some(enc) = req.get(GRPC_ENCODING) {
+                                hdrs.insert(GRPC_ENCODING, enc.clone());
+                            }
+                            stream.send_response(StatusCode::OK, hdrs, false).unwrap();
+                            stream.send_payload(Bytes::from(body), false).await.unwrap();
+                            stream.send_trailers(status_ok()).unwrap();
                         }
                         // status codes the client does not know
                         "/test.Svc/UnknownStatus" => {
@@ -745,8 +787,20 @@ async fn compressed_flag() {
             &b"\x01\0\0\0\0"[..],
         ),
         (
+            send::<Snappy>(&client).await.unwrap_err(),
+            "Unsupported grpc-encoding: snappy",
+            &b"\x01\0\0\0\0"[..],
+        ),
+        #[cfg(not(feature = "compression"))]
+        (
             send::<Gzip>(&client).await.unwrap_err(),
             "Unsupported grpc-encoding: gzip",
+            &b"\x01\0\0\0\0"[..],
+        ),
+        #[cfg(feature = "compression")]
+        (
+            send::<Gzip>(&client).await.unwrap_err(),
+            "grpc: failed to read decompressed data: unexpected end of file",
             &b"\x01\0\0\0\0"[..],
         ),
         (
@@ -1147,7 +1201,96 @@ async fn reserved_headers() {
     assert!(get_all("grpc-message").is_empty());
     assert!(get_all("grpc-status").is_empty());
     assert_eq!(get_all("grpc-timeout"), ["1000000u"]);
-    // sent along with the client's value, as grpc-go does
+    // sent along with the client's value
+    #[cfg(not(feature = "compression"))]
     assert_eq!(get_all("grpc-accept-encoding"), ["gzip", "identity"]);
+    #[cfg(feature = "compression")]
+    assert_eq!(get_all("grpc-accept-encoding"), ["gzip", "gzip,zstd"]);
     assert_eq!(get_all("x-a"), ["1"]);
+}
+
+#[cfg(feature = "compression")]
+#[ntex::test]
+async fn compression() {
+    use ntex_grpc::Compression;
+
+    let client = client();
+    let input = BytesValue {
+        value: Bytes::from(vec![b'a'; 1000]),
+    };
+    for enc in [Compression::Gzip, Compression::Zstd] {
+        let mut req = Request::<_, EchoBody>::new(&client, &input);
+        req.compression(enc);
+        let res = req.send().await.unwrap();
+        assert_eq!(res.output, input);
+        assert_eq!(res.headers().get(GRPC_ENCODING).unwrap(), enc.name());
+        // compressed both ways
+        assert!(res.req_size < 100, "{}", res.req_size);
+        assert_eq!(res.res_size, res.req_size);
+
+        // the message is 1003 bytes after decompression
+        let mut req = Request::<_, EchoBody>::new(&client, &input);
+        req.compression(enc).max_message_size(1003);
+        assert_eq!(req.send().await.unwrap().output, input);
+
+        let mut req = Request::<_, EchoBody>::new(&client, &input);
+        req.compression(enc).max_message_size(1002);
+        let err = req.send().await.unwrap_err();
+        let ClientError::GrpcStatus(status, trailers, Some(body)) = &*err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(*status, GrpcStatus::ResourceExhausted);
+        assert_eq!(
+            trailers.get(GRPC_MESSAGE).unwrap(),
+            "grpc: received message after decompression larger than max 1002"
+        );
+        assert_eq!(body.len(), res.res_size);
+
+        // the limit applies to the compressed message
+        let mut req = Request::<_, EchoBody>::new(&client, &input);
+        req.compression(enc).max_send_message_size(res.req_size - 6);
+        let err = req.send().await.unwrap_err();
+        let ClientError::GrpcStatus(status, _, None) = &*err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(*status, GrpcStatus::ResourceExhausted);
+
+        // an empty message is not compressed
+        let empty = BytesValue::default();
+        let mut req = Request::<_, EchoBody>::new(&client, &empty);
+        req.compression(enc);
+        let res = req.send().await.unwrap();
+        assert_eq!(res.output, empty);
+        assert_eq!(res.req_size, 5);
+        assert_eq!(res.headers().get(GRPC_ENCODING).unwrap(), enc.name());
+
+        // large messages are compressed on the blocking pool
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let random: Vec<u8> = (0..256 * 1024)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as u8
+            })
+            .collect();
+        for value in [random, vec![b'a'; 2 * 1024 * 1024]] {
+            let input = BytesValue {
+                value: Bytes::from(value),
+            };
+            let mut req = Request::<_, EchoBody>::new(&client, &input);
+            req.compression(enc).max_message_size(8 * 1024 * 1024);
+            let res = req.send().await.unwrap();
+            assert_eq!(res.output, input);
+        }
+    }
+
+    // not compressed by default
+    let res = Request::<_, EchoBody>::new(&client, &input)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.output, input);
+    assert_eq!(res.req_size, 1008);
+    assert_eq!(res.headers().get(GRPC_ENCODING).unwrap(), "identity");
 }

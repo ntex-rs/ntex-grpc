@@ -6,7 +6,9 @@ use ntex_bytes::{Bytes, BytesMut};
 use ntex_http::{HeaderMap, HeaderValue};
 use urly::quoting::{Component, unquote};
 
-use crate::consts;
+#[cfg(feature = "compression")]
+use crate::Compression;
+use crate::{GrpcStatus, consts};
 
 pub(crate) enum Data {
     Chunk(Bytes),
@@ -78,7 +80,7 @@ pub fn encode_binary_header(value: &[u8]) -> HeaderValue {
 /// ```
 pub fn decode_binary_header(value: &HeaderValue) -> Option<Vec<u8>> {
     let value = value.as_bytes();
-    // padded base64 is a multiple of 4 bytes long, as in grpc-go
+    // padded base64 is a multiple of 4 bytes long
     if value.len().is_multiple_of(4) {
         STANDARD.decode(value).ok()
     } else {
@@ -87,7 +89,7 @@ pub fn decode_binary_header(value: &HeaderValue) -> Option<Vec<u8>> {
 }
 
 /// Why a message's compressed flag cannot be handled.
-pub(crate) enum FlagError {
+enum FlagError {
     /// The message is compressed with an encoding we do not support.
     Unsupported(HeaderValue),
     /// The flag is invalid, or set without a `grpc-encoding`.
@@ -95,7 +97,7 @@ pub(crate) enum FlagError {
 }
 
 /// Checks the compressed flag of a message, only identity is supported.
-pub(crate) fn check_compressed_flag(flag: u8, hdrs: &HeaderMap) -> Result<(), FlagError> {
+fn check_compressed_flag(flag: u8, hdrs: &HeaderMap) -> Result<(), FlagError> {
     match flag {
         0 => Ok(()),
         1 => match hdrs.get(consts::GRPC_ENCODING) {
@@ -110,6 +112,36 @@ pub(crate) fn check_compressed_flag(flag: u8, hdrs: &HeaderMap) -> Result<(), Fl
             HeaderValue::try_from(format!("Invalid compressed flag {flag}"))
                 .unwrap_or_else(|_| HeaderValue::from_static("Invalid compressed flag")),
         )),
+    }
+}
+
+/// Returns the message, decompressed if needed.
+///
+/// `unsupported` is the status of a message in an encoding we do not
+/// support. The decompressed message must not be larger than `max_size`.
+#[cfg_attr(not(feature = "compression"), allow(clippy::unused_async))]
+pub(crate) async fn read_message(
+    flag: u8,
+    hdrs: &HeaderMap,
+    block: Bytes,
+    max_size: usize,
+    unsupported: GrpcStatus,
+) -> Result<Bytes, (GrpcStatus, HeaderValue)> {
+    #[cfg(feature = "compression")]
+    if flag == 1
+        && let Some(enc) = hdrs
+            .get(consts::GRPC_ENCODING)
+            .and_then(Compression::from_header)
+    {
+        return enc.decompress(block, max_size).await;
+    }
+    #[cfg(not(feature = "compression"))]
+    let _ = max_size;
+
+    match check_compressed_flag(flag, hdrs) {
+        Ok(()) => Ok(block),
+        Err(FlagError::Unsupported(msg)) => Err((unsupported, msg)),
+        Err(FlagError::Invalid(msg)) => Err((GrpcStatus::Internal, msg)),
     }
 }
 

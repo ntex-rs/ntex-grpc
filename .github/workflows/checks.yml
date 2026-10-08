@@ -18,7 +18,7 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - run:
-          cargo clippy --tests --all --no-default-features --features="ntex-net/tokio"
+          cargo clippy --tests --all --no-default-features --features="ntex-net/tokio,ntex-grpc/compression"
 
   fmt:
     name: Rustfmt

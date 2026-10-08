@@ -2,6 +2,8 @@ use std::{convert::TryFrom, fmt, ops, time};
 
 use ntex_http::{HeaderMap, HeaderName, HeaderValue, error::Error as HttpError};
 
+#[cfg(feature = "compression")]
+use crate::Compression;
 use crate::{client::Transport, consts, service::MethodDef};
 
 /// Headers, timeout and flags of a single call.
@@ -16,13 +18,15 @@ pub struct RequestContext {
     timeout: Option<time::Duration>,
     max_message_size: usize,
     max_send_message_size: usize,
+    #[cfg(feature = "compression")]
+    compression: Option<Compression>,
     flags: Flags,
 }
 
-/// Default limit of a received message, the same as in grpc-go.
+/// Default limit of a received message.
 const DEFAULT_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
-/// Default limit of a sent message, the same as in grpc-go.
+/// Default limit of a sent message.
 const DEFAULT_MAX_SEND_MESSAGE_SIZE: usize = i32::MAX as usize;
 
 bitflags::bitflags! {
@@ -41,6 +45,8 @@ impl RequestContext {
             timeout: None,
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_SEND_MESSAGE_SIZE,
+            #[cfg(feature = "compression")]
+            compression: None,
             flags: Flags::empty(),
         }
     }
@@ -83,6 +89,7 @@ impl RequestContext {
     /// message. If it is over the limit, they reset the stream instead of
     /// reading the message and return
     /// [`GrpcStatus::ResourceExhausted`](crate::GrpcStatus::ResourceExhausted).
+    /// A compressed message must fit the limit after decompression too.
     pub fn max_message_size(&mut self, size: usize) -> &mut Self {
         self.max_message_size = size;
         self
@@ -98,9 +105,32 @@ impl RequestContext {
     /// Built-in transports do not send a larger message and return
     /// [`GrpcStatus::ResourceExhausted`](crate::GrpcStatus::ResourceExhausted).
     /// A message is never sent if it is 4 GiB or larger, its length does
-    /// not fit the length prefix.
+    /// not fit the length prefix. A compressed message is checked after
+    /// compression.
     pub fn max_send_message_size(&mut self, size: usize) -> &mut Self {
         self.max_send_message_size = size;
+        self
+    }
+
+    /// Get the compression of the request message.
+    ///
+    /// Requires the `compression` feature.
+    #[cfg(feature = "compression")]
+    pub fn get_compression(&self) -> Option<Compression> {
+        self.compression
+    }
+
+    /// Compress the request message, it is not compressed by default.
+    ///
+    /// Built-in transports send the encoding in the `grpc-encoding` header.
+    /// An empty message is sent uncompressed. A server that does not support
+    /// the encoding fails the call with
+    /// [`GrpcStatus::Unimplemented`](crate::GrpcStatus::Unimplemented).
+    ///
+    /// Requires the `compression` feature.
+    #[cfg(feature = "compression")]
+    pub fn compression(&mut self, compression: Compression) -> &mut Self {
+        self.compression = Some(compression);
         self
     }
 
@@ -117,7 +147,7 @@ impl RequestContext {
     /// sent as they are, encode them with
     /// [`encode_binary_header()`](crate::encode_binary_header).
     ///
-    /// Headers the client sets itself are ignored, as in grpc-go:
+    /// Headers the client sets itself are ignored:
     /// `content-type`, `user-agent`, `te`, `grpc-encoding`,
     /// `grpc-message-type`, `grpc-message`, `grpc-status` and `grpc-timeout`.
     /// Use [`timeout()`](Self::timeout) for the timeout.
@@ -323,6 +353,18 @@ where
         self
     }
 
+    /// Compress the request message with gzip or zstd.
+    ///
+    /// The server must support the encoding, otherwise the call fails with
+    /// [`GrpcStatus::Unimplemented`](crate::GrpcStatus::Unimplemented).
+    ///
+    /// Requires the `compression` feature.
+    #[cfg(feature = "compression")]
+    pub fn compression(&mut self, compression: Compression) -> &mut Self {
+        self.ctx.compression(compression);
+        self
+    }
+
     /// Send request
     pub async fn send(self) -> Result<Response<M>, T::Error> {
         let Request {
@@ -335,7 +377,7 @@ where
     }
 }
 
-/// Checks if the client sets the header itself, the list is from grpc-go.
+/// Checks if the client sets the header itself.
 fn is_reserved(key: &HeaderName) -> bool {
     matches!(
         key.as_str(),
@@ -514,7 +556,7 @@ mod tests {
         ctx.header("te", "\n");
         assert!(ctx.take_error().is_some());
 
-        // not reserved in grpc-go either
+        // not reserved
         ctx.header("grpc-accept-encoding", "gzip")
             .header("grpc-previous-rpc-attempts", "1")
             .header("x-te", "1");
@@ -541,6 +583,15 @@ mod tests {
         ctx.max_send_message_size(20);
         assert_eq!(ctx.get_max_send_message_size(), 20);
         assert_eq!(ctx.get_max_message_size(), 10);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn context_compression() {
+        let mut ctx = RequestContext::new();
+        assert_eq!(ctx.get_compression(), None);
+        ctx.compression(Compression::Zstd);
+        assert_eq!(ctx.get_compression(), Some(Compression::Zstd));
     }
 
     #[test]

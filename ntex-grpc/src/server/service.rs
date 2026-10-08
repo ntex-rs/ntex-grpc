@@ -1,13 +1,15 @@
 use std::{cell::RefCell, error::Error, rc::Rc};
 
-use ntex_bytes::{Buf, BufMut, BytePages, ByteString};
+use ntex_bytes::{Buf, BufMut, BytePages, ByteString, Bytes};
 use ntex_h2::{self as h2, StreamRef, frame::Reason, frame::StreamId};
 use ntex_http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use ntex_io::{Filter, Io, IoBoxed};
 use ntex_service::{Ctx, Pipeline, Service, ServiceFactory, cfg::SharedCfg};
 use ntex_util::{HashMap, time::Millis, time::timeout_checked};
 
-use crate::utils::{self, Data, FlagError};
+#[cfg(feature = "compression")]
+use crate::Compression;
+use crate::utils::{self, Data};
 use crate::{consts, status::GrpcStatus};
 
 use super::{ServerError, ServerRequest, ServerResponse};
@@ -21,12 +23,16 @@ const ERR_DECODE_TIMEOUT: HeaderValue =
 const ERR_DEADLINE: HeaderValue = HeaderValue::from_static("Deadline exceeded");
 const HDR_APP_GRPC: HeaderValue = HeaderValue::from_static("application/grpc");
 
+/// The default limit of a request message.
+const DEFAULT_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+
 const MILLIS_IN_HOUR: u64 = 60 * 60 * 1000;
 const MILLIS_IN_MINUTE: u64 = 60 * 1000;
 
 /// Grpc server
 pub struct GrpcServer<T> {
     factory: Rc<T>,
+    max_message_size: usize,
 }
 
 impl<T> GrpcServer<T> {
@@ -34,7 +40,19 @@ impl<T> GrpcServer<T> {
     pub fn new(factory: T) -> Self {
         Self {
             factory: Rc::new(factory),
+            max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
         }
+    }
+
+    #[must_use]
+    /// Set the largest request message the server accepts, in bytes.
+    ///
+    /// A larger message, or a compressed one that is larger once
+    /// decompressed, fails the call with `RESOURCE_EXHAUSTED`. The default
+    /// is 4 MiB.
+    pub fn max_message_size(mut self, size: usize) -> Self {
+        self.max_message_size = size;
+        self
     }
 }
 
@@ -51,7 +69,7 @@ where
 
         let _ = h2::server::handle_one(
             io,
-            Pipeline::new((), PublishService::new(svc, cfg)),
+            Pipeline::new((), PublishService::new(svc, cfg, self.max_message_size)),
             Pipeline::new((), ControlService),
         )
         .await;
@@ -106,6 +124,7 @@ impl Service<(), h2::Control<h2::StreamError>> for ControlService {
 struct PublishService<S: Service<(), ServerRequest>> {
     cfg: SharedCfg,
     service: S,
+    max_size: usize,
     streams: RefCell<HashMap<StreamId, Inflight>>,
 }
 
@@ -120,12 +139,47 @@ impl<S> PublishService<S>
 where
     S: Service<(), ServerRequest, Res = ServerResponse, Error = ServerError>,
 {
-    fn new(service: S, cfg: SharedCfg) -> Self {
+    fn new(service: S, cfg: SharedCfg, max_size: usize) -> Self {
         Self {
             cfg,
             service,
+            max_size,
             streams: RefCell::new(HashMap::default()),
         }
+    }
+
+    /// Returns the request message, decompressed if needed.
+    async fn read_request(
+        &self,
+        headers: &HeaderMap,
+        mut data: Bytes,
+    ) -> Result<Bytes, (GrpcStatus, HeaderValue)> {
+        if data.len() < 5 {
+            return Err((GrpcStatus::InvalidArgument, ERR_DATA_DECODE));
+        }
+        let flag = data.get_u8();
+        let len = data.get_u32() as usize;
+        let Some(data) = data.split_to_checked(len) else {
+            return Err((GrpcStatus::InvalidArgument, ERR_DATA_DECODE));
+        };
+        if len > self.max_size {
+            let msg = format!(
+                "grpc: received message larger than max ({len} vs. {})",
+                self.max_size
+            );
+            let msg = HeaderValue::try_from(msg)
+                .unwrap_or_else(|_| HeaderValue::from_static("grpc: received message too large"));
+            return Err((GrpcStatus::ResourceExhausted, msg));
+        }
+        // a message in an unknown encoding is unimplemented
+        utils::read_message(
+            flag,
+            headers,
+            data,
+            self.max_size,
+            GrpcStatus::Unimplemented,
+        )
+        .await
     }
 }
 
@@ -136,7 +190,7 @@ where
     type Res = ();
     type Error = h2::StreamError;
 
-    #[allow(clippy::await_holding_refcell_ref, clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)]
     async fn call(
         &self,
         msg: h2::Message,
@@ -144,7 +198,6 @@ where
     ) -> Result<Self::Res, Self::Error> {
         let id = msg.id();
         let h2::Message { stream, kind } = msg;
-        let mut streams = self.streams.borrow_mut();
 
         match kind {
             h2::MessageKind::Headers {
@@ -176,7 +229,7 @@ where
                     path
                 };
 
-                let _ = streams.insert(
+                let _ = self.streams.borrow_mut().insert(
                     stream.id(),
                     Inflight {
                         headers,
@@ -187,12 +240,13 @@ where
                 );
             }
             h2::MessageKind::Data(data, _cap) => {
-                if let Some(inflight) = streams.get_mut(&stream.id()) {
+                if let Some(inflight) = self.streams.borrow_mut().get_mut(&stream.id()) {
                     inflight.data.push(data);
                 }
             }
             h2::MessageKind::Eof(data) => {
-                if let Some(mut inflight) = streams.remove(&id) {
+                let inflight = self.streams.borrow_mut().remove(&id);
+                if let Some(mut inflight) = inflight {
                     match data {
                         h2::StreamEof::Data(chunk, _cap) => inflight.data.push(chunk),
                         h2::StreamEof::Trailers(hdrs) => {
@@ -203,37 +257,18 @@ where
                         h2::StreamEof::Error(err) => return Err(err.into_error()),
                     }
 
-                    let mut data = inflight.data.get();
-                    if data.len() < 5 {
-                        if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
-                            send_error(&stream, GrpcStatus::InvalidArgument, ERR_DATA_DECODE);
-                        }
-                        return Ok(());
-                    }
-                    if let Err(err) = utils::check_compressed_flag(data[0], &inflight.headers) {
-                        if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
-                            match err {
-                                FlagError::Unsupported(msg) => {
-                                    send_error(&stream, GrpcStatus::Unimplemented, msg);
-                                }
-                                FlagError::Invalid(msg) => {
-                                    send_error(&stream, GrpcStatus::Internal, msg);
-                                }
+                    let data = match self
+                        .read_request(&inflight.headers, inflight.data.get())
+                        .await
+                    {
+                        Ok(data) => data,
+                        Err((status, msg)) => {
+                            if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
+                                send_error(&stream, status, msg);
                             }
+                            return Ok(());
                         }
-                        return Ok(());
-                    }
-                    data.advance(1);
-                    let len = data.get_u32();
-                    if (len as usize) > data.len() {
-                        if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
-                            send_error(&stream, GrpcStatus::InvalidArgument, ERR_DATA_DECODE);
-                        }
-                        return Ok(());
-                    }
-                    let data = data
-                        .split_to_checked(len as usize)
-                        .ok_or(h2::StreamError::Reset(Reason::PROTOCOL_ERROR))?;
+                    };
 
                     log::debug!(
                         "{}: Call service {} method {}",
@@ -246,10 +281,28 @@ where
                         name: inflight.name,
                         headers: inflight.headers,
                     };
-                    if stream.send_response(StatusCode::OK, hdrs(), false).is_err() {
+                    // the response is compressed like the request
+                    #[cfg(feature = "compression")]
+                    let encoding = req
+                        .headers
+                        .get(consts::GRPC_ENCODING)
+                        .and_then(Compression::from_header);
+                    #[cfg(feature = "compression")]
+                    let headers = {
+                        let mut headers = hdrs();
+                        if let Some(enc) = encoding {
+                            headers.insert(consts::GRPC_ENCODING, enc.header());
+                        }
+                        headers
+                    };
+                    #[cfg(not(feature = "compression"))]
+                    let headers = hdrs();
+                    if stream
+                        .send_response(StatusCode::OK, headers, false)
+                        .is_err()
+                    {
                         return Ok(());
                     }
-                    drop(streams);
 
                     // GRPC Timeout
                     let to = if let Some(to) = req.headers.get(consts::GRPC_TIMEOUT) {
@@ -267,9 +320,35 @@ where
                         Ok(Ok(mut res)) => {
                             log::debug!("{}: Response is received {res:?}", self.cfg.tag());
                             let mut buf = BytePages::default();
-                            buf.put_u8(0); // compression
-                            buf.put_u32(res.payload.len() as u32); // length
-                            res.payload.move_to(&mut buf);
+                            #[cfg(feature = "compression")]
+                            if let Some(enc) = encoding
+                                && !res.payload.is_empty()
+                            {
+                                match enc.compress(res.payload.freeze()).await {
+                                    Ok(payload) => {
+                                        buf.put_u8(1);
+                                        buf.put_u32(payload.len() as u32);
+                                        buf.append(payload);
+                                    }
+                                    Err(err) => {
+                                        let msg = HeaderValue::try_from(format!(
+                                            "grpc: error while compressing: {err}"
+                                        ))
+                                        .unwrap_or_else(|_| {
+                                            HeaderValue::from_static(
+                                                "grpc: error while compressing",
+                                            )
+                                        });
+                                        send_error(&stream, GrpcStatus::Internal, msg);
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            if buf.is_empty() {
+                                buf.put_u8(0); // compression
+                                buf.put_u32(res.payload.len() as u32); // length
+                                res.payload.move_to(&mut buf);
+                            }
 
                             let _ = stream.send_pages(buf, false).await;
 
@@ -305,7 +384,7 @@ where
                 }
             }
             h2::MessageKind::Disconnect(_) => {
-                streams.remove(&id);
+                self.streams.borrow_mut().remove(&id);
             }
         }
         Ok(())
@@ -315,7 +394,7 @@ where
 fn hdrs() -> HeaderMap {
     let mut hdrs = HeaderMap::default();
     hdrs.insert(CONTENT_TYPE, HDR_APP_GRPC);
-    hdrs.insert(consts::GRPC_ACCEPT_ENCODING, consts::IDENTITY);
+    hdrs.insert(consts::GRPC_ACCEPT_ENCODING, consts::ACCEPT_ENCODING);
     hdrs
 }
 

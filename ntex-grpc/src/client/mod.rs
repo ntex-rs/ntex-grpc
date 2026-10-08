@@ -170,8 +170,8 @@ pub enum ClientError {
     ///   `REFUSED_STREAM` to `UNAVAILABLE` and `CANCEL` to `CANCELLED`. The
     ///   response headers take the place of the trailers here.
     /// * a connection that is closed, fails or goes away before the call
-    ///   ends gives `UNAVAILABLE`, as in grpc-go. The response headers take
-    ///   the place of the trailers here.
+    ///   ends gives `UNAVAILABLE`. The response headers take the place of
+    ///   the trailers here.
     /// * a `content-type` other than `application/grpc` gives `UNKNOWN`.
     /// * a message over the size limit gives `RESOURCE_EXHAUSTED`, see
     ///   [`Request::max_message_size()`].

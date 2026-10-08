@@ -26,7 +26,6 @@ const MILLIS_IN_MINUTE: u64 = 60 * 1000;
 /// Grpc server
 pub struct GrpcServer<T> {
     factory: Rc<T>,
-    control: Pipeline<h2::Control<h2::StreamError>, h2::ControlAck, Rc<dyn Error>>,
 }
 
 impl<T> GrpcServer<T> {
@@ -34,7 +33,6 @@ impl<T> GrpcServer<T> {
     pub fn new(factory: T) -> Self {
         Self {
             factory: Rc::new(factory),
-            control: Pipeline::new((), ControlService),
         }
     }
 }
@@ -53,7 +51,7 @@ where
         let _ = h2::server::handle_one(
             io,
             Pipeline::new((), PublishService::new(svc, cfg)),
-            self.control.bind(),
+            Pipeline::new((), ControlService),
         )
         .await;
 
@@ -195,7 +193,7 @@ where
             h2::MessageKind::Eof(data) => {
                 if let Some(mut inflight) = streams.remove(&id) {
                     match data {
-                        h2::StreamEof::Data(chunk) => inflight.data.push(chunk),
+                        h2::StreamEof::Data(chunk, _cap) => inflight.data.push(chunk),
                         h2::StreamEof::Trailers(hdrs) => {
                             for (name, val) in &hdrs {
                                 inflight.headers.insert(name.clone(), val.clone());
@@ -261,7 +259,7 @@ where
                                 trailers.append(name, val);
                             }
 
-                            stream.send_trailers(trailers);
+                            send_trailers(&stream, trailers);
                         }
                         Ok(Err(err)) => {
                             log::debug!(
@@ -272,7 +270,7 @@ where
                             let mut trailers = err.headers;
                             trailers.insert(consts::GRPC_STATUS, err.status.into());
                             trailers.insert(consts::GRPC_MESSAGE, err.message);
-                            stream.send_trailers(trailers);
+                            send_trailers(&stream, trailers);
                         }
                         Err(()) => {
                             log::debug!(
@@ -304,7 +302,18 @@ fn send_error(stream: &StreamRef, st: GrpcStatus, msg: HeaderValue) {
     let mut trailers = HeaderMap::default();
     trailers.insert(consts::GRPC_STATUS, st.into());
     trailers.insert(consts::GRPC_MESSAGE, msg);
-    stream.send_trailers(trailers);
+    send_trailers(stream, trailers);
+}
+
+/// Sends trailers, the stream is reset if they cannot be sent.
+///
+/// Trailers that exceed the peer's `SETTINGS_MAX_HEADER_LIST_SIZE` are not sent
+/// and the stream stays open, it is reset with `INTERNAL_ERROR` instead.
+fn send_trailers(stream: &StreamRef, trailers: HeaderMap) {
+    if let Err(err) = stream.send_trailers(trailers) {
+        log::debug!("{}: Cannot send trailers: {err:?}", stream.tag());
+        stream.reset(Reason::INTERNAL_ERROR);
+    }
 }
 
 /// Tries to parse the `grpc-timeout` header if it is present.

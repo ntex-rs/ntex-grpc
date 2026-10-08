@@ -130,7 +130,7 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
                     }
                     h2::MessageKind::Eof(data) => {
                         match data {
-                            h2::StreamEof::Data(data) => {
+                            h2::StreamEof::Data(data, _cap) => {
                                 payload.push(data);
                             }
                             h2::StreamEof::Trailers(hdrs) => {
@@ -191,7 +191,7 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
             }
         }
         .await
-        .map_err(|e| e.set_service(self.service()))
+        .map_err(|e| e.with_service(self.service()))
     }
 }
 

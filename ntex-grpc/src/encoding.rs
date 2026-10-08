@@ -100,7 +100,7 @@ fn decode_varint_slice(bytes: &[u8]) -> Result<(u64, usize), DecodeError> {
     // Fully unrolled varint decoding loop. Splitting into 32-bit pieces gives better performance.
 
     // Use assertions to ensure memory safety, but it should always be optimized after inline.
-    assert!(!bytes.is_empty());
+    assert_ne!(bytes, []);
     assert!(bytes.len() > 10 || bytes[bytes.len() - 1] < 0x80);
 
     let mut b: u8 = unsafe { *bytes.get_unchecked(0) };

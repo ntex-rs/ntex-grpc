@@ -1,6 +1,6 @@
 [package]
 name = "ntex-grpc"
-version = "3.0.0"
+version = "3.1.0"
 license = "MIT OR Apache-2.0"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 description = "GRPC Client/Server framework"
@@ -10,7 +10,7 @@ readme = "README.md"
 keywords = ["grpc"]
 categories = ["asynchronous", "network-programming"]
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.97"
 
 [lib]
 name = "ntex_grpc"
@@ -34,6 +34,6 @@ pin-project-lite = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-ntex = { workspace = true , features = ["openssl", "neon"] }
+ntex = { workspace = true , features = ["openssl"] }
 env_logger = { workspace = true }
 openssl = { workspace = true }

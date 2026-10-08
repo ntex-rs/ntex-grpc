@@ -2,7 +2,7 @@
 name = "custom"
 version = "3.0.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.97"
 
 [[bin]]
 name = "client"

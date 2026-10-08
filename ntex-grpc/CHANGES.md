@@ -2,6 +2,8 @@
 
 ## [3.2.0] - Unreleased
 
+* Client does not send a request message larger than 2 GiB - 1 and fails with `RESOURCE_EXHAUSTED`, a message of 4 GiB or more got a truncated length prefix. Add `Request::max_send_message_size()` and `RequestContext::max_send_message_size()` to change the limit
+
 * Add `Request::append_header()` and `RequestContext::append_header()` to send several values for one metadata key
 
 * Add `encode_binary_header()` and `decode_binary_header()` for `-bin` metadata values, which are base64 encoded

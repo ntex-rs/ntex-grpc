@@ -6,7 +6,7 @@ use ntex::testing::IoTest;
 use ntex_bytes::{ByteString, Bytes};
 use ntex_error::Error;
 use ntex_grpc::client::{ClientError, Request, Response};
-use ntex_grpc::{HashMap, MethodDef};
+use ntex_grpc::{GrpcStatus, HashMap, MethodDef};
 use ntex_h2::{self as h2, client::SimpleClient, frame::Reason, frame::StreamId};
 use ntex_http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 
@@ -27,9 +27,12 @@ method!(Message, "/test.Svc/Message");
 method!(Short, "/test.Svc/Short");
 method!(Deadline, "/test.Svc/Deadline");
 method!(Silent, "/test.Svc/Silent");
+method!(NoStatus, "/test.Svc/NoStatus");
+method!(NoTrailers, "/test.Svc/NoTrailers");
 
 const X_TEST: HeaderName = HeaderName::from_static("x-test");
 const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
+const GRPC_MESSAGE: HeaderName = HeaderName::from_static("grpc-message");
 
 fn grpc_headers() -> HeaderMap {
     let mut hdrs = HeaderMap::new();
@@ -109,6 +112,29 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                             hdrs.insert(GRPC_STATUS, HeaderValue::from_static("4"));
                             stream.send_response(StatusCode::OK, hdrs, true).unwrap();
                         }
+                        // a message, then trailers without grpc-status
+                        "/test.Svc/NoStatus" => {
+                            stream
+                                .send_response(StatusCode::OK, grpc_headers(), false)
+                                .unwrap();
+                            stream
+                                .send_payload(Bytes::from_static(b"\0\0\0\0\0"), false)
+                                .await
+                                .unwrap();
+                            let mut hdrs = HeaderMap::new();
+                            hdrs.insert(X_TEST, HeaderValue::from_static("trailers"));
+                            stream.send_trailers(hdrs).unwrap();
+                        }
+                        // a message that ends the stream, no trailers
+                        "/test.Svc/NoTrailers" => {
+                            stream
+                                .send_response(StatusCode::OK, grpc_headers(), false)
+                                .unwrap();
+                            stream
+                                .send_payload(Bytes::from_static(b"\0\0\0\0\0"), true)
+                                .await
+                                .unwrap();
+                        }
                         // never replies
                         "/test.Svc/Silent" => {}
                         _ => panic!("unexpected request {path}"),
@@ -152,6 +178,36 @@ async fn response_size() {
 
     let dbg = format!("{res:?}");
     assert!(dbg.contains("trailers: {\"grpc-status\""), "{dbg}");
+}
+
+#[ntex::test]
+async fn trailers_without_status() {
+    let client = client();
+    let err = send::<NoStatus>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, trailers) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Unknown);
+    assert_eq!(trailers.get(X_TEST).unwrap(), "trailers");
+    assert_eq!(
+        trailers.get(GRPC_MESSAGE).unwrap(),
+        "Response trailers have no grpc-status"
+    );
+}
+
+#[ntex::test]
+async fn eof_without_trailers() {
+    let client = client();
+    let err = send::<NoTrailers>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, trailers) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Internal);
+    assert_eq!(trailers.len(), 1);
+    assert_eq!(
+        trailers.get(GRPC_MESSAGE).unwrap(),
+        "Response ended without trailers"
+    );
 }
 
 #[ntex::test]

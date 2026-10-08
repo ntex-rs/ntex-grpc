@@ -152,6 +152,10 @@ pub enum ClientError {
     ///
     /// Holds the status and the trailers, the error text is in the
     /// `grpc-message` trailer.
+    ///
+    /// A response with no `grpc-status` is reported here as well: `UNKNOWN`
+    /// if the trailers lack it, `INTERNAL` if there were no trailers at all.
+    /// The client adds a `grpc-message` describing the problem then.
     #[error("Grpc status")]
     GrpcStatus(GrpcStatus, HeaderMap),
 }

@@ -98,9 +98,7 @@ async fn send_request<T: MethodDef>(
     hdrs.insert(header::TE, consts::HDRV_TRAILERS);
     hdrs.insert(consts::GRPC_ENCODING, consts::IDENTITY);
     hdrs.insert(consts::GRPC_ACCEPT_ENCODING, consts::IDENTITY);
-    for key in ctx.header_map().keys() {
-        hdrs.remove(key);
-    }
+    // the context holds no reserved headers, see `RequestContext::header()`
     for (key, val) in ctx.headers() {
         hdrs.append(key.clone(), val.clone());
     }

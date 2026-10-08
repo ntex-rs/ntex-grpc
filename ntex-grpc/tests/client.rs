@@ -56,6 +56,8 @@ method!(SizedNoTrailers, "/test.Svc/SizedNoTrailers");
 method!(SizedHtml, "/test.Svc/SizedHtml");
 method!(TwoMessages, "/test.Svc/TwoMessages");
 method!(ExtraData, "/test.Svc/ExtraData");
+method!(Disconnect, "/test.Svc/Disconnect");
+method!(GoAway, "/test.Svc/GoAway");
 
 /// Replies with a message, takes an input.
 struct Upload;
@@ -73,6 +75,16 @@ struct EarlyStatus;
 impl MethodDef for EarlyStatus {
     const NAME: &'static str = "EarlyStatus";
     const PATH: ByteString = ByteString::from_static("/test.Svc/EarlyStatus");
+    type Input = BytesValue;
+    type Output = ();
+}
+
+/// Closes the connection before it reads the request.
+struct DisconnectUpload;
+
+impl MethodDef for DisconnectUpload {
+    const NAME: &'static str = "DisconnectUpload";
+    const PATH: ByteString = ByteString::from_static("/test.Svc/DisconnectUpload");
     type Input = BytesValue;
     type Output = ();
 }
@@ -110,6 +122,8 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
     let (cli, srv) = IoTest::create();
     cli.remote_buffer_cap(1024 * 1024);
     srv.remote_buffer_cap(1024 * 1024);
+    // dropping a clone closes the connection, so it is shared
+    let peer = Rc::new(srv.clone());
 
     // path and headers of each request
     let paths: Rc<RefCell<HashMap<StreamId, (ByteString, HeaderMap)>>> = Rc::default();
@@ -118,6 +132,7 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
     let publish = fn_service(move |msg: h2::Message| {
         let paths = paths.clone();
         let resets = resets2.clone();
+        let peer = peer.clone();
         async move {
             let stream = msg.stream().clone();
             match msg.kind {
@@ -133,6 +148,11 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                             .unwrap();
                         stream.send_trailers(trailers).unwrap();
                         stream.reset(Reason::NO_ERROR);
+                        return Ok(());
+                    }
+                    if path == "/test.Svc/DisconnectUpload" {
+                        ntex::time::sleep(Duration::from_millis(50)).await;
+                        peer.read_error(std::io::Error::other("reset"));
                         return Ok(());
                     }
                     paths.borrow_mut().insert(stream.id(), (path, headers));
@@ -411,6 +431,24 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                                 .send_payload(Bytes::from_static(b"\0"), false)
                                 .await
                                 .unwrap();
+                        }
+                        // closes the connection after a part of the reply
+                        "/test.Svc/Disconnect" => {
+                            stream
+                                .send_response(StatusCode::OK, grpc_headers(), false)
+                                .unwrap();
+                            stream
+                                .send_payload(Bytes::from_static(b"\0\0"), false)
+                                .await
+                                .unwrap();
+                            ntex::time::sleep(Duration::from_millis(50)).await;
+                            peer.close().await;
+                        }
+                        // the stream is not processed, GOAWAY with last stream id 0
+                        "/test.Svc/GoAway" => {
+                            // after the server's SETTINGS are flushed
+                            ntex::time::sleep(Duration::from_millis(50)).await;
+                            peer.write(b"\0\0\x08\x07\0\0\0\0\0\0\0\0\0\0\0\0\0");
                         }
                         // never replies
                         "/test.Svc/Silent" => {}
@@ -1007,4 +1045,55 @@ async fn extra_data() {
     let res = send::<Message>(&client).await.unwrap();
     assert_eq!(res.res_size, 5);
     assert_eq!(*resets.borrow(), [Reason::CANCEL]);
+}
+
+#[ntex::test]
+async fn connection_lost() {
+    let client = client();
+    // the headers and the payload received before the loss are kept
+    let err = send::<Disconnect>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Unavailable);
+    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
+    assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), "Connection is closed");
+    assert_eq!(body.as_deref(), Some(&b"\0\0"[..]));
+
+    // the request is not sent completely, it is over the flow control window
+    let input = BytesValue {
+        value: Bytes::from(vec![0; 8 * 1024 * 1024]),
+    };
+    let err = Request::<_, DisconnectUpload>::new(&self::client(), &input)
+        .send()
+        .await
+        .unwrap_err();
+    let ClientError::GrpcStatus(status, hdrs, _) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Unavailable);
+    assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), "Connection is closed");
+
+    // new calls on the closed connection
+    let err = send::<Message>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Unavailable);
+    assert!(hdrs.contains_key(GRPC_MESSAGE));
+    assert_eq!(body.as_deref(), Some(&b""[..]));
+}
+
+#[ntex::test]
+async fn go_away() {
+    let client = client();
+    let err = send::<GoAway>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, hdrs, _) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Unavailable);
+    assert_eq!(
+        hdrs.get(GRPC_MESSAGE).unwrap(),
+        "Go away: not a result of an error"
+    );
 }

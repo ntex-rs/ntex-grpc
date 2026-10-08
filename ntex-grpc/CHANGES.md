@@ -2,6 +2,10 @@
 
 ## [3.2.0] - Unreleased
 
+* Make `RequestContext::headers()` and `get_disconnect_on_drop()` public, custom transports need them
+
+* Fix code examples in `google_types` docs being run as Rust doctests
+
 * Document all public items, add crate level docs
 
 * Fix client `Response::res_size`, it reported the leftover bytes instead of the response size

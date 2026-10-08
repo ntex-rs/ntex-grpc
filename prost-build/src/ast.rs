@@ -63,12 +63,12 @@ impl Comments {
         }
 
         // Append leading comments.
-        for line in &self.leading {
+        for line in Self::doc_lines(&self.leading) {
             for _ in 0..indent_level {
                 buf.push_str("    ");
             }
             buf.push_str("///");
-            buf.push_str(&Self::sanitize_line(line));
+            buf.push_str(&line);
             buf.push('\n');
         }
 
@@ -81,14 +81,104 @@ impl Comments {
         }
 
         // Append trailing comments.
-        for line in &self.trailing {
+        for line in Self::doc_lines(&self.trailing) {
             for _ in 0..indent_level {
                 buf.push_str("    ");
             }
             buf.push_str("///");
-            buf.push_str(&Self::sanitize_line(line));
+            buf.push_str(&line);
             buf.push('\n');
         }
+    }
+
+    /// Turns comment lines into rustdoc lines.
+    ///
+    /// Proto comments often contain examples in other languages. Rustdoc
+    /// would compile them as Rust doctests, so indented blocks are fenced as
+    /// `text`, untagged fences become `text` and `rust` fences become `ignore`.
+    /// Text outside code blocks is sanitized, code is copied as is.
+    fn doc_lines(lines: &[String]) -> Vec<String> {
+        fn indent(line: &str) -> usize {
+            line.len() - line.trim_start_matches(' ').len()
+        }
+        fn code_line(line: &str, base: usize) -> String {
+            match line.get(base + 4..) {
+                Some(code) if !code.is_empty() => format!(" {}{code}", &line[..base]),
+                _ => String::new(),
+            }
+        }
+
+        // protoc keeps the space after `//`, indented code is relative to it
+        let base = lines
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| indent(l))
+            .min()
+            .unwrap_or(0)
+            .min(1);
+
+        let mut out = Vec::with_capacity(lines.len());
+        let mut fence: Option<String> = None;
+        let mut idx = 0;
+        while idx < lines.len() {
+            let line = &lines[idx];
+            let trimmed = line.trim_start();
+
+            if let Some(marker) = &fence {
+                if trimmed.starts_with(marker.as_str()) {
+                    fence = None;
+                }
+                out.push(if line.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {line}")
+                });
+                idx += 1;
+                continue;
+            }
+
+            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+                let marker = &trimmed[..3];
+                let tag = trimmed.trim_start_matches(marker.chars().next().unwrap());
+                let tag = match tag.trim() {
+                    "" => "text",
+                    "rust" | "rs" => "ignore",
+                    other => other,
+                };
+                fence = Some(marker.to_string());
+                out.push(format!(" {}{marker}{tag}", &line[..indent(line)]));
+                idx += 1;
+                continue;
+            }
+
+            let after_blank = idx == 0 || lines[idx - 1].trim().is_empty();
+            if after_blank && !trimmed.is_empty() && indent(line) >= base + 4 {
+                let start = idx;
+                let mut end = idx;
+                while idx < lines.len() {
+                    let l = &lines[idx];
+                    if l.trim().is_empty() {
+                        idx += 1;
+                    } else if indent(l) >= base + 4 {
+                        idx += 1;
+                        end = idx;
+                    } else {
+                        break;
+                    }
+                }
+                let pad = " ".repeat(base);
+                out.push(format!(" {pad}```text"));
+                out.extend(lines[start..end].iter().map(|l| code_line(l, base)));
+                out.push(format!(" {pad}```"));
+                // blank lines after the block stay outside of it
+                out.extend((end..idx).map(|_| String::new()));
+                continue;
+            }
+
+            out.push(Self::sanitize_line(line));
+            idx += 1;
+        }
+        out
     }
 
     /// Sanitizes the line for rustdoc by performing the following operations:
@@ -250,25 +340,44 @@ mod tests {
         struct TestCase {
             name: &'static str,
             input: &'static str,
-            #[allow(unused)]
-            cleanedup_expected: Vec<&'static str>,
+            expected: &'static str,
         }
 
         let tests = vec![
             TestCase {
                 name: "unlabelled_block",
-                input: "    thingy\n",
-                cleanedup_expected: vec!["", "```text", "thingy", "```"],
+                input: "     thingy\n",
+                expected: "///  ```text\n///  thingy\n///  ```\n",
+            },
+            TestCase {
+                name: "indented_block",
+                input: " Example:\n\n     Timestamp ts;\n\n       ts.x = [a];\n\n Done, see [x]\n",
+                expected: "///  Example:\n///\n///  ```text\n///  Timestamp ts;\n///\n///    ts.x = [a];\n///  ```\n///\n///  Done, see \\[x\\]\n",
+            },
+            TestCase {
+                name: "indented_paragraph_continuation",
+                input: " text\n     more text\n",
+                expected: "///  text\n///      more text\n",
+            },
+            TestCase {
+                name: "no_space_after_slashes",
+                input: "text\n\n    code\n",
+                expected: "/// text\n///\n/// ```text\n/// code\n/// ```\n",
+            },
+            TestCase {
+                name: "untagged_fence",
+                input: " ```\n foo [bar]\n ```\n",
+                expected: "///  ```text\n///  foo [bar]\n///  ```\n",
             },
             TestCase {
                 name: "rust_block",
-                input: "```rust\nfoo.bar()\n```\n",
-                cleanedup_expected: vec!["", "```compile_fail", "foo.bar()", "```"],
+                input: " ```rust\n foo.bar()\n ```\n",
+                expected: "///  ```ignore\n///  foo.bar()\n///  ```\n",
             },
             TestCase {
                 name: "js_block",
-                input: "```javascript\nfoo.bar()\n```\n",
-                cleanedup_expected: vec!["", "```text,javascript", "foo.bar()", "```"],
+                input: " ```javascript\n     foo.bar()\n ```\n",
+                expected: "///  ```javascript\n///      foo.bar()\n///  ```\n",
             },
         ];
 
@@ -283,6 +392,10 @@ mod tests {
             let comments = Comments::from_location(&loc);
             let expected: Vec<&str> = t.input.lines().collect();
             assert_eq!(expected, comments.leading, "failed {}", t.name);
+
+            let mut actual = String::new();
+            comments.append_with_indent(0, &mut actual);
+            assert_eq!(t.expected, actual, "failed {}", t.name);
         }
     }
 }

@@ -1,5 +1,9 @@
 # Changes
 
+## [0.3.1] - Unreleased
+
+* Fence code examples from proto comments, so rustdoc does not run them as Rust doctests
+
 ## [0.2.13] - 2025-10-15
 
 * Handle "-" in proto file name

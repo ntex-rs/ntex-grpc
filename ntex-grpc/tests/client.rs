@@ -42,6 +42,7 @@ method!(BadFlag, "/test.Svc/BadFlag");
 method!(UnknownStatus, "/test.Svc/UnknownStatus");
 method!(BadStatus, "/test.Svc/BadStatus");
 method!(UnknownStatusOnly, "/test.Svc/UnknownStatusOnly");
+method!(EncodedMessage, "/test.Svc/EncodedMessage");
 
 const X_TEST: HeaderName = HeaderName::from_static("x-test");
 const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
@@ -242,6 +243,15 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                             hdrs.insert(GRPC_STATUS, HeaderValue::from_static("999"));
                             stream.send_response(StatusCode::OK, hdrs, true).unwrap();
                         }
+                        "/test.Svc/EncodedMessage" => {
+                            let mut trailers = HeaderMap::new();
+                            trailers.insert(GRPC_STATUS, HeaderValue::from_static("3"));
+                            trailers.insert(
+                                GRPC_MESSAGE,
+                                HeaderValue::from_static("100%25 bad%0Ainput %E2%82%AC"),
+                            );
+                            reply(&stream, grpc_headers(), trailers).await;
+                        }
                         // never replies
                         "/test.Svc/Silent" => {}
                         _ => panic!("unexpected request {path}"),
@@ -412,6 +422,32 @@ async fn unknown_grpc_status() {
     assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
     assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), "Unknown grpc-status: 999");
     assert_eq!(body.as_deref(), Some(&b""[..]));
+}
+
+#[ntex::test]
+async fn grpc_message_decoded() {
+    let client = client();
+    let err = send::<EncodedMessage>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, trailers, _) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::InvalidArgument);
+    // the trailers keep the raw value
+    assert_eq!(
+        trailers.get(GRPC_MESSAGE).unwrap(),
+        "100%25 bad%0Ainput %E2%82%AC"
+    );
+    assert_eq!(err.grpc_message().unwrap(), "100% bad\ninput \u{20ac}");
+
+    // plain synthesized messages read the same
+    let err = send::<BadStatus>(&client).await.unwrap_err();
+    assert_eq!(err.grpc_message().unwrap(), "Unknown grpc-status: abc");
+
+    assert!(
+        ClientError::UnexpectedEof(None, HeaderMap::new())
+            .grpc_message()
+            .is_none()
+    );
 }
 
 #[ntex::test]

@@ -32,6 +32,7 @@ bitflags = { workspace = true }
 log = { workspace = true }
 pin-project-lite = { workspace = true }
 thiserror = { workspace = true }
+urly = { workspace = true }
 
 [dev-dependencies]
 ntex = { workspace = true , features = ["openssl"] }

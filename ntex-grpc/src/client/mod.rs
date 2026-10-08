@@ -1,5 +1,7 @@
 #![allow(async_fn_in_trait)]
 
+use std::borrow::Cow;
+
 use ntex_bytes::Bytes;
 use ntex_error::ErrorDiagnostic;
 use ntex_h2::{OperationError, StreamError, client};
@@ -10,7 +12,7 @@ mod transport;
 
 pub use self::request::{Request, RequestContext, Response};
 
-use crate::{encoding::DecodeError, service::MethodDef, status::GrpcStatus};
+use crate::{consts, encoding::DecodeError, service::MethodDef, status::GrpcStatus, utils};
 
 /// Sends unary calls of method `T`.
 ///
@@ -82,8 +84,8 @@ impl Client {
 ///     Ok(res) => println!("{}", res.message),
 ///     Err(err) => match &*err {
 ///         // the server replied, but not with OK
-///         ClientError::GrpcStatus(status, trailers, _) => {
-///             println!("{status:?}: {:?}", trailers.get("grpc-message"));
+///         ClientError::GrpcStatus(status, _, _) => {
+///             println!("{status:?}: {:?}", err.grpc_message());
 ///         }
 ///         // anything else is a transport or protocol problem
 ///         _ => println!("call failed: {err}"),
@@ -108,8 +110,7 @@ pub enum ClientError {
         #[source]
         HttpError,
     ),
-    /// The reply message could not be decoded, or the `grpc-status`
-    /// trailer is not a valid code.
+    /// The reply message could not be decoded.
     #[error("Decode")]
     Decode(
         #[from]
@@ -151,7 +152,7 @@ pub enum ClientError {
     /// The server replied with a status other than `OK`.
     ///
     /// Holds the status and the trailers, the error text is in the
-    /// `grpc-message` trailer.
+    /// `grpc-message` trailer, see [`ClientError::grpc_message()`].
     ///
     /// If the server sent no valid `grpc-status`, the client picks one:
     ///
@@ -169,6 +170,21 @@ pub enum ClientError {
     /// status came from the server.
     #[error("Grpc status")]
     GrpcStatus(GrpcStatus, HeaderMap, Option<Bytes>),
+}
+
+impl ClientError {
+    /// The `grpc-message` sent with a non-OK status, percent-decoded.
+    ///
+    /// Only [`ClientError::GrpcStatus`] and [`ClientError::DeadlineExceeded`]
+    /// carry one. Invalid escapes are kept as they are.
+    pub fn grpc_message(&self) -> Option<Cow<'_, str>> {
+        match self {
+            Self::GrpcStatus(_, hdrs, _) | Self::DeadlineExceeded(hdrs) => {
+                hdrs.get(consts::GRPC_MESSAGE).map(utils::percent_decode)
+            }
+            _ => None,
+        }
+    }
 }
 
 impl Clone for ClientError {

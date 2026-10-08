@@ -1,7 +1,8 @@
-use std::mem;
+use std::{borrow::Cow, mem};
 
 use ntex_bytes::{Bytes, BytesMut};
 use ntex_http::{HeaderMap, HeaderValue};
+use urly::quoting::{Component, unquote};
 
 use crate::consts;
 
@@ -75,4 +76,44 @@ pub(crate) fn grpc_message(prefix: &'static str, val: &HeaderValue) -> HeaderVal
         .filter(|v| !v.contains(['%', '\t']))
         .and_then(|v| HeaderValue::try_from(format!("{prefix}: {v}")).ok())
         .unwrap_or_else(|| HeaderValue::from_static(prefix))
+}
+
+/// Decodes a percent-encoded `grpc-message`.
+///
+/// Invalid escapes are kept as they are, the spec says a bad message must
+/// not be dropped.
+pub(crate) fn percent_decode(val: &HeaderValue) -> Cow<'_, str> {
+    match val.to_str() {
+        Ok(s) => unquote(s, Component::Opaque),
+        // not printable ascii, so not encoded as the spec says
+        Err(_) => String::from_utf8_lossy(val.as_bytes()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_decode_message() {
+        let dec = |v: &'static str| percent_decode(&HeaderValue::from_static(v)).into_owned();
+        let plain = HeaderValue::from_static("plain text");
+        assert!(matches!(
+            percent_decode(&plain),
+            Cow::Borrowed("plain text")
+        ));
+        assert_eq!(dec("100%25 done"), "100% done");
+        assert_eq!(dec("a%0Ab%0a"), "a\nb\n");
+        assert_eq!(dec("%E2%82%AC"), "\u{20ac}");
+        // `+` is not a space here
+        assert_eq!(dec("a+b"), "a+b");
+        // bad escapes stay as they are
+        assert_eq!(dec("%"), "%");
+        assert_eq!(dec("%4"), "%4");
+        assert_eq!(dec("%zz%41"), "%zzA");
+        assert_eq!(dec("%FFok"), "%FFok");
+        // obs-text is not valid, but still readable
+        let raw = HeaderValue::from_bytes(b"caf\xc3\xa9").unwrap();
+        assert_eq!(percent_decode(&raw), "caf\u{e9}");
+    }
 }

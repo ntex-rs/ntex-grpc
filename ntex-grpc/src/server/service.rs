@@ -7,7 +7,8 @@ use ntex_io::{Filter, Io, IoBoxed};
 use ntex_service::{Ctx, Pipeline, Service, ServiceFactory, cfg::SharedCfg};
 use ntex_util::{HashMap, time::Millis, time::timeout_checked};
 
-use crate::{consts, status::GrpcStatus, utils::Data};
+use crate::utils::{self, Data, FlagError};
+use crate::{consts, status::GrpcStatus};
 
 use super::{ServerError, ServerRequest, ServerResponse};
 
@@ -203,7 +204,26 @@ where
                     }
 
                     let mut data = inflight.data.get();
-                    let _compressed = data.get_u8();
+                    if data.len() < 5 {
+                        if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
+                            send_error(&stream, GrpcStatus::InvalidArgument, ERR_DATA_DECODE);
+                        }
+                        return Ok(());
+                    }
+                    if let Err(err) = utils::check_compressed_flag(data[0], &inflight.headers) {
+                        if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
+                            match err {
+                                FlagError::Unsupported(msg) => {
+                                    send_error(&stream, GrpcStatus::Unimplemented, msg);
+                                }
+                                FlagError::Invalid(msg) => {
+                                    send_error(&stream, GrpcStatus::Internal, msg);
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+                    data.advance(1);
                     let len = data.get_u32();
                     if (len as usize) > data.len() {
                         if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
@@ -295,6 +315,7 @@ where
 fn hdrs() -> HeaderMap {
     let mut hdrs = HeaderMap::default();
     hdrs.insert(CONTENT_TYPE, HDR_APP_GRPC);
+    hdrs.insert(consts::GRPC_ACCEPT_ENCODING, consts::IDENTITY);
     hdrs
 }
 

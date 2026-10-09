@@ -10,6 +10,15 @@
   size limit after decompression fails with `RESOURCE_EXHAUSTED`. Large
   messages are compressed and decompressed on the blocking thread pool
 
+* Compress and decompress messages into a single buffer instead of copying the
+  result once more. Decompression allocates the size stored in the message up
+  front, the zstd encoder stores the message size in the frame
+
+* Server checks the request message length as data arrives and rejects a
+  message over the limit before buffering the body, then resets the stream so
+  the client stops sending. Data after the request message is rejected with
+  `INTERNAL` instead of being ignored
+
 * Server rejects a request message larger than 4 MiB with
   `RESOURCE_EXHAUSTED`. Add `GrpcServer::max_message_size()` to change the
   limit

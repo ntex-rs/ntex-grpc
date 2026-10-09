@@ -21,6 +21,8 @@ const ERR_DATA_DECODE: HeaderValue =
 const ERR_DECODE_TIMEOUT: HeaderValue =
     HeaderValue::from_static("Cannot decode grpc-timeout header");
 const ERR_DEADLINE: HeaderValue = HeaderValue::from_static("Deadline exceeded");
+const ERR_EXTRA_DATA: HeaderValue =
+    HeaderValue::from_static("grpc: received data after the request message");
 const HDR_APP_GRPC: HeaderValue = HeaderValue::from_static("application/grpc");
 
 /// The default limit of a request message.
@@ -148,12 +150,36 @@ where
         }
     }
 
+    /// Checks the request message as data arrives, so a message over the
+    /// limit or data after the message is not buffered. A unary request has
+    /// exactly one message.
+    fn check_request(&self, data: &[u8]) -> Result<(), (GrpcStatus, HeaderValue)> {
+        let [_, a, b, c, d, ..] = *data else {
+            return Ok(());
+        };
+        let len = u32::from_be_bytes([a, b, c, d]) as usize;
+        if len > self.max_size {
+            let msg = format!(
+                "grpc: received message larger than max ({len} vs. {})",
+                self.max_size
+            );
+            let msg = HeaderValue::try_from(msg)
+                .unwrap_or_else(|_| HeaderValue::from_static("grpc: received message too large"));
+            Err((GrpcStatus::ResourceExhausted, msg))
+        } else if data.len() - 5 > len {
+            Err((GrpcStatus::Internal, ERR_EXTRA_DATA))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Returns the request message, decompressed if needed.
     async fn read_request(
         &self,
         headers: &HeaderMap,
         mut data: Bytes,
     ) -> Result<Bytes, (GrpcStatus, HeaderValue)> {
+        self.check_request(&data)?;
         if data.len() < 5 {
             return Err((GrpcStatus::InvalidArgument, ERR_DATA_DECODE));
         }
@@ -162,15 +188,6 @@ where
         let Some(data) = data.split_to_checked(len) else {
             return Err((GrpcStatus::InvalidArgument, ERR_DATA_DECODE));
         };
-        if len > self.max_size {
-            let msg = format!(
-                "grpc: received message larger than max ({len} vs. {})",
-                self.max_size
-            );
-            let msg = HeaderValue::try_from(msg)
-                .unwrap_or_else(|_| HeaderValue::from_static("grpc: received message too large"));
-            return Err((GrpcStatus::ResourceExhausted, msg));
-        }
         // a message in an unknown encoding is unimplemented
         utils::read_message(
             flag,
@@ -240,8 +257,18 @@ where
                 );
             }
             h2::MessageKind::Data(data, _cap) => {
-                if let Some(inflight) = self.streams.borrow_mut().get_mut(&stream.id()) {
+                let mut streams = self.streams.borrow_mut();
+                if let Some(inflight) = streams.get_mut(&id) {
                     inflight.data.push(data);
+                    if let Err((status, msg)) = self.check_request(inflight.data.as_slice()) {
+                        streams.remove(&id);
+                        drop(streams);
+                        if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
+                            send_error(&stream, status, msg);
+                        }
+                        // the client stops sending the rest of the request
+                        stream.reset(Reason::NO_ERROR);
+                    }
                 }
             }
             h2::MessageKind::Eof(data) => {

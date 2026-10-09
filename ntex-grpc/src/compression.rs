@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 
-use ntex_bytes::Bytes;
+use ntex_bytes::{Bytes, BytesMut};
 use ntex_http::HeaderValue;
 
 use crate::GrpcStatus;
@@ -74,23 +74,25 @@ impl Compression {
         offload(blocking, move || self.compress_sync(&data))
             .await
             .unwrap_or_else(|err| Err(io::Error::other(err)))
-            .map(Bytes::from)
     }
 
-    fn compress_sync(self, data: &[u8]) -> io::Result<Vec<u8>> {
-        match self {
+    fn compress_sync(self, data: &[u8]) -> io::Result<Bytes> {
+        let out = match self {
             Compression::Gzip => {
                 let mut enc =
-                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                    flate2::write::GzEncoder::new(BytesMut::new(), flate2::Compression::default());
                 enc.write_all(data)?;
-                enc.finish()
+                enc.finish()?
             }
             Compression::Zstd => {
-                let mut enc = zstd::Encoder::new(Vec::new(), 0)?;
+                // the frame stores the size, the receiver allocates it at once
+                let mut enc = zstd::Encoder::new(BytesMut::new(), 0)?;
+                enc.set_pledged_src_size(u64::try_from(data.len()).ok())?;
                 enc.write_all(data)?;
-                enc.finish()
+                enc.finish()?
             }
-        }
+        };
+        Ok(freeze(out))
     }
 
     /// Decompresses `data`, the result must not be larger than `max_size`.
@@ -107,7 +109,7 @@ impl Compression {
             let limit = max_size.min(self.decompress_limit());
             match self.decompress_sync(&data, limit) {
                 Err((GrpcStatus::ResourceExhausted, _)) if max_size > limit => {}
-                res => return res.map(Bytes::from),
+                res => return res,
             }
         }
         offload(true, move || self.decompress_sync(&data, max_size))
@@ -118,7 +120,22 @@ impl Compression {
                     format!("grpc: failed to decompress the message: {err}"),
                 ))
             })
-            .map(Bytes::from)
+    }
+
+    /// The decompressed size stored in `data`, at most `limit`. gzip stores
+    /// the size of the last member only, and a deflate stream expands at
+    /// most 1032 times, so a small message cannot claim a large size.
+    fn size_hint(self, data: &[u8], limit: usize) -> usize {
+        let size = match self {
+            Compression::Gzip => data
+                .last_chunk()
+                .map_or(0, |size: &[u8; 4]| u32::from_le_bytes(*size) as usize),
+            Compression::Zstd => zstd::zstd_safe::get_frame_content_size(data)
+                .ok()
+                .flatten()
+                .map_or(0, |size| usize::try_from(size).unwrap_or(usize::MAX)),
+        };
+        size.min(limit).min(data.len().saturating_mul(1032))
     }
 
     /// Decompresses `data`, reading at most one byte over `max_size`.
@@ -126,17 +143,13 @@ impl Compression {
         self,
         data: &[u8],
         max_size: usize,
-    ) -> Result<Vec<u8>, (GrpcStatus, HeaderValue)> {
-        let limit = u64::try_from(max_size)
-            .unwrap_or(u64::MAX)
-            .saturating_add(1);
-        let mut out = Vec::new();
+    ) -> Result<Bytes, (GrpcStatus, HeaderValue)> {
+        let limit = max_size.saturating_add(1);
+        let hint = self.size_hint(data, limit);
         let res = match self {
-            Compression::Gzip => flate2::read::MultiGzDecoder::new(data)
-                .take(limit)
-                .read_to_end(&mut out),
+            Compression::Gzip => read(flate2::read::MultiGzDecoder::new(data), hint, limit),
             Compression::Zstd => match zstd::Decoder::with_buffer(data) {
-                Ok(dec) => dec.take(limit).read_to_end(&mut out),
+                Ok(dec) => read(dec, hint, limit),
                 Err(err) => {
                     return Err(error(
                         GrpcStatus::Internal,
@@ -145,19 +158,68 @@ impl Compression {
                 }
             },
         };
-        if let Err(err) = res {
-            Err(error(
+        match res {
+            Err(err) => Err(error(
                 GrpcStatus::Internal,
                 format!("grpc: failed to read decompressed data: {err}"),
-            ))
-        } else if out.len() > max_size {
-            Err(error(
+            )),
+            Ok(out) if out.len() > max_size => Err(error(
                 GrpcStatus::ResourceExhausted,
                 format!("grpc: received message after decompression larger than max {max_size}"),
-            ))
-        } else {
-            Ok(out)
+            )),
+            Ok(out) => Ok(freeze(out)),
         }
+    }
+}
+
+/// Reads at most `limit` bytes from `r` into a buffer of `hint` bytes, which
+/// grows if the data does not fit.
+fn read(mut r: impl Read, hint: usize, limit: usize) -> io::Result<BytesMut> {
+    let mut out = BytesMut::with_capacity(hint);
+    let mut len = 0;
+    loop {
+        if len == out.len() {
+            if len >= limit {
+                break;
+            }
+            if len >= hint {
+                // the buffer is full, it only grows if there is more data
+                let mut probe = [0; 32];
+                let n = match r.read(&mut probe[..(limit - len).min(32)]) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(err) => return Err(err),
+                };
+                out.extend_from_slice(&probe[..n]);
+                len += n;
+            }
+            let cap = if len < hint {
+                hint
+            } else {
+                out.capacity().max(len + 8 * 1024).min(limit)
+            };
+            out.resize(cap, 0);
+            continue;
+        }
+        match r.read(&mut out[len..]) {
+            Ok(0) => break,
+            Ok(n) => len += n,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
+    out.truncate(len);
+    Ok(out)
+}
+
+/// Freezes `buf`, a buffer with more than a quarter of it unused is copied
+/// so the message does not keep the unused memory.
+fn freeze(buf: BytesMut) -> Bytes {
+    if buf.capacity() - buf.len() > buf.len() / 4 {
+        Bytes::copy_from_slice(&buf)
+    } else {
+        buf.freeze()
     }
 }
 
@@ -377,6 +439,104 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[ntex::test]
+    async fn size_hint() {
+        for enc in ALL {
+            let data = b"0123456789".repeat(1000);
+            let compressed = compress(enc, &data).await;
+            assert_eq!(enc.size_hint(&compressed, usize::MAX), data.len());
+            assert_eq!(enc.size_hint(&compressed, 100), 100);
+            assert_eq!(enc.size_hint(b"", usize::MAX), 0);
+        }
+        // zstd stores the size in the frame
+        let compressed = compress(Compression::Zstd, b"abc").await;
+        assert_eq!(
+            zstd::zstd_safe::get_frame_content_size(&compressed).ok(),
+            Some(Some(3))
+        );
+        // the size of a small message is limited
+        let data = [1, 2, 3, 4, 0xff, 0xff, 0xff, 0xff];
+        assert_eq!(Compression::Gzip.size_hint(&data, usize::MAX), 8 * 1032);
+        assert_eq!(Compression::Gzip.size_hint(&data[5..], usize::MAX), 0);
+    }
+
+    /// Returns the data in parts of up to `n` bytes, with an interrupted read
+    /// before each part.
+    struct Parts<'a>(&'a [u8], usize, bool);
+
+    impl Read for Parts<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.2 = !self.2;
+            if self.2 {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            let n = buf.len().min(self.1).min(self.0.len());
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn read_hint() {
+        let data: Vec<u8> = (0..100_000u32).map(|i| i as u8).collect();
+        for part in [1, 7, 32, 4096, usize::MAX] {
+            for hint in [0, 1, 50, 31_000, 100_000] {
+                let out = read(Parts(&data, part, false), hint, usize::MAX).unwrap();
+                assert_eq!(out, data, "{part} {hint}");
+                if hint == data.len() {
+                    // allocated once
+                    assert_eq!(out.capacity(), data.len(), "{part}");
+                }
+            }
+            // one byte over the limit
+            let out = read(Parts(&data, part, false), 0, 1000).unwrap();
+            assert_eq!(out, data[..1000]);
+            let out = read(Parts(&data, part, false), 1000, 1000).unwrap();
+            assert_eq!(out, data[..1000]);
+            assert_eq!(out.capacity(), 1000);
+            let out = read(Parts(&data[..10], part, false), 1000, 1000).unwrap();
+            assert_eq!(out, data[..10]);
+            let out = read(Parts(&data[..100], part, false), 100, usize::MAX).unwrap();
+            assert_eq!(out, data[..100]);
+            assert_eq!(out.capacity(), 100);
+            let out = read(Parts(&data, part, false), 0, 10).unwrap();
+            assert_eq!(out, data[..10]);
+        }
+        let out = read(Parts(b"", 1, false), 0, usize::MAX).unwrap();
+        assert!(out.is_empty());
+        assert_eq!(out.capacity(), 0);
+
+        let err = read(io::repeat(0).take(5).chain(Fail), 10, 20).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let err = read(Fail, 0, 20).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    struct Fail;
+
+    impl Read for Fail {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::InvalidData.into())
+        }
+    }
+
+    #[test]
+    fn freeze_slack() {
+        let data = [7; 1000];
+        let mut buf = BytesMut::with_capacity(1250);
+        buf.extend_from_slice(&data);
+        let ptr = buf.as_ptr();
+        assert_eq!(freeze(buf).as_ptr(), ptr);
+
+        let mut buf = BytesMut::with_capacity(1251);
+        buf.extend_from_slice(&data);
+        let ptr = buf.as_ptr();
+        let out = freeze(buf);
+        assert_ne!(out.as_ptr(), ptr);
+        assert_eq!(out, data[..]);
     }
 
     #[test]

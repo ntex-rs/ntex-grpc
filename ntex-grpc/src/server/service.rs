@@ -415,7 +415,10 @@ where
                             let mut trailers = HeaderMap::default();
                             trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
                             for (name, val) in res.headers {
-                                trailers.append(name, val);
+                                // the call succeeded, whatever the service says
+                                if name != consts::GRPC_STATUS && name != consts::GRPC_MESSAGE {
+                                    trailers.append(name, val);
+                                }
                             }
 
                             send_trailers(&stream, trailers);

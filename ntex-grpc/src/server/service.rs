@@ -334,10 +334,7 @@ where
                     };
                     // the response is compressed like the request
                     #[cfg(feature = "compression")]
-                    let encoding = req
-                        .headers
-                        .get(consts::GRPC_ENCODING)
-                        .and_then(Compression::from_header);
+                    let encoding = Compression::of_response(&req.headers);
                     #[cfg(feature = "compression")]
                     let headers = {
                         let mut headers = hdrs();

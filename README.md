@@ -251,7 +251,8 @@ let res = req.send().await.unwrap();
 ```
 
 The server needs no setup. It accepts requests in either encoding and
-compresses the response the same way as the request. Both sides send
+compresses the response the same way as the request, uncompressed if the
+request's `grpc-accept-encoding` leaves that encoding out. Both sides send
 `grpc-accept-encoding: gzip,zstd`, and the client decompresses responses in
 either encoding.
 

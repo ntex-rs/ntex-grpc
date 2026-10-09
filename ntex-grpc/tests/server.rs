@@ -784,6 +784,33 @@ mod compression {
     }
 
     #[ntex::test]
+    async fn accept_encoding() {
+        let client = client();
+        let input = [b'a'; 1000];
+        for enc in ENCODINGS {
+            for (accept, compressed) in [
+                ("identity", false),
+                ("identity, gzip, zstd", true),
+                (enc, true),
+            ] {
+                let mut hdrs = req_headers(Some(enc));
+                hdrs.insert(GRPC_ACCEPT_ENCODING, HeaderValue::from_static(accept));
+                let (headers, data, trailers) =
+                    call_to(&client, "/test.Svc/Call", hdrs, message(0, &input)).await;
+                assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0", "{trailers:?}");
+                if compressed {
+                    assert_eq!(headers.get(GRPC_ENCODING).unwrap(), enc);
+                    assert_eq!(data[0], 1);
+                    assert_eq!(decompress(enc, &data[5..]), input);
+                } else {
+                    assert!(headers.get(GRPC_ENCODING).is_none(), "{accept}");
+                    assert_eq!(data, message(0, &input));
+                }
+            }
+        }
+    }
+
+    #[ntex::test]
     async fn limit() {
         let client = client_with(Some(100));
         for enc in ENCODINGS {

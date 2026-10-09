@@ -3,13 +3,13 @@ use std::{cell::Cell, fmt, iter, mem::MaybeUninit, slice, thread::LocalKey};
 
 use flate2::{Compress, Crc, FlushCompress, Status, bufread::GzDecoder};
 use ntex_bytes::{BufMut, BytePage, BytePages, Bytes, BytesMut};
-use ntex_http::HeaderValue;
+use ntex_http::{HeaderMap, HeaderValue};
 use zstd::zstd_safe::zstd_sys::{
     ZSTD_BLOCKSIZE_MAX, ZSTD_EndDirective, ZSTD_ErrorCode, ZSTD_MAGICNUMBER, ZSTD_getErrorCode,
 };
 use zstd::zstd_safe::{CCtx, CParameter, DCtx, InBuffer, OutBuffer, ResetDirective, WriteBuf};
 
-use crate::GrpcStatus;
+use crate::{GrpcStatus, consts};
 
 /// Message compression.
 ///
@@ -17,7 +17,8 @@ use crate::GrpcStatus;
 /// [`Request::compression()`](crate::client::Request::compression) is set
 /// and accepts responses compressed with any of these. The server accepts
 /// requests compressed with any of these and compresses the response with
-/// the encoding of the request.
+/// the encoding of the request, unless the client's `grpc-accept-encoding`
+/// leaves it out.
 ///
 /// Messages under 64 bytes, and messages that do not get smaller, are sent
 /// uncompressed. Large messages are compressed and decompressed on the
@@ -53,6 +54,24 @@ impl Compression {
 
     pub(crate) const fn header(self) -> HeaderValue {
         HeaderValue::from_static(self.name())
+    }
+
+    /// Returns the compression of a response, the one of the request.
+    ///
+    /// The response is not compressed if the request has a
+    /// `grpc-accept-encoding` that does not list it.
+    pub(crate) fn of_response(hdrs: &HeaderMap) -> Option<Self> {
+        let enc = hdrs
+            .get(consts::GRPC_ENCODING)
+            .and_then(Self::from_header)?;
+        let mut accept = hdrs.get_all(consts::GRPC_ACCEPT_ENCODING).peekable();
+        if accept.peek().is_none() {
+            return Some(enc);
+        }
+        accept
+            .flat_map(|val| val.as_bytes().split(|b| *b == b','))
+            .any(|name| name.trim_ascii() == enc.name().as_bytes())
+            .then_some(enc)
     }
 
     /// Returns the compression of a `grpc-encoding` value.
@@ -647,6 +666,33 @@ mod tests {
     use super::*;
 
     const ALL: [Compression; 2] = [Compression::Gzip, Compression::Zstd];
+
+    #[test]
+    fn response_compression() {
+        let enc = |encoding: Option<&'static str>, accept: &[&'static str]| {
+            let mut hdrs = HeaderMap::new();
+            if let Some(encoding) = encoding {
+                hdrs.insert(consts::GRPC_ENCODING, HeaderValue::from_static(encoding));
+            }
+            for val in accept {
+                hdrs.append(consts::GRPC_ACCEPT_ENCODING, HeaderValue::from_static(val));
+            }
+            Compression::of_response(&hdrs)
+        };
+        assert_eq!(enc(None, &[]), None);
+        assert_eq!(enc(None, &["gzip"]), None);
+        assert_eq!(enc(Some("snappy"), &[]), None);
+        assert_eq!(enc(Some("gzip"), &[]), Some(Compression::Gzip));
+        assert_eq!(enc(Some("gzip"), &["gzip"]), Some(Compression::Gzip));
+        assert_eq!(enc(Some("zstd"), &["gzip , zstd"]), Some(Compression::Zstd));
+        assert_eq!(
+            enc(Some("zstd"), &["identity", "zstd"]),
+            Some(Compression::Zstd)
+        );
+        assert_eq!(enc(Some("gzip"), &["identity"]), None);
+        assert_eq!(enc(Some("gzip"), &["zstd,deflate"]), None);
+        assert_eq!(enc(Some("gzip"), &["gzipx"]), None);
+    }
 
     /// Compresses `data` stored in 4 KiB pages, it must get smaller.
     async fn compress(enc: Compression, data: &[u8]) -> Bytes {

@@ -28,6 +28,7 @@ pub struct CodeGenerator<'a> {
     source_info: SourceCodeInfo,
     syntax: Syntax,
     extern_paths: &'a ExternPaths,
+    enums: &'a EnumValues,
     depth: u8,
     path: Vec<i32>,
     buf: &'a mut String,
@@ -101,6 +102,36 @@ fn boxed_fields(package: &str, messages: &[DescriptorProto]) -> HashSet<(String,
     boxed
 }
 
+/// Values of every enum, by fully qualified name with the leading dot
+pub type EnumValues = HashMap<String, Vec<EnumValueDescriptorProto>>;
+
+/// Collects the values of the enums of `files`, imported files included,
+/// to resolve proto2 enum field defaults.
+pub fn enum_values<'a>(files: impl Iterator<Item = &'a FileDescriptorProto>) -> EnumValues {
+    fn collect(prefix: &str, messages: &[DescriptorProto], enums: &mut EnumValues) {
+        for msg in messages {
+            let name = format!("{prefix}.{}", msg.name());
+            for desc in &msg.enum_type {
+                enums.insert(format!("{name}.{}", desc.name()), desc.value.clone());
+            }
+            collect(&name, &msg.nested_type, enums);
+        }
+    }
+
+    let mut enums = HashMap::new();
+    for file in files {
+        let prefix = match file.package() {
+            "" => String::new(),
+            package => format!(".{package}"),
+        };
+        for desc in &file.enum_type {
+            enums.insert(format!("{prefix}.{}", desc.name()), desc.value.clone());
+        }
+        collect(&prefix, &file.message_type, &mut enums);
+    }
+    enums
+}
+
 fn push_indent(buf: &mut String, depth: u8) {
     for _ in 0..depth {
         buf.push_str("    ");
@@ -111,6 +142,7 @@ impl CodeGenerator<'_> {
     pub fn generate(
         config: &mut Config,
         extern_paths: &ExternPaths,
+        enums: &EnumValues,
         file: FileDescriptorProto,
         buf: &mut String,
     ) {
@@ -151,6 +183,7 @@ impl CodeGenerator<'_> {
             source_info,
             syntax,
             extern_paths,
+            enums,
             buf,
             depth: 0,
             path: Vec::new(),
@@ -304,20 +337,37 @@ impl CodeGenerator<'_> {
                 None => self.field_ops(&fq_message_name, &field),
             };
 
+            // proto2 required fields are always written, the reader
+            // would use the `default` value of a missing field
+            let skip = if field.label() == Label::Required {
+                "Unknown"
+            } else {
+                "Default"
+            };
+            let value = match map_entry {
+                Some(_) => None,
+                None if field.label() == Label::Required => self
+                    .default_value(&field, fq_message_name.as_str())
+                    .map(|value| value.field),
+                None => {
+                    self.default_accessor(&field, &fq_message_name, &mut accessors);
+                    None
+                }
+            };
+            let value = value.unwrap_or_else(|| "::core::default::Default::default()".to_string());
+
             has_fields = true;
             write.push_str(&format!(
-                "{ops}serialize(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::Default, dst);",
+                "{ops}serialize(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::{skip}, dst);",
             ));
             read.push_str(&format!(
                 "{field_no} => {ops}deserialize(&mut self.{field_name}, tag, wire_type, src)
                     .map_err(|err| err.push(STRUCT_NAME, \"{field_name}\"))?,",
             ));
             encoded_len.push_str(&format!(
-                " + {ops}serialized_len(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::Default)",
+                " + {ops}serialized_len(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::{skip})",
             ));
-            default.push_str(&format!(
-                "{field_name}: ::core::default::Default::default(),\n",
-            ));
+            default.push_str(&format!("{field_name}: {value},\n"));
 
             self.enum_accessors(&fq_message_name, &field, map_entry, &mut accessors);
             match map_entry {
@@ -1123,11 +1173,15 @@ impl CodeGenerator<'_> {
                  }}\n\n"
             )
         } else if self.optional(field) {
+            let default = match self.enum_default_variant(field) {
+                Some(variant) => format!("unwrap_or({ty}::{variant})"),
+                None => "unwrap_or_default()".to_string(),
+            };
             format!(
                 "/// Returns the enum value of `{proto}`, or the default if the field is
                  /// unset or has an unknown value.
                  pub fn {name}(&self) -> {ty} {{
-                     self.{name}.and_then({ty}::from_i32).unwrap_or_default()
+                     self.{name}.and_then({ty}::from_i32).{default}
                  }}
 
                  /// Sets `{proto}` to the enum value.
@@ -1150,6 +1204,154 @@ impl CodeGenerator<'_> {
             )
         };
         out.push_str(&code);
+    }
+
+    /// Generated variant of the explicit proto2 `default` of an enum field
+    fn enum_default_variant(&self, field: &FieldDescriptorProto) -> Option<String> {
+        let default = field.default_value.as_deref()?;
+        let values = self.enums.get(field.type_name())?;
+        let number = values.iter().find(|v| v.name() == default)?.number();
+        let enum_name = to_upper_camel(field.type_name().rsplit('.').next().unwrap());
+        build_enum_value_mappings(&enum_name, self.config.strip_enum_prefix, values)
+            .into_iter()
+            .find(|variant| variant.proto_number == number)
+            .map(|variant| variant.generated_variant_name)
+    }
+
+    /// Value of a scalar or enum field that is not set on the wire. The
+    /// proto2 `default` option, or the first value for enums.
+    fn default_value(
+        &self,
+        field: &FieldDescriptorProto,
+        fq_message_name: &str,
+    ) -> Option<DefaultLiteral> {
+        if self
+            .config
+            .types_map
+            .get_first_field(fq_message_name, field.name())
+            .is_some()
+        {
+            return None;
+        }
+        let value = field.default_value.as_deref();
+        let literal = |lit: String| DefaultLiteral {
+            field: lit.clone(),
+            accessor: lit,
+            ty: to_rust_type(field.r#type()),
+        };
+        let invalid = || -> ! {
+            panic!(
+                "invalid default value {value:?} of field {fq_message_name}.{}",
+                field.name()
+            )
+        };
+
+        Some(match field.r#type() {
+            Type::Enum => {
+                let values = self.enums.get(field.type_name())?;
+                let number = match value {
+                    Some(name) => values.iter().find(|v| v.name() == name)?.number(),
+                    None => values.first()?.number(),
+                };
+                DefaultLiteral {
+                    field: number.to_string(),
+                    accessor: number.to_string(),
+                    ty: "i32".to_string(),
+                }
+            }
+            Type::Group | Type::Message => return None,
+            Type::Bool => match value? {
+                v @ ("true" | "false") => literal(v.to_string()),
+                _ => invalid(),
+            },
+            Type::Int32 | Type::Sint32 | Type::Sfixed32 => literal(
+                value?
+                    .parse::<i32>()
+                    .unwrap_or_else(|_| invalid())
+                    .to_string(),
+            ),
+            Type::Int64 | Type::Sint64 | Type::Sfixed64 => literal(
+                value?
+                    .parse::<i64>()
+                    .unwrap_or_else(|_| invalid())
+                    .to_string(),
+            ),
+            Type::Uint32 | Type::Fixed32 => literal(
+                value?
+                    .parse::<u32>()
+                    .unwrap_or_else(|_| invalid())
+                    .to_string(),
+            ),
+            Type::Uint64 | Type::Fixed64 => literal(
+                value?
+                    .parse::<u64>()
+                    .unwrap_or_else(|_| invalid())
+                    .to_string(),
+            ),
+            Type::Float => {
+                let v = value?.parse::<f32>().unwrap_or_else(|_| invalid());
+                literal(float_literal(f64::from(v), format!("{v:?}"), "f32"))
+            }
+            Type::Double => {
+                let v = value?.parse::<f64>().unwrap_or_else(|_| invalid());
+                literal(float_literal(v, format!("{v:?}"), "f64"))
+            }
+            Type::String => {
+                let v = value?;
+                DefaultLiteral {
+                    field: format!("::ntex_grpc::ByteString::from_static({v:?})"),
+                    accessor: format!("{v:?}"),
+                    ty: "&str".to_string(),
+                }
+            }
+            Type::Bytes => {
+                let lit: String = unescape_c(value?)
+                    .unwrap_or_else(|| invalid())
+                    .iter()
+                    .map(|b| format!("\\x{b:02x}"))
+                    .collect();
+                DefaultLiteral {
+                    field: format!("::ntex_grpc::Bytes::from_static(b\"{lit}\")"),
+                    accessor: format!("b\"{lit}\""),
+                    ty: "&[u8]".to_string(),
+                }
+            }
+        })
+    }
+
+    /// Accessor of an optional scalar field with a proto2 `default`, it
+    /// returns the default while the field is unset
+    fn default_accessor(
+        &self,
+        field: &FieldDescriptorProto,
+        fq_message_name: &str,
+        out: &mut String,
+    ) {
+        if field.default_value.is_none()
+            || field.r#type() == Type::Enum
+            || field.label() == Label::Repeated
+            || !self.optional(field)
+        {
+            return;
+        }
+        let Some(value) = self.default_value(field, fq_message_name) else {
+            return;
+        };
+
+        let name = to_snake(field.name());
+        let proto = field.name();
+        let (ty, accessor) = (value.ty, value.accessor);
+        let get = if matches!(field.r#type(), Type::String | Type::Bytes) {
+            format!("self.{name}.as_deref().unwrap_or({accessor})")
+        } else {
+            format!("self.{name}.unwrap_or({accessor})")
+        };
+        out.push_str(&format!(
+            "/// Returns the value of `{proto}`, or its default if the field is unset.
+             pub fn {name}(&self) -> {ty} {{
+                 {get}
+             }}\n\n"
+        ));
     }
 
     /// Wire format of a field whose encoding differs from the `NativeType`
@@ -1389,6 +1591,79 @@ fn build_enum_value_mappings<'a>(
     mappings
 }
 
+/// Rust literals of a field default value
+struct DefaultLiteral {
+    /// Value of the struct field
+    field: String,
+    /// Value returned by the accessor
+    accessor: String,
+    /// Return type of the accessor
+    ty: String,
+}
+
+fn float_literal(value: f64, repr: String, ty: &str) -> String {
+    if value.is_nan() {
+        format!("{ty}::NAN")
+    } else if value == f64::INFINITY {
+        format!("{ty}::INFINITY")
+    } else if value == f64::NEG_INFINITY {
+        format!("{ty}::NEG_INFINITY")
+    } else {
+        format!("{repr}_{ty}")
+    }
+}
+
+/// Decodes the C escaped `default` value of a bytes field
+fn unescape_c(value: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(value.len());
+    let mut bytes = value.bytes().peekable();
+    while let Some(b) = bytes.next() {
+        if b != b'\\' {
+            out.push(b);
+            continue;
+        }
+        let b = bytes.next()?;
+        out.push(match b {
+            b'n' => b'\n',
+            b'r' => b'\r',
+            b't' => b'\t',
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b'f' => 0x0c,
+            b'v' => 0x0b,
+            b'\\' | b'\'' | b'"' | b'?' => b,
+            b'0'..=b'7' => {
+                let mut v = u32::from(b - b'0');
+                for _ in 0..2 {
+                    match bytes.peek() {
+                        Some(d @ b'0'..=b'7') => {
+                            v = v * 8 + u32::from(d - b'0');
+                            bytes.next();
+                        }
+                        _ => break,
+                    }
+                }
+                u8::try_from(v).ok()?
+            }
+            b'x' => {
+                let mut v = 0u32;
+                let mut digits = 0;
+                while let Some(d) = bytes.peek().and_then(|d| char::from(*d).to_digit(16)) {
+                    v = v * 16 + d;
+                    digits += 1;
+                    bytes.next();
+                }
+                if digits == 0 {
+                    return None;
+                }
+                u8::try_from(v).ok()?
+            }
+            _ => return None,
+        });
+    }
+    Some(out)
+}
+
 fn to_rust_type(tp: Type) -> String {
     match tp {
         Type::Double => String::from("f64"),
@@ -1408,6 +1683,34 @@ fn to_rust_type(tp: Type) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unescape_c() {
+        assert_eq!(unescape_c("abc").unwrap(), b"abc");
+        assert_eq!(
+            unescape_c(r#"a\000b\377\x01\"\\\n\r\t\'\?\a\b\f\v"#).unwrap(),
+            b"a\0b\xff\x01\"\\\n\r\t'?\x07\x08\x0c\x0b"
+        );
+        assert_eq!(unescape_c(r"\1\12x\x4").unwrap(), b"\x01\x0ax\x04");
+        assert!(unescape_c(r"\").is_none());
+        assert!(unescape_c(r"\x").is_none());
+        assert!(unescape_c(r"\q").is_none());
+        assert!(unescape_c(r"\777").is_none());
+    }
+
+    #[test]
+    fn test_float_literal() {
+        assert_eq!(float_literal(1.5, "1.5".into(), "f32"), "1.5_f32");
+        assert_eq!(float_literal(f64::NAN, "NaN".into(), "f64"), "f64::NAN");
+        assert_eq!(
+            float_literal(f64::INFINITY, "inf".into(), "f32"),
+            "f32::INFINITY"
+        );
+        assert_eq!(
+            float_literal(f64::NEG_INFINITY, "-inf".into(), "f64"),
+            "f64::NEG_INFINITY"
+        );
+    }
 
     #[test]
     fn test_strip_enum_prefix() {

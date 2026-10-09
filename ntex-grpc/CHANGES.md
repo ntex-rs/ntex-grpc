@@ -2,6 +2,11 @@
 
 ## [3.3.0] - Unreleased
 
+* Codegen honors proto2 `default` values, they were ignored. Required
+  fields start at their default, the first value for enums, and are always
+  written. Optional fields with a default get an accessor that returns it
+  while the field is unset
+
 * Support proto2 `group` fields, codegen panicked on them. Add the
   `types::Group` field format and `encoding::split_group()`
 

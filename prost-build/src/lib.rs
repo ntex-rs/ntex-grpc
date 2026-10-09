@@ -149,7 +149,7 @@ use prost::Message;
 use prost_types::{FileDescriptorProto, FileDescriptorSet};
 
 pub use crate::ast::{Comments, Method, Service};
-use crate::code_generator::CodeGenerator;
+use crate::code_generator::{enum_values, CodeGenerator};
 use crate::extern_paths::ExternPaths;
 use crate::ident::to_snake;
 use crate::path::PathMap;
@@ -890,6 +890,7 @@ impl Config {
 
         let extern_paths = ExternPaths::new(&self.extern_paths, self.prost_types)
             .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
+        let enums = enum_values(requests.iter().map(|request| &request.1));
 
         for request in requests {
             // Only record packages that have services
@@ -907,7 +908,7 @@ impl Config {
             }
             let buf = modules.get_mut(&request.0).unwrap();
 
-            CodeGenerator::generate(self, &extern_paths, request.1, buf);
+            CodeGenerator::generate(self, &extern_paths, &enums, request.1, buf);
         }
 
         if let Some(ref mut service_generator) = self.service_generator {

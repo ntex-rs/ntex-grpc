@@ -22,6 +22,10 @@
 * Client keeps at most 64 KiB of a response body that is not a grpc one, e.g.
   an error page from a proxy, and stops reading the response there
 
+* A message split over several data frames is read into a buffer sized for
+  the whole message once its length is known, instead of growing as data
+  arrives. The first frame is reused when nothing else holds it
+
 * Server rejects a request message larger than 4 MiB with
   `RESOURCE_EXHAUSTED`. Add `GrpcServer::max_message_size()` to change the
   limit

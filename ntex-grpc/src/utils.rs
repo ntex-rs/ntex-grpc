@@ -41,22 +41,44 @@ impl Data {
         }
     }
 
-    pub(crate) fn push(&mut self, data: Bytes) {
-        if !data.is_empty() {
-            *self = match mem::replace(self, Data::Empty) {
-                Data::Chunk(d) => {
-                    let mut d = BytesMut::from(d);
-                    d.extend_from_slice(&data);
-                    Data::MutChunk(d)
-                }
-                Data::MutChunk(mut d) => {
-                    d.extend_from_slice(&data);
-                    Data::MutChunk(d)
-                }
-                Data::Empty => Data::Chunk(data),
-            };
+    /// Appends a chunk of a grpc message.
+    ///
+    /// A single chunk is kept as it is. Once the length prefix has arrived
+    /// and the message is at most `limit` bytes, the buffer is sized for the
+    /// whole message, otherwise it grows as data arrives.
+    pub(crate) fn push(&mut self, data: Bytes, limit: usize) {
+        if data.is_empty() {
+            return;
         }
+        let mut buf = match mem::replace(self, Data::Empty) {
+            Data::Chunk(cur) => BytesMut::from(cur),
+            Data::MutChunk(buf) => buf,
+            Data::Empty => {
+                *self = Data::Chunk(data);
+                return;
+            }
+        };
+        if let Some(size) = message_size(&buf, &data, limit) {
+            buf.reserve_exact(size.saturating_sub(buf.len()));
+        }
+        buf.extend_from_slice(&data);
+        *self = Data::MutChunk(buf);
     }
+}
+
+/// The size of a message with its length prefix, if the prefix has arrived
+/// and the message is at most `limit` bytes.
+fn message_size(cur: &[u8], data: &[u8], limit: usize) -> Option<usize> {
+    let mut prefix = cur.iter().chain(data).copied();
+    let (_, a, b, c, d) = (
+        prefix.next()?,
+        prefix.next()?,
+        prefix.next()?,
+        prefix.next()?,
+        prefix.next()?,
+    );
+    let len = u32::from_be_bytes([a, b, c, d]) as usize;
+    (len <= limit).then_some(5 + len)
 }
 
 /// Encode a binary metadata value.
@@ -180,6 +202,73 @@ pub(crate) fn percent_decode(val: &HeaderValue) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn push(data: &mut Data, chunk: &[u8]) {
+        data.push(Bytes::copy_from_slice(chunk), 100);
+    }
+
+    fn capacity(data: &Data) -> usize {
+        let Data::MutChunk(buf) = data else {
+            panic!("not a buffer")
+        };
+        buf.capacity()
+    }
+
+    #[test]
+    fn data_push() {
+        let msg = [&[0, 0, 0, 0, 100][..], &[1; 100]].concat();
+
+        // a single chunk is not copied
+        let chunk = Bytes::copy_from_slice(&msg);
+        let mut data = Data::Empty;
+        data.push(chunk.clone(), 100);
+        data.push(Bytes::new(), 100);
+        assert_eq!(data.get().as_ptr(), chunk.as_ptr());
+
+        // the buffer is sized once for the whole message
+        for split in [&[10, 50][..], &[2, 4, 50], &[1, 1, 1, 1, 1, 50]] {
+            let mut data = Data::Empty;
+            let mut pos = 0;
+            for &end in split {
+                push(&mut data, &msg[pos..end]);
+                pos = end;
+            }
+            assert_eq!(capacity(&data), 105);
+            let ptr = data.as_slice().as_ptr();
+            push(&mut data, &msg[pos..]);
+            assert_eq!(capacity(&data), 105);
+            assert_eq!(data.as_slice().as_ptr(), ptr);
+            assert_eq!(data.get(), msg);
+        }
+
+        // the prefix is not complete yet
+        let mut data = Data::Empty;
+        push(&mut data, &msg[..2]);
+        push(&mut data, &msg[2..4]);
+        assert_eq!(capacity(&data), 4);
+
+        // the reserved size does not depend on how the buffer grows
+        let mut data = Data::Empty;
+        push(&mut data, &msg[..60]);
+        push(&mut data, &msg[60..70]);
+        assert_eq!(capacity(&data), 105);
+
+        // a message over the limit is not reserved for
+        let big = [&[0, 0, 0, 0, 101][..], &[1; 101]].concat();
+        let mut data = Data::Empty;
+        push(&mut data, &big[..10]);
+        push(&mut data, &big[10..20]);
+        assert!(capacity(&data) < 106);
+        push(&mut data, &big[20..]);
+        assert_eq!(data.get(), big);
+
+        // data after the message
+        let msg = [&msg[..], &[1; 20]].concat();
+        let mut data = Data::Empty;
+        push(&mut data, &msg[..10]);
+        push(&mut data, &msg[10..]);
+        assert_eq!(data.get(), msg);
+    }
 
     #[test]
     fn binary_header() {

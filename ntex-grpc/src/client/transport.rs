@@ -183,7 +183,7 @@ async fn send_request<T: MethodDef>(
                     continue;
                 }
                 h2::MessageKind::Data(data, _cap) => {
-                    payload.push(data);
+                    payload.push(data, message_limit(status, &hdrs, max_size));
                     if let Some((st, msg)) = check_message(status, &hdrs, &payload, max_size) {
                         return Err(synthesized_status(st, hdrs, msg, payload.get()));
                     }
@@ -195,7 +195,7 @@ async fn send_request<T: MethodDef>(
                 h2::MessageKind::Eof(data) => {
                     match data {
                         h2::StreamEof::Data(data, _cap) => {
-                            payload.push(data);
+                            payload.push(data, message_limit(status, &hdrs, max_size));
                             if let Some((st, msg)) =
                                 check_message(status, &hdrs, &payload, max_size)
                             {
@@ -367,6 +367,12 @@ fn is_grpc(status: Option<StatusCode>, hdrs: &HeaderMap) -> bool {
         && hdrs
             .get(header::CONTENT_TYPE)
             .is_some_and(|val| is_grpc_content_type(val.as_bytes()))
+}
+
+/// The largest message to buffer, the body of a response that is not a grpc
+/// one has no length prefix.
+fn message_limit(status: Option<StatusCode>, hdrs: &HeaderMap, max_size: usize) -> usize {
+    if is_grpc(status, hdrs) { max_size } else { 0 }
 }
 
 /// Keeps at most [`MAX_OTHER_BODY`] bytes of a response body that is not a

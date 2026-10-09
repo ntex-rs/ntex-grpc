@@ -4,7 +4,7 @@ use std::{cell::Cell, fmt, iter, mem::MaybeUninit, slice, thread::LocalKey};
 use flate2::{Compress, Crc, FlushCompress, Status, bufread::GzDecoder};
 use ntex_bytes::{BufMut, BytePage, BytePages, Bytes, BytesMut};
 use ntex_http::HeaderValue;
-use zstd::zstd_safe::zstd_sys::ZSTD_EndDirective;
+use zstd::zstd_safe::zstd_sys::{ZSTD_EndDirective, ZSTD_ErrorCode, ZSTD_getErrorCode};
 use zstd::zstd_safe::{CCtx, CParameter, DCtx, InBuffer, OutBuffer, ResetDirective, WriteBuf};
 
 use crate::GrpcStatus;
@@ -205,6 +205,9 @@ impl Compression {
                 &ZSTD_DECODER,
                 || Ok(DCtx::try_create().ok_or(io::ErrorKind::OutOfMemory)?),
                 |ctx| {
+                    if let Some(out) = zstd_decode(ctx, data, limit)? {
+                        return Ok(out);
+                    }
                     ctx.reset(ResetDirective::SessionOnly).map_err(zstd_error)?;
                     zstd_read(ctx, data, hint, limit)
                 },
@@ -250,6 +253,10 @@ const GZIP_HEADER: [u8; 10] = [0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
 /// encoder of an 8 KiB message takes about 180 KiB, the decoder about 96 KiB
 /// unless it buffers the window.
 const CONTEXT_LIMIT: usize = 256 * 1024;
+
+/// A zstd message that does not store its size is decoded in a single pass
+/// if its buffer for the most it may grow to is not larger than this.
+const ZSTD_SINGLE_PASS: usize = 256 * 1024;
 
 thread_local! {
     static GZIP_ENCODER: Cell<Option<Compress>> = const { Cell::new(None) };
@@ -415,6 +422,34 @@ impl Read for Members<'_> {
             self.0.reset(input);
         }
     }
+}
+
+/// Decodes a small zstd message whose first frame does not store its size in
+/// a single pass, into a buffer for the most it may grow to. zstd would
+/// buffer the whole window of the frame otherwise, 2 MiB at the default
+/// level. Returns `None` if the message is larger or does not fit.
+fn zstd_decode(ctx: &mut DCtx<'_>, data: &[u8], limit: usize) -> io::Result<Option<BytesMut>> {
+    let size = data.len().saturating_mul(RESERVE_RATIO).min(limit);
+    if size > ZSTD_SINGLE_PASS
+        || !matches!(zstd::zstd_safe::get_frame_content_size(data), Ok(None))
+    {
+        return Ok(None);
+    }
+    let mut out = BytesMut::with_capacity(size);
+    let fits = fill(&mut out, size, |buf| {
+        match ctx.decompress(&mut Uninit::new(buf), data) {
+            Ok(n) => Ok((n, true)),
+            // SAFETY: the function only reads the code
+            Err(code)
+                if unsafe { ZSTD_getErrorCode(code) }
+                    == ZSTD_ErrorCode::ZSTD_error_dstSize_tooSmall =>
+            {
+                Ok((0, false))
+            }
+            Err(code) => Err(zstd_error(code)),
+        }
+    })?;
+    Ok(fits.then_some(out))
 }
 
 /// Decodes the zstd frames of `data` into a buffer of `hint` bytes, which
@@ -879,6 +914,55 @@ mod tests {
                 assert_eq!(out, data[..limit.min(data.len())], "{hint} {limit}");
             }
         }
+    }
+
+    #[test]
+    fn zstd_no_size() {
+        // zstd::encode_all does not store the size, a small message is
+        // decoded in a single pass and the decoder stays small
+        clear();
+        let data = text(1000);
+        let compressed = frame(Compression::Zstd, &data);
+        let out = Compression::Zstd
+            .decompress_sync(&compressed, usize::MAX)
+            .unwrap();
+        assert_eq!(out, data);
+        let size = ZSTD_DECODER.take().unwrap().sizeof();
+        assert!(size < 128 * 1024, "{size}");
+
+        let mut ctx = DCtx::create();
+        let decode =
+            |ctx: &mut DCtx<'_>, data: &[u8], limit| zstd_decode(ctx, data, limit).unwrap();
+        let out = decode(&mut ctx, &compressed, usize::MAX).unwrap();
+        assert_eq!(out, data);
+        assert_eq!(out.capacity(), compressed.len() * RESERVE_RATIO);
+        assert_eq!(decode(&mut ctx, &compressed, data.len()).unwrap(), data);
+        assert!(decode(&mut ctx, &compressed, data.len() - 1).is_none());
+        assert!(zstd_decode(&mut ctx, &compressed[..compressed.len() - 1], usize::MAX).is_err());
+
+        // it compresses more than the buffer allows for
+        let zeros = vec![0; 100_000];
+        let compressed = frame(Compression::Zstd, &zeros);
+        assert!(decode(&mut ctx, &compressed, usize::MAX).is_none());
+        let out = Compression::Zstd
+            .decompress_sync(&compressed, usize::MAX)
+            .unwrap();
+        assert_eq!(out, zeros);
+
+        // the buffer would be too large
+        let data = random(5000);
+        let compressed = frame(Compression::Zstd, &data);
+        assert!(compressed.len() * RESERVE_RATIO > ZSTD_SINGLE_PASS);
+        assert!(decode(&mut ctx, &compressed, usize::MAX).is_none());
+        assert!(decode(&mut ctx, &compressed, ZSTD_SINGLE_PASS + 1).is_none());
+        assert_eq!(
+            decode(&mut ctx, &compressed, ZSTD_SINGLE_PASS).unwrap(),
+            data
+        );
+
+        // the frame stores the size
+        let compressed = compress_in(Compression::Zstd, &text(1000), usize::MAX).unwrap();
+        assert!(decode(&mut ctx, &compressed, usize::MAX).is_none());
     }
 
     #[test]

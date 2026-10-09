@@ -16,6 +16,9 @@
   message, which makes compressing a small message up to 40% faster. A zstd
   context larger than 256 KiB is dropped. Requires flate2 1.1.3
 
+* A small zstd message whose frame does not store its size is decoded in a
+  single pass, the decoder no longer buffers a 2 MiB window for it
+
 * Messages under 64 bytes, and messages that do not get smaller, are sent
   uncompressed even if the call uses compression
 

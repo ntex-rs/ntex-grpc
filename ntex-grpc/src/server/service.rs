@@ -561,11 +561,8 @@ fn send_trailers(stream: &StreamRef, trailers: HeaderMap) {
 ///
 /// Follows the [gRPC over HTTP2 spec](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md).
 fn try_parse_grpc_timeout(val: &HeaderValue) -> Result<Millis, ()> {
-    let (timeout_value, timeout_unit) = val
-        .to_str()
-        .map_err(|_| ())
-        .and_then(|s| if s.is_empty() { Err(()) } else { Ok(s) })?
-        .split_at(val.len() - 1);
+    // the unit is the last byte, the value may not be ascii
+    let (&timeout_unit, timeout_value) = val.as_bytes().split_last().ok_or(())?;
 
     // gRPC spec specifies `TimeoutValue` will be at most 8 digits
     // Caping this at 8 digits also prevents integer overflow from ever occurring
@@ -573,20 +570,23 @@ fn try_parse_grpc_timeout(val: &HeaderValue) -> Result<Millis, ()> {
         return Err(());
     }
 
-    let timeout_value: u64 = timeout_value.parse().map_err(|_| ())?;
+    let timeout_value: u64 = std::str::from_utf8(timeout_value)
+        .map_err(|_| ())?
+        .parse()
+        .map_err(|_| ())?;
     let duration = match timeout_unit {
         // Hours
-        "H" => Millis(u32::try_from(timeout_value * MILLIS_IN_HOUR).unwrap_or(u32::MAX)),
+        b'H' => Millis(u32::try_from(timeout_value * MILLIS_IN_HOUR).unwrap_or(u32::MAX)),
         // Minutes
-        "M" => Millis(u32::try_from(timeout_value * MILLIS_IN_MINUTE).unwrap_or(u32::MAX)),
+        b'M' => Millis(u32::try_from(timeout_value * MILLIS_IN_MINUTE).unwrap_or(u32::MAX)),
         // Seconds
-        "S" => Millis(u32::try_from(timeout_value * 1000).unwrap_or(u32::MAX)),
+        b'S' => Millis(u32::try_from(timeout_value * 1000).unwrap_or(u32::MAX)),
         // Milliseconds
-        "m" => Millis(u32::try_from(timeout_value).unwrap_or(u32::MAX)),
+        b'm' => Millis(u32::try_from(timeout_value).unwrap_or(u32::MAX)),
         // Microseconds
-        "u" => Millis(u32::try_from(timeout_value / 1000).unwrap_or(u32::MAX)),
+        b'u' => Millis(u32::try_from(timeout_value / 1000).unwrap_or(u32::MAX)),
         // Nanoseconds
-        "n" => Millis(u32::try_from(timeout_value / 1_000_000).unwrap_or(u32::MAX)),
+        b'n' => Millis(u32::try_from(timeout_value / 1_000_000).unwrap_or(u32::MAX)),
         _ => return Err(()),
     };
 
@@ -753,8 +753,15 @@ mod tests {
             assert_eq!(timeout, Err(()), "{val}");
         }
 
-        // not utf-8
-        let val = HeaderValue::from_bytes(b"\xff1S").unwrap();
-        assert_eq!(try_parse_grpc_timeout(&val), Err(()));
+        // not ascii, a multi-byte character must not be split
+        for val in [
+            &b"\xff1S"[..],
+            "1é".as_bytes(),
+            "é".as_bytes(),
+            "1Sé".as_bytes(),
+        ] {
+            let timeout = try_parse_grpc_timeout(&HeaderValue::from_bytes(val).unwrap());
+            assert_eq!(timeout, Err(()), "{val:?}");
+        }
     }
 }

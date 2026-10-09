@@ -2,6 +2,9 @@
 
 ## [0.4.0] - Unreleased
 
+* Generate recursive message fields as `Option<Box<T>>`, recursive messages
+  produced structs with infinite size
+
 * `sint32` and `sint64` fields use zigzag encoding, they were encoded as
   `int32` and `int64`. Generated code requires ntex-grpc 3.3.0, regenerate
   code for protos with `sint` fields

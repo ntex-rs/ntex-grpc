@@ -2,6 +2,8 @@
 
 ## [3.2.1] - Unreleased
 
+* Implement `Message` for `Box<T>`, used by recursive message fields
+
 * Write `-0.0` values of `float` and `double` fields, only `+0.0` is the
   default value
 

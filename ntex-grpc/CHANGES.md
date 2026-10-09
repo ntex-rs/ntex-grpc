@@ -2,6 +2,9 @@
 
 ## [3.2.1] - Unreleased
 
+* Server rejects requests whose `content-type` is not `application/grpc`
+  with HTTP status 415 and `INVALID_ARGUMENT`
+
 * Client reports a `CANCEL` stream reset after the request timeout ran out
   as `ClientError::DeadlineExceeded`, it was reported as `CANCELLED`
 

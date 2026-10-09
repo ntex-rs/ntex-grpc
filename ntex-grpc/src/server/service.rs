@@ -23,6 +23,7 @@ const ERR_DECODE_TIMEOUT: HeaderValue =
 const ERR_DEADLINE: HeaderValue = HeaderValue::from_static("Deadline exceeded");
 const ERR_EXTRA_DATA: HeaderValue =
     HeaderValue::from_static("grpc: received data after the request message");
+const ERR_CONTENT_TYPE: &str = "grpc: invalid request content-type";
 const HDR_APP_GRPC: HeaderValue = HeaderValue::from_static("application/grpc");
 
 /// The default limit of a request message.
@@ -244,6 +245,19 @@ where
                 pseudo,
                 eof,
             } => {
+                if let Some(msg) = check_content_type(&headers) {
+                    // not a grpc request, see the gRPC over HTTP/2 spec
+                    let mut hdrs = hdrs();
+                    hdrs.insert(consts::GRPC_STATUS, GrpcStatus::InvalidArgument.into());
+                    hdrs.insert(consts::GRPC_MESSAGE, msg);
+                    let _ = stream.send_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, hdrs, true);
+                    if !eof {
+                        // the client stops sending the request
+                        stream.reset(Reason::NO_ERROR);
+                    }
+                    return Ok(());
+                }
+
                 let path = pseudo.path.unwrap().split_off(1);
                 if !path.contains('/') {
                     // not found
@@ -466,6 +480,16 @@ fn split_path(mut path: ByteString) -> (ByteString, ByteString) {
     (service, name)
 }
 
+/// Returns the `grpc-message` to reject the request with if it is not a grpc
+/// one.
+fn check_content_type(hdrs: &HeaderMap) -> Option<HeaderValue> {
+    match hdrs.get(CONTENT_TYPE) {
+        Some(val) if utils::is_grpc_content_type(val.as_bytes()) => None,
+        Some(val) => Some(utils::grpc_message(ERR_CONTENT_TYPE, val)),
+        None => Some(HeaderValue::from_static(ERR_CONTENT_TYPE)),
+    }
+}
+
 fn hdrs() -> HeaderMap {
     let mut hdrs = HeaderMap::default();
     hdrs.insert(CONTENT_TYPE, HDR_APP_GRPC);
@@ -544,6 +568,29 @@ fn try_parse_grpc_timeout(val: &HeaderValue) -> Result<Millis, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_type() {
+        let check = |ct: Option<&'static str>| {
+            let mut hdrs = HeaderMap::new();
+            if let Some(ct) = ct {
+                hdrs.insert(CONTENT_TYPE, HeaderValue::from_static(ct));
+            }
+            check_content_type(&hdrs)
+        };
+        assert_eq!(check(Some("application/grpc")), None);
+        assert_eq!(check(Some("application/grpc+proto")), None);
+        assert_eq!(check(Some("Application/GRPC;charset=utf-8")), None);
+        assert_eq!(
+            check(Some("application/json")).unwrap(),
+            "grpc: invalid request content-type: application/json"
+        );
+        assert_eq!(
+            check(Some("application/grpcx")).unwrap(),
+            "grpc: invalid request content-type: application/grpcx"
+        );
+        assert_eq!(check(None).unwrap(), "grpc: invalid request content-type");
+    }
 
     #[test]
     fn send_size_limit() {

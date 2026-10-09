@@ -258,7 +258,7 @@ async fn not_found() {
     let client = client();
     // dropping the sender would cancel the stream
     let (_snd, rcv) = client
-        .send(Method::POST, "/test.Svc".into(), HeaderMap::new(), false)
+        .send(Method::POST, "/test.Svc".into(), req_headers(None), false)
         .await
         .unwrap();
     match rcv.recv().await.unwrap().kind {
@@ -271,6 +271,54 @@ async fn not_found() {
 
     // the connection still works
     let (_, _, trailers) = call(&client, None, &b"\0\0\0\0\0"[..]).await;
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+}
+
+#[ntex::test]
+async fn unsupported_content_type() {
+    let client = client();
+    for (ct, eof) in [(Some("application/json"), false), (None, true)] {
+        let mut hdrs = HeaderMap::new();
+        if let Some(ct) = ct {
+            hdrs.insert(
+                ntex_http::header::CONTENT_TYPE,
+                HeaderValue::from_static(ct),
+            );
+        }
+        let (_snd, rcv) = client
+            .send(Method::POST, "/test.Svc/Call".into(), hdrs, eof)
+            .await
+            .unwrap();
+        match rcv.recv().await.unwrap().kind {
+            h2::MessageKind::Headers {
+                pseudo,
+                headers,
+                eof,
+            } => {
+                assert_eq!(
+                    pseudo.status,
+                    Some(ntex_http::StatusCode::UNSUPPORTED_MEDIA_TYPE)
+                );
+                assert!(eof);
+                assert_eq!(headers.get(GRPC_STATUS).unwrap(), "3");
+                let msg = headers.get(GRPC_MESSAGE).unwrap();
+                assert!(
+                    msg.to_str()
+                        .unwrap()
+                        .starts_with("grpc: invalid request content-type")
+                );
+            }
+            kind => panic!("{kind:?}"),
+        }
+    }
+
+    // `+format` is a grpc request
+    let mut hdrs = HeaderMap::new();
+    hdrs.insert(
+        ntex_http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/grpc+proto"),
+    );
+    let (_, _, trailers) = call_to(&client, "/test.Svc/Call", hdrs, &b"\0\0\0\0\0"[..]).await;
     assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
 }
 

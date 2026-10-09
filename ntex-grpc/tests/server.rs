@@ -178,6 +178,27 @@ async fn short_request() {
     assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
 }
 
+#[ntex::test]
+async fn not_found() {
+    let client = client();
+    // dropping the sender would cancel the stream
+    let (_snd, rcv) = client
+        .send(Method::POST, "/test.Svc".into(), HeaderMap::new(), false)
+        .await
+        .unwrap();
+    match rcv.recv().await.unwrap().kind {
+        h2::MessageKind::Headers { pseudo, eof, .. } => {
+            assert_eq!(pseudo.status, Some(ntex_http::StatusCode::NOT_FOUND));
+            assert!(eof);
+        }
+        kind => panic!("{kind:?}"),
+    }
+
+    // the connection still works
+    let (_, _, trailers) = call(&client, None, &b"\0\0\0\0\0"[..]).await;
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+}
+
 /// Returns `data` with a length prefix.
 fn message(flag: u8, data: &[u8]) -> Vec<u8> {
     let mut msg = vec![flag];

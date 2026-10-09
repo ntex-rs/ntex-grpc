@@ -1,6 +1,10 @@
 # Changes
 
-## [0.3.1] - Unreleased
+## [0.4.0] - Unreleased
+
+* `sint32` and `sint64` fields use zigzag encoding, they were encoded as
+  `int32` and `int64`. Generated code requires ntex-grpc 3.3.0, regenerate
+  code for protos with `sint` fields
 
 * Fix multi-line service and method comments being joined into one doc line
 

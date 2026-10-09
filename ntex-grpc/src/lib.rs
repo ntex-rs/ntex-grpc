@@ -23,6 +23,7 @@
 #[cfg(feature = "compression")]
 mod compression;
 mod consts;
+mod format;
 mod service;
 mod status;
 mod utils;

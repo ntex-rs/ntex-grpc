@@ -5,6 +5,7 @@ gRPC client and server for the [ntex](https://github.com/ntex-rs/ntex) framework
 [![crates.io](https://img.shields.io/crates/v/ntex-grpc.svg)](https://crates.io/crates/ntex-grpc)
 [![Documentation](https://docs.rs/ntex-grpc/badge.svg)](https://docs.rs/ntex-grpc)
 [![MSRV](https://img.shields.io/badge/rustc-1.97+-lightgray.svg)](https://blog.rust-lang.org/)
+[![codecov](https://codecov.io/gh/ntex-rs/ntex-grpc/branch/main/graph/badge.svg)](https://codecov.io/gh/ntex-rs/ntex-grpc/tree/main)
 
 You describe a service in a `.proto` file and generate Rust code from it once.
 The generated code has the messages, a typed client and the service definition

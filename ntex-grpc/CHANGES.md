@@ -2,6 +2,9 @@
 
 ## [3.3.0] - Unreleased
 
+* A stream reset with an HTTP/2 code that has no gRPC mapping, or an
+  unknown code, is reported as `INTERNAL` instead of `UNKNOWN`
+
 * Server rejects a `grpc-timeout` with a leading `+`, only digits are
   allowed
 

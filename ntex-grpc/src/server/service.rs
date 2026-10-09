@@ -1,4 +1,4 @@
-use std::{cell::RefCell, error::Error, rc::Rc};
+use std::{cell::RefCell, error::Error, hash::Hash, rc::Rc};
 
 use ntex_bytes::{Buf, BufMut, BytePages, ByteString, Bytes};
 use ntex_h2::{self as h2, StreamRef, frame::Reason, frame::StreamId};
@@ -251,7 +251,7 @@ where
                 if let Some(inflight) = streams.get_mut(&id) {
                     inflight.data.push(data, self.max_size);
                     if let Err((status, msg)) = self.check_request(inflight.data.as_slice()) {
-                        streams.remove(&id);
+                        remove(&mut streams, &id);
                         drop(streams);
                         if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
                             send_error(&stream, status, msg);
@@ -262,7 +262,7 @@ where
                 }
             }
             h2::MessageKind::Eof(data) => {
-                let inflight = self.streams.borrow_mut().remove(&id);
+                let inflight = remove(&mut self.streams.borrow_mut(), &id);
                 if let Some(mut inflight) = inflight {
                     match data {
                         h2::StreamEof::Data(chunk, _cap) => {
@@ -404,11 +404,25 @@ where
                 }
             }
             h2::MessageKind::Disconnect(_) => {
-                self.streams.borrow_mut().remove(&id);
+                remove(&mut self.streams.borrow_mut(), &id);
             }
         }
         Ok(())
     }
+}
+
+/// Capacity of the streams map that is kept however few streams are open.
+const STREAMS_CAPACITY: usize = 64;
+
+/// Removes the stream `key`. The map gives back memory once fewer than a
+/// quarter of its capacity is used, so a burst of streams is not kept for the
+/// life of the connection.
+fn remove<K: Hash + Eq, V>(map: &mut HashMap<K, V>, key: &K) -> Option<V> {
+    let val = map.remove(key);
+    if map.capacity() > STREAMS_CAPACITY && map.len() < map.capacity() / 4 {
+        map.shrink_to(map.len() * 2);
+    }
+    val
 }
 
 /// Splits `service/method` into the service and the method name, the method
@@ -492,6 +506,49 @@ mod tests {
     fn inflight_size() {
         // a slot of the streams map holds the state of a request
         assert!(size_of::<Inflight>() <= 96, "{}", size_of::<Inflight>());
+    }
+
+    #[test]
+    fn streams_shrink() {
+        let mut map = HashMap::default();
+        for id in 0..256 {
+            map.insert(id, ());
+        }
+        let mut shrinks = 0;
+        for id in 0..255 {
+            let cap = map.capacity();
+            assert!(remove(&mut map, &id).is_some());
+            // a removed entry may leave a tombstone, which takes one off the
+            // capacity
+            if map.capacity() + 1 < cap {
+                shrinks += 1;
+                assert!(map.len() < cap / 4, "{} {cap}", map.len());
+                // half of the capacity stays free, so the next streams do
+                // not grow the map right away
+                assert!(map.capacity() >= map.len() * 2, "{}", map.len());
+            }
+            assert!(
+                map.capacity() <= 64 || map.len() >= map.capacity() / 4,
+                "{} {}",
+                map.len(),
+                map.capacity()
+            );
+        }
+        assert!(map.capacity() <= STREAMS_CAPACITY, "{}", map.capacity());
+        assert!(shrinks <= 4, "{shrinks}");
+        assert!(remove(&mut map, &1000).is_none());
+        assert!(remove(&mut map, &255).is_some());
+
+        // a small map is kept
+        let mut map = HashMap::default();
+        for id in 0..32 {
+            map.insert(id, ());
+        }
+        for id in 0..32 {
+            let cap = map.capacity();
+            remove(&mut map, &id);
+            assert!(map.capacity() + 1 >= cap, "{} {cap}", map.capacity());
+        }
     }
 
     #[test]

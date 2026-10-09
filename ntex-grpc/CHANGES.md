@@ -2,6 +2,9 @@
 
 ## [3.2.0] - Unreleased
 
+* Server gives back the memory of its map of open streams after a burst of
+  requests, instead of keeping it for the life of the connection
+
 * Server keeps the request path of an unfinished request instead of separate
   service and method names, which makes the state of a request 24 bytes
   smaller

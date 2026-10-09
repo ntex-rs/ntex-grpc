@@ -229,11 +229,45 @@ imports them from `google/protobuf`, the generated code uses these types.
 `Duration` converts to and from `std::time::Duration`. `Timestamp` converts to
 `SystemTime`, and `Timestamp::now()` gives the current time.
 
+## Compression
+
+gzip and zstd message compression comes with the `compression` feature:
+
+```toml
+ntex-grpc = { version = "3.2", features = ["compression"] }
+```
+
+Requests go out uncompressed unless you pick an encoding:
+
+```rust
+use ntex_grpc::Compression;
+
+let msg = HelloRequest { name: "world".into() };
+let mut req = client.say_hello(&msg);
+req.compression(Compression::Zstd);
+let res = req.send().await.unwrap();
+```
+
+The server needs no setup. It accepts requests in either encoding and
+compresses the response the same way as the request. Both sides send
+`grpc-accept-encoding: gzip,zstd`, and the client decompresses responses in
+either encoding.
+
+* Empty messages, messages under 64 bytes and messages that don't get smaller
+  are sent uncompressed.
+* Size limits apply after decompression. `max_message_size()` on the request
+  and on `GrpcServer` covers the decompressed message, and a larger one fails
+  with `RESOURCE_EXHAUSTED`.
+* Large messages are compressed and decompressed on the runtime's blocking
+  thread pool, so they don't hold up the worker thread.
+* A server that doesn't support the encoding fails the call with
+  `UNIMPLEMENTED`. That includes an ntex-grpc server built without the
+  feature.
+
 ## Limitations
 
 * Only unary calls are supported. Client, server and bidirectional streaming
   rpcs are not.
-* Message compression is not supported.
 
 ## Examples
 

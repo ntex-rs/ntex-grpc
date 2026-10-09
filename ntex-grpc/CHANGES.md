@@ -17,8 +17,9 @@
   zstd context larger than 256 KiB is dropped, and threads of the blocking
   pool keep none. Requires flate2 1.1.3
 
-* A small zstd message whose frame does not store its size is decoded in a
-  single pass, the decoder no longer buffers a 2 MiB window for it
+* A zstd message whose frame does not store its size is decoded in a single
+  pass, into a buffer for as much as its blocks can hold. The decoder no
+  longer buffers a 2 MiB window for it
 
 * A zstd message that compresses more than 64 times is decoded in a single
   pass, the size its frame stores is trusted as far as its blocks can hold

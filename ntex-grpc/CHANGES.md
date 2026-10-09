@@ -2,6 +2,10 @@
 
 ## [3.3.0] - Unreleased
 
+* Skipping an unknown group does not recurse, deeply nested groups
+  overflowed the stack. Groups nested more than 100 levels deep fail with
+  "groups nested too deeply"
+
 * Decoding fails with "required field is missing" when a proto2 required
   field is absent, it was accepted with the default value. Merging into a
   message that already holds data does not check

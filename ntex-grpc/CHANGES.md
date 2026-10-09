@@ -2,6 +2,9 @@
 
 ## [3.3.0] - Unreleased
 
+* Server rejects requests whose method is not `POST` with HTTP status 405
+  and `INTERNAL`
+
 * Server ignores `grpc-status` and `grpc-message` in the extra trailers of
   a successful response, they were sent along with `grpc-status: 0`
 

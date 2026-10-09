@@ -203,6 +203,7 @@ The server sends a gRPC status itself in these cases:
 * `INVALID_ARGUMENT` if the request message doesn't decode;
 * `INVALID_ARGUMENT` with HTTP status 415 if the request `content-type` is not
   `application/grpc`;
+* `INTERNAL` with HTTP status 405 if the request method is not `POST`;
 * `DEADLINE_EXCEEDED` if the client's `grpc-timeout` runs out before the method
   finishes.
 

@@ -2,7 +2,7 @@ use std::{cell::RefCell, error::Error, hash::Hash, rc::Rc};
 
 use ntex_bytes::{Buf, ByteString, Bytes};
 use ntex_h2::{self as h2, StreamRef, frame::Reason, frame::StreamId};
-use ntex_http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
+use ntex_http::{HeaderMap, HeaderValue, Method, StatusCode, header::CONTENT_TYPE};
 use ntex_io::{Filter, Io, IoBoxed};
 use ntex_service::{Ctx, Pipeline, Service, ServiceFactory, cfg::SharedCfg};
 use ntex_util::{HashMap, time::Millis, time::timeout_checked};
@@ -245,16 +245,18 @@ where
                 pseudo,
                 eof,
             } => {
+                // not a grpc request, see the gRPC over HTTP/2 spec
                 if let Some(msg) = check_content_type(&headers) {
-                    // not a grpc request, see the gRPC over HTTP/2 spec
-                    let mut hdrs = hdrs();
-                    hdrs.insert(consts::GRPC_STATUS, GrpcStatus::InvalidArgument.into());
-                    hdrs.insert(consts::GRPC_MESSAGE, msg);
-                    let _ = stream.send_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, hdrs, true);
-                    if !eof {
-                        // the client stops sending the request
-                        stream.reset(Reason::NO_ERROR);
-                    }
+                    let (code, st) = (
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        GrpcStatus::InvalidArgument,
+                    );
+                    reject(&stream, code, st, msg, eof);
+                    return Ok(());
+                }
+                if let Some(msg) = check_method(pseudo.method.as_ref()) {
+                    let (code, st) = (StatusCode::METHOD_NOT_ALLOWED, GrpcStatus::Internal);
+                    reject(&stream, code, st, msg, eof);
                     return Ok(());
                 }
 
@@ -490,6 +492,32 @@ fn check_content_type(hdrs: &HeaderMap) -> Option<HeaderValue> {
     }
 }
 
+/// Returns the `grpc-message` of a request whose method is not `POST`.
+fn check_method(method: Option<&Method>) -> Option<HeaderValue> {
+    match method {
+        Some(&Method::POST) => None,
+        Some(method) => HeaderValue::try_from(format!("grpc: method {method} is not supported"))
+            .ok()
+            .or(Some(HeaderValue::from_static(
+                "grpc: method is not supported",
+            ))),
+        None => Some(HeaderValue::from_static("grpc: method is not supported")),
+    }
+}
+
+/// Rejects a request that is not a grpc call, with an HTTP status and the
+/// grpc status the client reports.
+fn reject(stream: &StreamRef, code: StatusCode, st: GrpcStatus, msg: HeaderValue, eof: bool) {
+    let mut hdrs = hdrs();
+    hdrs.insert(consts::GRPC_STATUS, st.into());
+    hdrs.insert(consts::GRPC_MESSAGE, msg);
+    let _ = stream.send_response(code, hdrs, true);
+    if !eof {
+        // the client stops sending the request
+        stream.reset(Reason::NO_ERROR);
+    }
+}
+
 fn hdrs() -> HeaderMap {
     let mut hdrs = HeaderMap::default();
     hdrs.insert(CONTENT_TYPE, HDR_APP_GRPC);
@@ -590,6 +618,20 @@ mod tests {
             "grpc: invalid request content-type: application/grpcx"
         );
         assert_eq!(check(None).unwrap(), "grpc: invalid request content-type");
+    }
+
+    #[test]
+    fn method() {
+        assert_eq!(check_method(Some(&Method::POST)), None);
+        assert_eq!(
+            check_method(Some(&Method::GET)).unwrap(),
+            "grpc: method GET is not supported"
+        );
+        assert_eq!(
+            check_method(Some(&Method::from_bytes(b"BREW").unwrap())).unwrap(),
+            "grpc: method BREW is not supported"
+        );
+        assert_eq!(check_method(None).unwrap(), "grpc: method is not supported");
     }
 
     #[test]

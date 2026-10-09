@@ -269,6 +269,9 @@ either encoding.
 
 * Only unary calls are supported. Client, server and bidirectional streaming
   rpcs are not.
+* Unknown fields are skipped when a message is decoded. A message that is
+  decoded and encoded again drops fields that are not in the generated code,
+  for example fields added in a newer version of the proto file.
 
 ## Examples
 

@@ -2,6 +2,12 @@
 
 ## [3.3.0] - Unreleased
 
+* Server answers a path that is not `/service/method` with HTTP status 200
+  and `UNIMPLEMENTED`, it sent HTTP status 404 without a `grpc-status`
+
+* `#[server]` answers an unknown method with `UNIMPLEMENTED` instead of
+  `NOT_FOUND`
+
 * A stream reset with an HTTP/2 code that has no gRPC mapping, or an
   unknown code, is reported as `INTERNAL` instead of `UNKNOWN`
 

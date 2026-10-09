@@ -260,19 +260,31 @@ async fn short_request() {
 }
 
 #[ntex::test]
-async fn not_found() {
+async fn malformed_path() {
     let client = client();
-    // dropping the sender would cancel the stream
-    let (_snd, rcv) = client
-        .send(Method::POST, "/test.Svc".into(), req_headers(None), false)
-        .await
-        .unwrap();
-    match rcv.recv().await.unwrap().kind {
-        h2::MessageKind::Headers { pseudo, eof, .. } => {
-            assert_eq!(pseudo.status, Some(ntex_http::StatusCode::NOT_FOUND));
-            assert!(eof);
+    for eof in [true, false] {
+        // dropping the sender would cancel the stream
+        let (_snd, rcv) = client
+            .send(Method::POST, "/test.Svc".into(), req_headers(None), eof)
+            .await
+            .unwrap();
+        // a trailers-only response
+        match rcv.recv().await.unwrap().kind {
+            h2::MessageKind::Headers {
+                pseudo,
+                headers,
+                eof,
+            } => {
+                assert_eq!(pseudo.status, Some(ntex_http::StatusCode::OK));
+                assert_eq!(headers.get(GRPC_STATUS).unwrap(), "12");
+                assert_eq!(
+                    headers.get(GRPC_MESSAGE).unwrap(),
+                    "grpc: malformed method name: /test.Svc"
+                );
+                assert!(eof);
+            }
+            kind => panic!("{kind:?}"),
         }
-        kind => panic!("{kind:?}"),
     }
 
     // the connection still works

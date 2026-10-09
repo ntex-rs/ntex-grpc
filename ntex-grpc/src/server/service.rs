@@ -262,8 +262,13 @@ where
 
                 let path = pseudo.path.unwrap().split_off(1);
                 if !path.contains('/') {
-                    // not found
-                    let _ = stream.send_response(StatusCode::NOT_FOUND, hdrs(), true);
+                    // not a `service/method` path, the method is unknown
+                    let msg =
+                        HeaderValue::try_from(format!("grpc: malformed method name: /{path}"))
+                            .unwrap_or_else(|_| {
+                                HeaderValue::from_static("grpc: malformed method name")
+                            });
+                    reject(&stream, StatusCode::OK, GrpcStatus::Unimplemented, msg, eof);
                     return Ok(());
                 }
 

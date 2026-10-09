@@ -14,6 +14,9 @@ use crate::encoding::{self, DecodeError};
 pub use crate::format::{FieldFormat, Fixed, Map, MapType, Native, Unpacked, ZigZag};
 
 /// Protobuf struct read/write operations
+///
+/// Generated implementations skip unknown fields while decoding, they are
+/// not preserved and are not written back by `write()`.
 pub trait Message: Default + Sized + fmt::Debug {
     /// Decodes an instance of the message from a buffer
     fn read(src: &mut Bytes) -> Result<Self, DecodeError>;

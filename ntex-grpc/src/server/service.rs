@@ -14,10 +14,10 @@ use crate::{consts, status::GrpcStatus};
 
 use super::{ServerError, ServerRequest, ServerResponse};
 
-const ERR_DECODE: HeaderValue =
-    HeaderValue::from_static("Cannot decode request message: not enough data provided");
-const ERR_DATA_DECODE: HeaderValue =
-    HeaderValue::from_static("Cannot decode request message: not enough data provided");
+/// The length prefix of an uncompressed empty message.
+const EMPTY_MESSAGE: &[u8] = &[0; 5];
+const ERR_NO_MESSAGE: HeaderValue = HeaderValue::from_static("grpc: request without a message");
+const ERR_TRUNCATED: HeaderValue = HeaderValue::from_static("grpc: request message is truncated");
 const ERR_DECODE_TIMEOUT: HeaderValue =
     HeaderValue::from_static("Cannot decode grpc-timeout header");
 const ERR_DEADLINE: HeaderValue = HeaderValue::from_static("Deadline exceeded");
@@ -181,12 +181,12 @@ where
     ) -> Result<Bytes, (GrpcStatus, HeaderValue)> {
         self.check_request(&data)?;
         if data.len() < 5 {
-            return Err((GrpcStatus::InvalidArgument, ERR_DATA_DECODE));
+            return Err((GrpcStatus::InvalidArgument, ERR_TRUNCATED));
         }
         let flag = data.get_u8();
         let len = data.get_u32() as usize;
         let Some(data) = data.split_to_checked(len) else {
-            return Err((GrpcStatus::InvalidArgument, ERR_DATA_DECODE));
+            return Err((GrpcStatus::InvalidArgument, ERR_TRUNCATED));
         };
         // a message in an unknown encoding is unimplemented
         utils::read_message(
@@ -234,7 +234,7 @@ where
                 // stream eof, cannot do anything
                 if eof {
                     if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
-                        send_error(&stream, GrpcStatus::InvalidArgument, ERR_DECODE);
+                        send_error(&stream, GrpcStatus::InvalidArgument, ERR_NO_MESSAGE);
                     }
                     return Ok(());
                 }
@@ -348,38 +348,43 @@ where
                     match timeout_checked(to, ctx.call(&self.service, req)).await {
                         Ok(Ok(mut res)) => {
                             log::debug!("{}: Response is received {res:?}", self.cfg.tag());
-                            let mut buf = BytePages::default();
-                            #[cfg(feature = "compression")]
-                            if let Some(enc) = encoding
-                                && !res.payload.is_empty()
-                            {
-                                match enc.compress(&mut res.payload).await {
-                                    Ok(payload) => {
-                                        buf.put_u8(1);
-                                        buf.put_u32(payload.len() as u32);
-                                        buf.append(payload);
-                                    }
-                                    Err(err) => {
-                                        let msg = HeaderValue::try_from(format!(
-                                            "grpc: error while compressing: {err}"
-                                        ))
-                                        .unwrap_or_else(|_| {
-                                            HeaderValue::from_static(
-                                                "grpc: error while compressing",
-                                            )
-                                        });
-                                        send_error(&stream, GrpcStatus::Internal, msg);
-                                        return Ok(());
+                            if res.payload.is_empty() {
+                                // an empty message is never compressed
+                                let _ = stream
+                                    .send_payload(Bytes::from_static(EMPTY_MESSAGE), false)
+                                    .await;
+                            } else {
+                                let mut buf = BytePages::default();
+                                #[cfg(feature = "compression")]
+                                if let Some(enc) = encoding {
+                                    match enc.compress(&mut res.payload).await {
+                                        Ok(payload) => {
+                                            buf.put_u8(1);
+                                            buf.put_u32(payload.len() as u32);
+                                            buf.append(payload);
+                                        }
+                                        Err(err) => {
+                                            let msg = HeaderValue::try_from(format!(
+                                                "grpc: error while compressing: {err}"
+                                            ))
+                                            .unwrap_or_else(|_| {
+                                                HeaderValue::from_static(
+                                                    "grpc: error while compressing",
+                                                )
+                                            });
+                                            send_error(&stream, GrpcStatus::Internal, msg);
+                                            return Ok(());
+                                        }
                                     }
                                 }
-                            }
-                            if buf.is_empty() {
-                                buf.put_u8(0); // compression
-                                buf.put_u32(res.payload.len() as u32); // length
-                                res.payload.move_to(&mut buf);
-                            }
+                                if buf.is_empty() {
+                                    buf.put_u8(0); // compression
+                                    buf.put_u32(res.payload.len() as u32); // length
+                                    res.payload.move_to(&mut buf);
+                                }
 
-                            let _ = stream.send_pages(buf, false).await;
+                                let _ = stream.send_pages(buf, false).await;
+                            }
 
                             let mut trailers = HeaderMap::default();
                             trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());

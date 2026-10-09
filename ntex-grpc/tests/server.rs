@@ -90,9 +90,10 @@ async fn call(
 #[ntex::test]
 async fn uncompressed() {
     let client = client();
-    let (headers, _, trailers) = call(&client, None, &b"\0\0\0\0\0"[..]).await;
+    let (headers, data, trailers) = call(&client, None, &b"\0\0\0\0\0"[..]).await;
     assert_eq!(headers.get(GRPC_ACCEPT_ENCODING).unwrap(), ACCEPT_ENCODING);
     assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+    assert_eq!(data, b"\0\0\0\0\0");
 
     // an encoding may be declared, as long as the message is not compressed
     let (_, _, trailers) = call(&client, Some("snappy"), &b"\0\0\0\0\0"[..]).await;
@@ -138,9 +139,38 @@ async fn compressed_flag() {
 #[ntex::test]
 async fn short_request() {
     let client = client();
-    for body in [&b""[..], &b"\0\0"[..]] {
+    for body in [&b""[..], &b"\0\0"[..], &b"\0\0\0\0\x03ab"[..]] {
         let (_, _, trailers) = call(&client, None, body).await;
         assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "3");
+        assert_eq!(
+            trailers.get(GRPC_MESSAGE).unwrap(),
+            "grpc: request message is truncated"
+        );
+    }
+
+    // headers end the stream
+    let mut hdrs = HeaderMap::new();
+    hdrs.insert(
+        ntex_http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/grpc"),
+    );
+    let (_, rcv) = client
+        .send(Method::POST, "/test.Svc/Call".into(), hdrs, true)
+        .await
+        .unwrap();
+    loop {
+        match rcv.recv().await.unwrap().kind {
+            h2::MessageKind::Headers { .. } => {}
+            h2::MessageKind::Eof(h2::StreamEof::Trailers(trailers)) => {
+                assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "3");
+                assert_eq!(
+                    trailers.get(GRPC_MESSAGE).unwrap(),
+                    "grpc: request without a message"
+                );
+                break;
+            }
+            kind => panic!("{kind:?}"),
+        }
     }
 
     // the connection still works

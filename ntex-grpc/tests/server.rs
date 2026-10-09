@@ -65,7 +65,9 @@ async fn call(
         .send(Method::POST, "/test.Svc/Call".into(), hdrs, false)
         .await
         .unwrap();
-    snd.send_payload(body.into(), true).await.unwrap();
+    // the server can reject the request and reset the stream before the body
+    // is sent
+    let _ = snd.send_payload(body.into(), true).await;
 
     let mut headers = HeaderMap::new();
     let mut data = Vec::new();
@@ -176,6 +178,88 @@ async fn max_message_size() {
     assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
     let (_, _, trailers) = call(&client, None, message(0, &vec![1; max + 1])).await;
     assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "8");
+}
+
+/// Sends `parts` of a request body without ending it, returns the response
+/// status and message, and whether the stream is reset.
+async fn call_open(client: &SimpleClient, parts: &[&[u8]]) -> (String, String, bool) {
+    let mut hdrs = HeaderMap::new();
+    hdrs.insert(
+        ntex_http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/grpc"),
+    );
+    let (snd, rcv) = client
+        .send(Method::POST, "/test.Svc/Call".into(), hdrs, false)
+        .await
+        .unwrap();
+    for part in parts {
+        snd.send_payload(Bytes::copy_from_slice(part), false)
+            .await
+            .unwrap();
+    }
+    let trailers = loop {
+        match rcv.recv().await.unwrap().kind {
+            h2::MessageKind::Headers { .. } => {}
+            h2::MessageKind::Eof(h2::StreamEof::Trailers(trailers)) => break trailers,
+            kind => panic!("{kind:?}"),
+        }
+    };
+    ntex::time::sleep(ntex::time::Millis(50)).await;
+    let reset = snd
+        .send_payload(Bytes::from_static(b"x"), true)
+        .await
+        .is_err();
+    (
+        trailers
+            .get(GRPC_STATUS)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned(),
+        trailers
+            .get(GRPC_MESSAGE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned(),
+        reset,
+    )
+}
+
+#[ntex::test]
+async fn early_reject() {
+    let client = client_with(Some(100));
+    // the length prefix is over the limit, the message is not read
+    for parts in [
+        &[&message(0, &[1; 101])[..5]][..],
+        &[&message(0, &[1; 101])[..2], &[0, 0, 101, 1]][..],
+        &[&message(0, &[1; 101])[..]][..],
+    ] {
+        let (status, msg, reset) = call_open(&client, parts).await;
+        assert_eq!(status, "8");
+        assert_eq!(msg, "grpc: received message larger than max (101 vs. 100)");
+        assert!(reset);
+    }
+
+    // data after the message
+    let data = [message(0, &[1; 100]), vec![0]].concat();
+    for parts in [&[&data[..]][..], &[&data[..105], &data[105..]][..]] {
+        let (status, msg, reset) = call_open(&client, parts).await;
+        assert_eq!(status, "13");
+        assert_eq!(msg, "grpc: received data after the request message");
+        assert!(reset);
+    }
+    let (_, _, trailers) = call(&client, None, data).await;
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "13");
+    assert_eq!(
+        trailers.get(GRPC_MESSAGE).unwrap(),
+        "grpc: received data after the request message"
+    );
+
+    // the connection still works
+    let (_, data, trailers) = call(&client, None, message(0, &[1; 100])).await;
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+    assert_eq!(data, message(0, &[1; 100]));
 }
 
 #[cfg(feature = "compression")]

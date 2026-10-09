@@ -281,6 +281,41 @@ async fn not_found() {
 }
 
 #[ntex::test]
+async fn unsupported_method() {
+    let client = client();
+    for (method, eof) in [(Method::GET, true), (Method::PUT, false)] {
+        let (_snd, rcv) = client
+            .send(
+                method.clone(),
+                "/test.Svc/Call".into(),
+                req_headers(None),
+                eof,
+            )
+            .await
+            .unwrap();
+        match rcv.recv().await.unwrap().kind {
+            h2::MessageKind::Headers {
+                pseudo,
+                headers,
+                eof,
+            } => {
+                assert_eq!(
+                    pseudo.status,
+                    Some(ntex_http::StatusCode::METHOD_NOT_ALLOWED)
+                );
+                assert!(eof);
+                assert_eq!(headers.get(GRPC_STATUS).unwrap(), "13");
+                assert_eq!(
+                    headers.get(GRPC_MESSAGE).unwrap(),
+                    &*format!("grpc: method {method} is not supported")
+                );
+            }
+            kind => panic!("{kind:?}"),
+        }
+    }
+}
+
+#[ntex::test]
 async fn unsupported_content_type() {
     let client = client();
     for (ct, eof) in [(Some("application/json"), false), (None, true)] {

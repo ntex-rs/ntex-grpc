@@ -1,9 +1,11 @@
-use std::io::{self, Read, Write};
-use std::{fmt, iter};
+use std::io::{self, Cursor, Read};
+use std::{cell::Cell, fmt, iter, mem::MaybeUninit, slice, thread::LocalKey};
 
+use flate2::{Compress, Crc, FlushCompress, Status, bufread::GzDecoder};
 use ntex_bytes::{BufMut, BytePage, BytePages, Bytes, BytesMut};
 use ntex_http::HeaderValue;
-use zstd::zstd_safe::{CParameter, DCtx, InBuffer, OutBuffer, WriteBuf};
+use zstd::zstd_safe::zstd_sys::ZSTD_EndDirective;
+use zstd::zstd_safe::{CCtx, CParameter, DCtx, InBuffer, OutBuffer, ResetDirective, WriteBuf};
 
 use crate::GrpcStatus;
 
@@ -20,6 +22,11 @@ use crate::GrpcStatus;
 /// blocking thread pool of the runtime: with gzip from 16 KiB when
 /// compressing and 128 KiB of compressed data when decompressing, with zstd
 /// from 512 KiB.
+///
+/// Each thread keeps the encoder and the decoder of its last message for
+/// the next one, creating them takes as long as compressing a small
+/// message. The gzip encoder takes about 320 KiB and the decoder 43 KiB,
+/// zstd ones are kept up to 256 KiB each.
 ///
 /// Requires the `compression` feature.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -113,34 +120,24 @@ impl Compression {
 
     /// Returns the compressed `pages`, or `None` if they do not get smaller.
     fn compress_sync(self, len: usize, pages: &[BytePage]) -> io::Result<Option<BytePages>> {
-        fn write<W: Write>(mut enc: W, pages: &[BytePage]) -> io::Result<W> {
-            for page in pages {
-                enc.write_all(page)?;
-            }
-            Ok(enc)
-        }
-
-        let out = Output {
-            pages: BytePages::default(),
-            max: len,
-        };
-        let res = match self {
-            Compression::Gzip => {
-                let enc = flate2::write::GzEncoder::new(out, flate2::Compression::default());
-                write(enc, pages).and_then(flate2::write::GzEncoder::finish)
-            }
-            Compression::Zstd => {
-                // the frame stores the size, the receiver allocates it at once
-                let mut enc = zstd::Encoder::new(out, 0)?;
-                enc.set_pledged_src_size(u64::try_from(len).ok())?;
-                enc.set_parameter(CParameter::WindowLog(ZSTD_WINDOW_LOG))?;
-                write(enc, pages).and_then(zstd::Encoder::finish)
-            }
-        };
-        match res {
-            Ok(out) => Ok(Some(out.pages)),
-            Err(err) if matches!(err.get_ref(), Some(e) if e.is::<NotSmaller>()) => Ok(None),
-            Err(err) => Err(err),
+        match self {
+            Compression::Gzip => with_context(
+                &GZIP_ENCODER,
+                || Ok(Compress::new(flate2::Compression::default(), false)),
+                |ctx| gzip_compress(ctx, pages, len),
+                |_| true,
+            ),
+            Compression::Zstd => with_context(
+                &ZSTD_ENCODER,
+                || {
+                    let mut ctx = CCtx::try_create().ok_or(io::ErrorKind::OutOfMemory)?;
+                    ctx.set_parameter(CParameter::WindowLog(ZSTD_WINDOW_LOG))
+                        .map_err(zstd_error)?;
+                    Ok(ctx)
+                },
+                |ctx| zstd_compress(ctx, pages, len),
+                |ctx| ctx.sizeof() <= CONTEXT_LIMIT,
+            ),
         }
     }
 
@@ -188,16 +185,31 @@ impl Compression {
     /// Decompresses `data`, reading at most one byte over `max_size`.
     fn decompress_sync(
         self,
-        data: &[u8],
+        data: &Bytes,
         max_size: usize,
     ) -> Result<Bytes, (GrpcStatus, HeaderValue)> {
         let limit = max_size.saturating_add(1);
         let hint = self.size_hint(data, limit);
         let out = match self {
-            Compression::Gzip => read(flate2::bufread::MultiGzDecoder::new(data), hint, limit),
-            Compression::Zstd => DCtx::try_create()
-                .ok_or_else(|| io::ErrorKind::OutOfMemory.into())
-                .and_then(|mut ctx| zstd_read(&mut ctx, data, hint, limit)),
+            Compression::Gzip => with_context(
+                &GZIP_DECODER,
+                || Ok(GzDecoder::new(Cursor::default())),
+                |dec| read(Members::new(dec, data), hint, limit),
+                |dec| {
+                    // the decoder does not keep the message
+                    dec.reset(Cursor::default());
+                    true
+                },
+            ),
+            Compression::Zstd => with_context(
+                &ZSTD_DECODER,
+                || Ok(DCtx::try_create().ok_or(io::ErrorKind::OutOfMemory)?),
+                |ctx| {
+                    ctx.reset(ResetDirective::SessionOnly).map_err(zstd_error)?;
+                    zstd_read(ctx, data, hint, limit)
+                },
+                |ctx| ctx.sizeof() <= CONTEXT_LIMIT,
+            ),
         }
         .map_err(|err| {
             error(
@@ -230,38 +242,146 @@ const ZSTD_WINDOW_LOG: u32 = 19;
 /// grows the buffer as it is decompressed.
 const RESERVE_RATIO: usize = 64;
 
-/// The compressed message, writing fails once it is as large as the original
-/// one.
-struct Output {
-    pages: BytePages,
-    max: usize,
+/// The header `flate2::write::GzEncoder` writes, without a name or time, for
+/// an unknown system.
+const GZIP_HEADER: [u8; 10] = [0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
+
+/// A zstd context larger than this is not kept for the next message. The
+/// encoder of an 8 KiB message takes about 180 KiB, the decoder about 96 KiB
+/// unless it buffers the window.
+const CONTEXT_LIMIT: usize = 256 * 1024;
+
+thread_local! {
+    static GZIP_ENCODER: Cell<Option<Compress>> = const { Cell::new(None) };
+    static GZIP_DECODER: Cell<Option<GzDecoder<Cursor<Bytes>>>> = const { Cell::new(None) };
+    static ZSTD_ENCODER: Cell<Option<CCtx<'static>>> = const { Cell::new(None) };
+    static ZSTD_DECODER: Cell<Option<DCtx<'static>>> = const { Cell::new(None) };
 }
 
-impl Write for Output {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if self.pages.len() + buf.len() >= self.max {
-            return Err(io::Error::other(NotSmaller));
+/// Runs `f` with the context the thread keeps in `key`, or with a new one.
+/// The context is kept for the next message if `keep` returns `true`.
+fn with_context<T, R>(
+    key: &'static LocalKey<Cell<Option<T>>>,
+    new: impl FnOnce() -> io::Result<T>,
+    f: impl FnOnce(&mut T) -> io::Result<R>,
+    keep: impl FnOnce(&mut T) -> bool,
+) -> io::Result<R> {
+    let mut ctx = match key.try_with(Cell::take).ok().flatten() {
+        Some(ctx) => ctx,
+        None => new()?,
+    };
+    let res = f(&mut ctx);
+    if keep(&mut ctx) {
+        let _ = key.try_with(|cell| cell.set(Some(ctx)));
+    }
+    res
+}
+
+/// Compresses `pages` into the gzip member `flate2::write::GzEncoder`
+/// writes, returns `None` once it is as large as the `len` bytes of the
+/// input.
+fn gzip_compress(
+    ctx: &mut Compress,
+    pages: &[BytePage],
+    len: usize,
+) -> io::Result<Option<BytePages>> {
+    ctx.reset();
+    let mut deflate = |out: &mut BytePages, input: &[u8], flush| {
+        if out.len() >= len {
+            return Ok(None);
         }
-        self.pages.extend_from_slice(buf);
-        Ok(buf.len())
-    }
+        fill(out, len - out.len(), |buf| {
+            let (read, written) = (ctx.total_in(), ctx.total_out());
+            let status = ctx
+                .compress_uninit(input, buf, flush)
+                .map_err(io::Error::other)?;
+            let read = delta(ctx.total_in(), read);
+            Ok((delta(ctx.total_out(), written), Some((read, status))))
+        })
+    };
 
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+    let mut out = BytePages::default();
+    out.extend_from_slice(&GZIP_HEADER);
+    let mut crc = Crc::new();
+    for page in pages {
+        crc.update(page);
+        let mut input = &page[..];
+        while !input.is_empty() {
+            let Some((read, _)) = deflate(&mut out, input, FlushCompress::None)? else {
+                return Ok(None);
+            };
+            input = &input[read..];
+        }
+    }
+    loop {
+        match deflate(&mut out, &[], FlushCompress::Finish)? {
+            None => return Ok(None),
+            Some((_, Status::StreamEnd)) => break,
+            Some(_) => {}
+        }
+    }
+    if out.len() + 8 >= len {
+        return Ok(None);
+    }
+    out.extend_from_slice(&crc.sum().to_le_bytes());
+    out.extend_from_slice(&crc.amount().to_le_bytes());
+    Ok(Some(out))
+}
+
+/// The bytes between two totals of the gzip encoder, at most the size of a
+/// buffer.
+fn delta(after: u64, before: u64) -> usize {
+    usize::try_from(after - before).unwrap_or(usize::MAX)
+}
+
+/// Compresses `pages` into a zstd frame, returns `None` once it is as large
+/// as the `len` bytes of the input.
+fn zstd_compress(
+    ctx: &mut CCtx<'_>,
+    pages: &[BytePage],
+    len: usize,
+) -> io::Result<Option<BytePages>> {
+    ctx.reset(ResetDirective::SessionOnly).map_err(zstd_error)?;
+    // the frame stores the size, the receiver allocates it at once
+    ctx.set_pledged_src_size(u64::try_from(len).ok())
+        .map_err(zstd_error)?;
+    // returns the bytes left to flush
+    let mut step = |out: &mut BytePages, src: &mut InBuffer<'_>, end| {
+        if out.len() >= len {
+            return Ok(None);
+        }
+        fill(out, len - out.len(), |buf| {
+            let mut buf = Uninit::new(buf);
+            let mut dst = OutBuffer::around(&mut buf);
+            let left = ctx
+                .compress_stream2(&mut dst, src, end)
+                .map_err(zstd_error)?;
+            Ok((dst.pos(), Some(left)))
+        })
+    };
+
+    let mut out = BytePages::default();
+    for page in pages {
+        let mut src = InBuffer::around(page);
+        while src.pos() < page.len() {
+            if step(&mut out, &mut src, ZSTD_EndDirective::ZSTD_e_continue)?.is_none() {
+                return Ok(None);
+            }
+        }
+    }
+    let mut src = InBuffer::around(&[]);
+    loop {
+        match step(&mut out, &mut src, ZSTD_EndDirective::ZSTD_e_end)? {
+            None => return Ok(None),
+            Some(0) => return Ok(Some(out)),
+            Some(_) => {}
+        }
     }
 }
 
-/// The error of a message that does not get smaller when compressed.
-#[derive(Debug)]
-struct NotSmaller;
-
-impl fmt::Display for NotSmaller {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("the message does not get smaller")
-    }
+fn zstd_error(code: usize) -> io::Error {
+    io::Error::other(zstd::zstd_safe::get_error_name(code))
 }
-
-impl std::error::Error for NotSmaller {}
 
 /// Reads at most `limit` bytes from `r` into a buffer of `hint` bytes, which
 /// grows if the data does not fit.
@@ -269,6 +389,32 @@ fn read(r: impl Read, hint: usize, limit: usize) -> io::Result<BytesMut> {
     let mut out = BytesMut::with_capacity(hint);
     io::copy(&mut r.take(limit as u64), &mut out)?;
     Ok(out)
+}
+
+/// The gzip members of a message, read with a decoder the thread keeps as
+/// `MultiGzDecoder` reads them.
+struct Members<'a>(&'a mut GzDecoder<Cursor<Bytes>>);
+
+impl<'a> Members<'a> {
+    fn new(dec: &'a mut GzDecoder<Cursor<Bytes>>, data: &Bytes) -> Self {
+        dec.reset(Cursor::new(data.clone()));
+        Members(dec)
+    }
+}
+
+impl Read for Members<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let n = self.0.read(buf)?;
+            let input = self.0.get_ref();
+            if n > 0 || buf.is_empty() || input.position() >= input.get_ref().len() as u64 {
+                return Ok(n);
+            }
+            // the member is complete, the next one starts where it ends
+            let input = input.clone();
+            self.0.reset(input);
+        }
+    }
 }
 
 /// Decodes the zstd frames of `data` into a buffer of `hint` bytes, which
@@ -285,14 +431,18 @@ fn zstd_read(ctx: &mut DCtx<'_>, data: &[u8], hint: usize, limit: usize) -> io::
         if out.len() == out.capacity() {
             out.reserve(8 * 1024);
         }
-        let mut spare = Spare::new(&mut out, limit);
-        let mut dst = OutBuffer::around(&mut spare);
-        // a new frame starts after the previous one is complete
-        done = ctx
-            .decompress_stream(&mut dst, &mut src)
-            .map_err(|code| io::Error::other(zstd::zstd_safe::get_error_name(code)))?
-            == 0;
-        if !done && src.pos() == data.len() && dst.pos() < dst.capacity() {
+        let room = limit - out.len();
+        let full = fill(&mut out, room, |buf| {
+            let mut buf = Uninit::new(buf);
+            let mut dst = OutBuffer::around(&mut buf);
+            // a new frame starts after the previous one is complete
+            done = ctx
+                .decompress_stream(&mut dst, &mut src)
+                .map_err(zstd_error)?
+                == 0;
+            Ok((dst.pos(), dst.pos() == dst.capacity()))
+        })?;
+        if !done && src.pos() == data.len() && !full {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "incomplete frame",
@@ -302,46 +452,53 @@ fn zstd_read(ctx: &mut DCtx<'_>, data: &[u8], hint: usize, limit: usize) -> io::
     Ok(out)
 }
 
-/// The spare capacity of a buffer up to a limit, zstd writes its output
-/// directly into it.
-struct Spare<'a> {
-    buf: &'a mut BytesMut,
-    start: usize,
-    ptr: *mut u8,
-    capacity: usize,
+/// Lets `f` write into at most `room` bytes of the spare capacity of `out`,
+/// the codecs write their output directly into it. `f` returns the number
+/// of bytes it has written.
+fn fill<B: BufMut, R>(
+    out: &mut B,
+    room: usize,
+    f: impl FnOnce(&mut [MaybeUninit<u8>]) -> io::Result<(usize, R)>,
+) -> io::Result<R> {
+    // SAFETY: the codecs only write initialized bytes
+    let spare = unsafe { out.chunk_mut().as_uninit_slice_mut() };
+    let room = room.min(spare.len());
+    let (n, res) = f(&mut spare[..room])?;
+    assert!(n <= room);
+    // SAFETY: `f` has written `n` bytes
+    unsafe { out.advance_mut(n) };
+    Ok(res)
 }
 
-impl<'a> Spare<'a> {
-    fn new(buf: &'a mut BytesMut, limit: usize) -> Self {
-        let start = buf.len();
-        let spare = buf.chunk_mut();
-        let (ptr, capacity) = (spare.as_mut_ptr(), spare.len().min(limit - start));
-        Spare {
-            buf,
-            start,
-            ptr,
-            capacity,
-        }
+/// A buffer of uninitialized bytes zstd writes into.
+struct Uninit<'a> {
+    buf: &'a mut [MaybeUninit<u8>],
+    /// The bytes written.
+    len: usize,
+}
+
+impl<'a> Uninit<'a> {
+    fn new(buf: &'a mut [MaybeUninit<u8>]) -> Self {
+        Uninit { buf, len: 0 }
     }
 }
 
-// SAFETY: `ptr` points to `capacity` bytes of the buffer's spare capacity, and
-// `filled_until` only extends the buffer over bytes zstd has written.
-unsafe impl WriteBuf for Spare<'_> {
+// SAFETY: `len` only covers the bytes zstd has written.
+unsafe impl WriteBuf for Uninit<'_> {
     fn as_slice(&self) -> &[u8] {
-        &self.buf[self.start..]
+        unsafe { slice::from_raw_parts(self.buf.as_ptr().cast(), self.len) }
     }
 
     fn capacity(&self) -> usize {
-        self.capacity
+        self.buf.len()
     }
 
     fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.ptr
+        self.buf.as_mut_ptr().cast()
     }
 
     unsafe fn filled_until(&mut self, n: usize) {
-        unsafe { self.buf.set_len(self.start + n) }
+        self.len = n;
     }
 }
 
@@ -391,7 +548,7 @@ fn error(
 
 #[cfg(test)]
 mod tests {
-    use std::thread;
+    use std::{io::Write, thread};
 
     use super::*;
 
@@ -498,20 +655,14 @@ mod tests {
                 assert_eq!(pages.freeze(), data, "{enc:?} {len}");
             }
         }
-    }
 
-    #[test]
-    fn output() {
-        let mut out = Output {
-            pages: BytePages::default(),
-            max: 10,
-        };
-        assert_eq!(out.write(b"012345678").unwrap(), 9);
-        out.flush().unwrap();
-        let err = out.write(b"9").unwrap_err();
-        assert!(err.get_ref().unwrap().is::<NotSmaller>());
-        assert_eq!(err.to_string(), "the message does not get smaller");
-        assert_eq!(out.pages.freeze(), b"012345678"[..]);
+        // gzip output as large as the input is not used, zstd needs the
+        // real size of the input
+        let pages = [BytePage::from(text(1000))];
+        let gzip = |len| Compression::Gzip.compress_sync(len, &pages).unwrap();
+        let size = gzip(1000).unwrap().len();
+        assert!(gzip(size).is_none());
+        assert_eq!(gzip(size + 1).unwrap().len(), size);
     }
 
     #[ntex::test]
@@ -743,6 +894,217 @@ mod tests {
         let mut out = Vec::new();
         dec.read_to_end(&mut out).unwrap();
         assert_eq!(out, data);
+    }
+
+    /// Drops the contexts the thread keeps.
+    fn clear() {
+        GZIP_ENCODER.take();
+        GZIP_DECODER.take();
+        ZSTD_ENCODER.take();
+        ZSTD_DECODER.take();
+    }
+
+    /// Whether the thread keeps a context in `key`.
+    fn kept<T>(key: &'static LocalKey<Cell<Option<T>>>) -> bool {
+        let ctx = key.take();
+        let kept = ctx.is_some();
+        key.set(ctx);
+        kept
+    }
+
+    /// Compresses `data` in pages of `size` bytes.
+    fn compress_in(enc: Compression, data: &[u8], size: usize) -> Option<Bytes> {
+        let pages: Vec<_> = data
+            .chunks(size)
+            .map(|page| BytePage::from(page.to_vec()))
+            .collect();
+        let out = enc.compress_sync(data.len(), &pages).unwrap();
+        out.map(|mut out| out.freeze())
+    }
+
+    #[test]
+    fn same_output() {
+        // as the encoders of flate2 and zstd write it
+        let zstd = |data: &[u8]| {
+            let mut enc = zstd::Encoder::new(Vec::new(), 0).unwrap();
+            enc.set_pledged_src_size(Some(data.len() as u64)).unwrap();
+            enc.set_parameter(CParameter::WindowLog(ZSTD_WINDOW_LOG))
+                .unwrap();
+            enc.write_all(data).unwrap();
+            enc.finish().unwrap()
+        };
+        let mut data = vec![b'a'; MIN_SIZE];
+        for len in [1000, 4096, 4097, 100_000, 3 * 1024 * 1024] {
+            data.push(b'b');
+            data.extend_from_slice(&text(len));
+            for size in [1, 100, 4096, usize::MAX] {
+                let data = &data[..data.len().min(size.saturating_mul(1000))];
+                let out = compress_in(Compression::Gzip, data, size).unwrap();
+                assert_eq!(out, frame(Compression::Gzip, data), "{len} {size}");
+                let out = compress_in(Compression::Zstd, data, size).unwrap();
+                assert_eq!(out, zstd(data), "{len} {size}");
+            }
+        }
+    }
+
+    #[test]
+    fn reuse() {
+        for enc in ALL {
+            clear();
+            let data = text(1000);
+            let first = compress_in(enc, &data, 100).unwrap();
+            let encoders = (kept(&GZIP_ENCODER), kept(&ZSTD_ENCODER));
+            assert_eq!(
+                encoders,
+                (enc == Compression::Gzip, enc == Compression::Zstd)
+            );
+            for _ in 0..3 {
+                assert_eq!(compress_in(enc, &data, 100).unwrap(), first, "{enc:?}");
+                // the frame is left open
+                assert!(compress_in(enc, &random(5000), 100).is_none());
+            }
+            assert_eq!(compress_in(enc, &data, 100).unwrap(), first, "{enc:?}");
+
+            for _ in 0..3 {
+                let out = enc.decompress_sync(&first, usize::MAX).unwrap();
+                assert_eq!(out, data, "{enc:?}");
+                // errors in the middle of the message
+                let half = first.slice(..first.len() / 2);
+                assert!(enc.decompress_sync(&half, usize::MAX).is_err());
+                let bad = Bytes::from([&first[..], b"abc"].concat());
+                assert!(enc.decompress_sync(&bad, usize::MAX).is_err());
+                assert!(enc.decompress_sync(&first, 10).is_err());
+            }
+            let out = enc.decompress_sync(&first, usize::MAX).unwrap();
+            assert_eq!(out, data, "{enc:?}");
+            let decoders = (kept(&GZIP_DECODER), kept(&ZSTD_DECODER));
+            assert_eq!(
+                decoders,
+                (enc == Compression::Gzip, enc == Compression::Zstd)
+            );
+        }
+        // the decoder does not keep the message
+        clear();
+        let compressed = frame(Compression::Gzip, &text(1000));
+        Compression::Gzip
+            .decompress_sync(&compressed, usize::MAX)
+            .unwrap();
+        let dec = GZIP_DECODER.take().unwrap();
+        assert!(dec.get_ref().get_ref().is_empty());
+    }
+
+    #[test]
+    fn reuse_memory() {
+        let data = text(1000);
+        for enc in ALL {
+            clear();
+            let compress = || compress_in(enc, &data, usize::MAX).unwrap();
+            // the output page is reused once it is dropped
+            let cold = counting::peak(compress).1;
+            let (compressed, warm) = counting::peak(compress);
+            let decompress = || enc.decompress_sync(&compressed, usize::MAX).unwrap();
+            let cold_dec = counting::peak(decompress).1;
+            let warm_dec = counting::peak(decompress).1;
+            assert!(warm < 2 * 1024, "{enc:?} {warm}");
+            assert!(warm_dec < 2 * 1024, "{enc:?} {warm_dec}");
+            if enc == Compression::Gzip {
+                assert!(
+                    cold > 128 * 1024 && cold_dec > 32 * 1024,
+                    "{cold} {cold_dec}"
+                );
+            }
+        }
+        // zstd allocates its contexts itself
+        let encoder = ZSTD_ENCODER.take().unwrap().sizeof();
+        let decoder = ZSTD_DECODER.take().unwrap().sizeof();
+        assert!(
+            encoder < 64 * 1024 && decoder < 128 * 1024,
+            "{encoder} {decoder}"
+        );
+    }
+
+    #[test]
+    fn reuse_limit() {
+        clear();
+        // a context that has grown is dropped
+        let data = text(64 * 1024);
+        let compressed = compress_in(Compression::Zstd, &data, usize::MAX).unwrap();
+        assert!(!kept(&ZSTD_ENCODER));
+        compress_in(Compression::Zstd, &text(8 * 1024), usize::MAX).unwrap();
+        let ctx = ZSTD_ENCODER.take().unwrap();
+        assert!(ctx.sizeof() < CONTEXT_LIMIT, "{}", ctx.sizeof());
+        ZSTD_ENCODER.set(Some(ctx));
+
+        // the message fits into the output, zstd needs no window
+        let out = Compression::Zstd
+            .decompress_sync(&compressed, usize::MAX)
+            .unwrap();
+        assert_eq!(out, data);
+        assert!(kept(&ZSTD_DECODER));
+        // it does not, the decoder buffers the window
+        let compressed = frame(Compression::Zstd, &data);
+        let out = Compression::Zstd
+            .decompress_sync(&compressed, usize::MAX)
+            .unwrap();
+        assert_eq!(out, data);
+        assert!(!kept(&ZSTD_DECODER));
+
+        // gzip contexts do not grow
+        let data = text(1024 * 1024);
+        let compressed = compress_in(Compression::Gzip, &data, usize::MAX).unwrap();
+        let out = Compression::Gzip
+            .decompress_sync(&compressed, usize::MAX)
+            .unwrap();
+        assert_eq!(out, data);
+        assert!(kept(&GZIP_ENCODER) && kept(&GZIP_DECODER));
+    }
+
+    #[test]
+    fn gzip_members() {
+        // the same as MultiGzDecoder
+        let (abc, def) = (
+            frame(Compression::Gzip, b"abc"),
+            frame(Compression::Gzip, b"def"),
+        );
+        let both = [&abc[..], &def[..]].concat();
+        let cases = [
+            Vec::new(),
+            abc.to_vec(),
+            both.clone(),
+            [&both[..], &abc[..]].concat(),
+            [&abc[..], b"x"].concat(),
+            abc[..abc.len() - 1].to_vec(),
+            both[..both.len() - 1].to_vec(),
+            [&abc[..], &[0; 10]].concat(),
+            vec![0x1f, 0x8b],
+        ];
+        let mut dec = GzDecoder::new(Cursor::default());
+        for data in cases {
+            let mut expected = Vec::new();
+            let res = flate2::bufread::MultiGzDecoder::new(&data[..]).read_to_end(&mut expected);
+            let mut out = Vec::new();
+            let data = Bytes::from(data);
+            let mut members = Members::new(&mut dec, &data);
+            match res {
+                Ok(_) => {
+                    members.read_to_end(&mut out).unwrap();
+                    assert_eq!(out, expected, "{data:?}");
+                }
+                Err(err) => {
+                    let res = members.read_to_end(&mut out).unwrap_err();
+                    assert_eq!(res.kind(), err.kind(), "{data:?}");
+                }
+            }
+        }
+        // an empty read does not move to the next member
+        let data = Bytes::from(both);
+        let mut members = Members::new(&mut dec, &data);
+        let mut out = [0; 3];
+        members.read_exact(&mut out).unwrap();
+        assert_eq!(members.read(&mut []).unwrap(), 0);
+        let mut out = Vec::new();
+        members.read_to_end(&mut out).unwrap();
+        assert_eq!(out, b"def");
     }
 
     #[test]

@@ -12,6 +12,10 @@
   and the buffer for a decompressed message is at most 64 times the size of
   the compressed one until the data arrives
 
+* Each thread keeps its gzip and zstd encoders and decoders for the next
+  message, which makes compressing a small message up to 40% faster. A zstd
+  context larger than 256 KiB is dropped. Requires flate2 1.1.3
+
 * Messages under 64 bytes, and messages that do not get smaller, are sent
   uncompressed even if the call uses compression
 

@@ -25,10 +25,12 @@ use crate::GrpcStatus;
 /// compressing and 128 KiB of compressed data when decompressing, with zstd
 /// from 512 KiB.
 ///
-/// Each thread keeps the encoder and the decoder of its last message for
-/// the next one, creating them takes as long as compressing a small
+/// Each worker thread keeps the encoder and the decoder of its last message
+/// for the next one, creating them takes as long as compressing a small
 /// message. The gzip encoder takes about 320 KiB and the decoder 43 KiB,
-/// zstd ones are kept up to 256 KiB each.
+/// zstd ones are kept up to 256 KiB each. Threads of the pool do not keep
+/// them, a large message takes as long without and the pool may run
+/// hundreds of threads.
 ///
 /// Requires the `compression` feature.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -274,6 +276,14 @@ thread_local! {
     static GZIP_DECODER: Cell<Option<GzDecoder<Cursor<Bytes>>>> = const { Cell::new(None) };
     static ZSTD_ENCODER: Cell<Option<CCtx<'static>>> = const { Cell::new(None) };
     static ZSTD_DECODER: Cell<Option<DCtx<'static>>> = const { Cell::new(None) };
+}
+
+/// Drops the contexts the thread keeps.
+fn drop_contexts() {
+    let _ = GZIP_ENCODER.try_with(Cell::take);
+    let _ = GZIP_DECODER.try_with(Cell::take);
+    let _ = ZSTD_ENCODER.try_with(Cell::take);
+    let _ = ZSTD_DECODER.try_with(Cell::take);
 }
 
 /// Runs `f` with the context the thread keeps in `key`, or with a new one.
@@ -523,7 +533,8 @@ fn zstd_read(ctx: &mut DCtx<'_>, data: &[u8], hint: usize, limit: usize) -> io::
                 == 0;
             Ok((dst.pos(), dst.pos() == dst.capacity()))
         })?;
-        if !done && src.pos() == data.len() && !full {
+        // zstd fills the output unless it has run out of input
+        if !done && !full {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "incomplete frame",
@@ -603,7 +614,12 @@ where
     if blocking {
         #[cfg(test)]
         OFFLOADED.set(OFFLOADED.get() + 1);
-        ntex_rt::spawn_blocking(f).await
+        ntex_rt::spawn_blocking(move || {
+            let res = f();
+            drop_contexts();
+            res
+        })
+        .await
     } else {
         Ok(f())
     }
@@ -833,6 +849,52 @@ mod tests {
         assert_eq!(Compression::Zstd.decompress_limit(), 512 * 1024);
     }
 
+    #[test]
+    fn pool_contexts() {
+        /// Uses every context for a small message, returns which are kept.
+        fn contexts(use_them: bool) -> [bool; 4] {
+            if use_them {
+                for enc in ALL {
+                    let data = text(1000);
+                    let compressed = compress_in(enc, &data, usize::MAX).unwrap();
+                    let out = enc.decompress_sync(&compressed, usize::MAX).unwrap();
+                    assert_eq!(out, data);
+                }
+            }
+            [
+                kept(&GZIP_ENCODER),
+                kept(&GZIP_DECODER),
+                kept(&ZSTD_ENCODER),
+                kept(&ZSTD_DECODER),
+            ]
+        }
+        ntex::rt::System::build()
+            .name("pool_contexts")
+            .testing()
+            .thread_pool_limit(1)
+            .build(ntex::rt::DefaultRuntime)
+            .block_on(async {
+                // a worker thread keeps them, the only thread of the pool
+                // drops them once the message is done
+                drop_contexts();
+                assert_eq!(contexts(true), [true; 4]);
+                assert_eq!(offload(false, || contexts(true)).await, Ok([true; 4]));
+                assert_eq!(offload(true, || contexts(true)).await, Ok([true; 4]));
+                assert_eq!(offload(true, || contexts(false)).await, Ok([false; 4]));
+                assert_eq!(contexts(false), [true; 4]);
+
+                for enc in ALL {
+                    let data = text(enc.compress_limit());
+                    assert!(offloaded(compress(enc, &data)).await.1);
+                    assert_eq!(offload(true, || contexts(false)).await, Ok([false; 4]));
+                    let large = frame(enc, &random(enc.decompress_limit()));
+                    let (res, used) = offloaded(enc.decompress(large, usize::MAX)).await;
+                    assert!(res.is_ok() && used, "{enc:?}");
+                    assert_eq!(offload(true, || contexts(false)).await, Ok([false; 4]));
+                }
+            });
+    }
+
     /// Returns the result of `f` and whether it used the thread pool.
     async fn offloaded<R>(f: impl Future<Output = R>) -> (R, bool) {
         let before = OFFLOADED.get();
@@ -966,7 +1028,7 @@ mod tests {
     fn zstd_no_size() {
         // zstd::encode_all does not store the size, a small message is
         // decoded in a single pass and the decoder stays small
-        clear();
+        drop_contexts();
         let data = text(1000);
         let compressed = frame(Compression::Zstd, &data);
         let out = Compression::Zstd
@@ -1088,7 +1150,7 @@ mod tests {
 
         // a message that compresses more than 64 times is decoded in a
         // single pass
-        clear();
+        drop_contexts();
         let data = vec![0; 1_000_000];
         let compressed = compress_in(Compression::Zstd, &data, usize::MAX).unwrap();
         assert!(compressed.len() * RESERVE_RATIO < data.len());
@@ -1116,13 +1178,6 @@ mod tests {
     }
 
     /// Drops the contexts the thread keeps.
-    fn clear() {
-        GZIP_ENCODER.take();
-        GZIP_DECODER.take();
-        ZSTD_ENCODER.take();
-        ZSTD_DECODER.take();
-    }
-
     /// Whether the thread keeps a context in `key`.
     fn kept<T>(key: &'static LocalKey<Cell<Option<T>>>) -> bool {
         let ctx = key.take();
@@ -1169,7 +1224,7 @@ mod tests {
     #[test]
     fn reuse() {
         for enc in ALL {
-            clear();
+            drop_contexts();
             let data = text(1000);
             let first = compress_in(enc, &data, 100).unwrap();
             let encoders = (kept(&GZIP_ENCODER), kept(&ZSTD_ENCODER));
@@ -1203,7 +1258,7 @@ mod tests {
             );
         }
         // the decoder does not keep the message
-        clear();
+        drop_contexts();
         let compressed = frame(Compression::Gzip, &text(1000));
         Compression::Gzip
             .decompress_sync(&compressed, usize::MAX)
@@ -1216,7 +1271,7 @@ mod tests {
     fn reuse_memory() {
         let data = text(1000);
         for enc in ALL {
-            clear();
+            drop_contexts();
             let compress = || compress_in(enc, &data, usize::MAX).unwrap();
             // the output page is reused once it is dropped
             let cold = counting::peak(compress).1;
@@ -1244,7 +1299,7 @@ mod tests {
 
     #[test]
     fn reuse_limit() {
-        clear();
+        drop_contexts();
         // a context that has grown is dropped
         let data = text(64 * 1024);
         let compressed = compress_in(Compression::Zstd, &data, usize::MAX).unwrap();

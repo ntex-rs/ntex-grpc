@@ -2,6 +2,10 @@
 
 ## [3.3.0] - Unreleased
 
+* Client rounds `grpc-timeout` up to its unit, it was rounded down so the
+  server could give up first, and caps it at `99999999H` instead of
+  panicking
+
 * Server no longer panics on a `grpc-timeout` that ends with a multi-byte
   UTF-8 character, it fails the call with `INVALID_ARGUMENT`
 

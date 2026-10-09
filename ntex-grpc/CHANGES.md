@@ -2,6 +2,10 @@
 
 ## [3.2.1] - Unreleased
 
+* `float` fields are encoded as fixed32 without a length prefix, they were not
+  readable by other protobuf implementations and `encoded_len()` was one byte
+  short per field
+
 * The length of a packed repeated field sums its values once
 
 * Server does not send a response message larger than 2 GiB - 1 and fails the

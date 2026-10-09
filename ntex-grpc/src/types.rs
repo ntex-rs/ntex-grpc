@@ -11,7 +11,7 @@ use ntex_util::hash_map::HashMap as HashMapBase;
 
 pub use crate::encoding::WireType;
 use crate::encoding::{self, DecodeError};
-pub use crate::format::{FieldFormat, Fixed, Map, MapType, Native, ZigZag};
+pub use crate::format::{FieldFormat, Fixed, Map, MapType, Native, Unpacked, ZigZag};
 
 /// Protobuf struct read/write operations
 pub trait Message: Default + Sized + fmt::Debug {
@@ -402,7 +402,8 @@ impl<T: NativeType> NativeType for Vec<T> {
         wtype: WireType,
         src: &mut Bytes,
     ) -> Result<(), DecodeError> {
-        if T::TYPE == WireType::Varint {
+        // packed and unpacked scalar fields must both be accepted
+        if T::TYPE != WireType::LengthDelimited && wtype == WireType::LengthDelimited {
             let len = encoding::decode_varint(src)? as usize;
             let mut buf = src
                 .split_to_checked(len)
@@ -425,7 +426,11 @@ impl<T: NativeType> NativeType for Vec<T> {
         if self.is_empty() {
             return;
         }
-        if T::TYPE == WireType::Varint {
+        if T::TYPE == WireType::LengthDelimited {
+            for item in self {
+                item.serialize(tag, DefaultValue::Unknown, dst);
+            }
+        } else {
             encoding::encode_key(tag, WireType::LengthDelimited, dst);
             encoding::encode_varint(
                 self.iter().map(NativeType::value_len).sum::<usize>() as u64,
@@ -433,10 +438,6 @@ impl<T: NativeType> NativeType for Vec<T> {
             );
             for item in self {
                 item.encode_value(dst);
-            }
-        } else {
-            for item in self {
-                item.serialize(tag, DefaultValue::Unknown, dst);
             }
         }
     }
@@ -448,11 +449,11 @@ impl<T: NativeType> NativeType for Vec<T> {
 
     /// Protobuf field length
     fn encoded_len(&self, tag: u32) -> usize {
-        if T::TYPE == WireType::Varint {
+        if T::TYPE == WireType::LengthDelimited {
+            self.iter().map(|value| value.encoded_len(tag)).sum()
+        } else {
             let len = self.iter().map(NativeType::value_len).sum::<usize>();
             len + encoding::key_len(tag) + encoding::encoded_len_varint(len as u64)
-        } else {
-            self.iter().map(|value| value.encoded_len(tag)).sum()
         }
     }
 }
@@ -833,19 +834,50 @@ mod tests {
         assert_eq!(NativeType::value_len(&1.5_f64), 8);
         assert_eq!(NativeType::value_len(&1.5_f32), 4);
 
-        // repeated fixed width fields are not packed
+        // repeated fixed width fields are packed
         let v = vec![1.5_f32, -1.5];
-        let expected = [0x0d, 0, 0, 0xc0, 0x3f, 0x0d, 0, 0, 0xc0, 0xbf];
+        let expected = [0x0a, 0x08, 0, 0, 0xc0, 0x3f, 0, 0, 0xc0, 0xbf];
         assert_eq!(encode(&v, 1, DefaultValue::Default).as_ref(), &expected);
         assert_eq!(v.serialized_len(1, DefaultValue::Default), expected.len());
+        assert_eq!(decode_repeated::<f32>(&expected).unwrap(), v);
 
-        let mut src = Bytes::copy_from_slice(&expected);
-        let mut decoded = Vec::<f32>::new();
+        // unpacked and mixed input
+        let unpacked = [0x0d, 0, 0, 0xc0, 0x3f, 0x0d, 0, 0, 0xc0, 0xbf];
+        assert_eq!(decode_repeated::<f32>(&unpacked).unwrap(), v);
+        let mixed = [
+            0x09, 0, 0, 0, 0, 0, 0, 0xf8, 0x3f, 0x0a, 0x08, 0, 0, 0, 0, 0, 0, 0xf8, 0xbf,
+        ];
+        assert_eq!(decode_repeated::<f64>(&mixed).unwrap(), [1.5, -1.5]);
+
+        // wrong wire type and truncated packed value
+        assert!(decode_repeated::<f32>(&[0x08, 0x01]).is_err());
+        assert!(decode_repeated::<f64>(&[0x0d, 0, 0, 0, 0]).is_err());
+        assert!(decode_repeated::<f32>(&[0x0a, 0x03, 0, 0, 0]).is_err());
+    }
+
+    fn decode_repeated<T: NativeType>(bytes: &[u8]) -> Result<Vec<T>, DecodeError> {
+        let mut src = Bytes::copy_from_slice(bytes);
+        let mut decoded = Vec::<T>::new();
         while !src.is_empty() {
-            let (tag, wire_type) = encoding::decode_key(&mut src).unwrap();
-            decoded.deserialize(tag, wire_type, &mut src).unwrap();
+            let (tag, wire_type) = encoding::decode_key(&mut src)?;
+            decoded.deserialize(tag, wire_type, &mut src)?;
         }
-        assert_eq!(decoded, v);
+        Ok(decoded)
+    }
+
+    #[test]
+    fn repeated_varint_unpacked() {
+        // unpacked and mixed input of packed fields
+        assert_eq!(
+            decode_repeated::<u32>(&[0x08, 0x01, 0x0a, 0x02, 0x02, 0x03, 0x08, 0x04]).unwrap(),
+            [1, 2, 3, 4]
+        );
+        assert_eq!(
+            decode_repeated::<bool>(&[0x08, 0x01, 0x08, 0x00]).unwrap(),
+            [true, false]
+        );
+        assert!(decode_repeated::<i64>(&[0x0d, 0, 0, 0, 0]).is_err());
+        assert!(decode_repeated::<i64>(&[0x08, 0xff]).is_err());
     }
 
     #[test]

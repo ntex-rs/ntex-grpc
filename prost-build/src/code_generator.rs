@@ -993,10 +993,32 @@ impl CodeGenerator<'_> {
 
     /// Path prefix of the encoding functions for a field
     fn field_ops(&self, fq_message_name: &str, field: &FieldDescriptorProto) -> String {
-        match self.field_format(field, fq_message_name) {
+        let format = self.field_format(field, fq_message_name);
+        if self.unpacked(field) {
+            return format!(
+                "<::ntex_grpc::types::Unpacked<{}> as ::ntex_grpc::types::FieldFormat<_>>::",
+                format.unwrap_or("::ntex_grpc::types::Native")
+            );
+        }
+        match format {
             Some(format) => format!("<{format} as ::ntex_grpc::types::FieldFormat<_>>::"),
             None => "::ntex_grpc::NativeType::".to_string(),
         }
+    }
+
+    /// Repeated scalar field written unpacked. Scalar fields are packed by
+    /// default in proto3 and unpacked in proto2, the `packed` option overrides it.
+    fn unpacked(&self, field: &FieldDescriptorProto) -> bool {
+        field.label() == Label::Repeated
+            && !matches!(
+                field.r#type(),
+                Type::String | Type::Bytes | Type::Message | Type::Group
+            )
+            && !field
+                .options
+                .as_ref()
+                .and_then(|opts| opts.packed)
+                .unwrap_or(self.syntax == Syntax::Proto3)
     }
 
     /// Path prefix of the encoding functions for a map field

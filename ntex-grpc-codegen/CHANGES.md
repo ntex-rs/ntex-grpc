@@ -10,6 +10,9 @@
   encoding, they were encoded as varints. Regenerate code for protos with
   `fixed` fields
 
+* Repeated scalar fields of `proto2` files and fields with `[packed = false]`
+  are written unpacked
+
 * Fix multi-line service and method comments being joined into one doc line
 
 * Fence code examples from proto comments, so rustdoc does not run them as Rust doctests

@@ -8,6 +8,12 @@
 * Add `types::Fixed` format, used by generated code for `fixed32`, `fixed64`,
   `sfixed32` and `sfixed64` fields
 
+* Repeated scalar fields accept both packed and unpacked input, repeated
+  `float` and `double` fields are written packed
+
+* Add `types::Unpacked` format, used by generated code for unpacked repeated
+  scalar fields
+
 * `float` fields are encoded as fixed32 without a length prefix, they were not
   readable by other protobuf implementations and `encoded_len()` was one byte
   short per field

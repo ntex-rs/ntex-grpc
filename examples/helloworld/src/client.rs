@@ -54,7 +54,7 @@ fn main() {
                                 .say_hello(&HelloRequest {
                                     name: "world".into(),
                                     data1: vec![-234234234, 123412414, 45456],
-                                    data2: vec![helloworld::DocumentType::Namespace],
+                                    data2: vec![helloworld::DocumentType::Namespace.into()],
                                 })
                                 .send()
                                 .await
@@ -69,7 +69,7 @@ fn main() {
                         .say_hello(&HelloRequest {
                             name: "world".into(),
                             data1: vec![-234234234, 123412414, 45456],
-                            data2: vec![helloworld::DocumentType::Namespace],
+                            data2: vec![helloworld::DocumentType::Namespace.into()],
                         })
                         .send()
                         .await

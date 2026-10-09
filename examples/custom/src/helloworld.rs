@@ -37,7 +37,7 @@ pub enum GreeterMethods {
     SayHello(GreeterSayHelloMethod),
 }
 
-/// The greeting service definition.
+///  The greeting service definition.
 #[derive(Debug, Clone)]
 pub struct GreeterClient<T>(T);
 
@@ -76,21 +76,30 @@ mod _priv_impl_helloworld {
         fn read(
             src: &mut ::ntex_grpc::Bytes,
         ) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {
-            const STRUCT_NAME: &str = "HelloRequest";
             let mut msg = Self::default();
+            ::ntex_grpc::Message::merge_from(&mut msg, src)?;
+            Ok(msg)
+        }
+
+        #[inline]
+        fn merge_from(
+            &mut self,
+            src: &mut ::ntex_grpc::Bytes,
+        ) -> ::std::result::Result<(), ::ntex_grpc::DecodeError> {
+            const STRUCT_NAME: &str = "HelloRequest";
             while !src.is_empty() {
                 let (tag, wire_type) = ::ntex_grpc::encoding::decode_key(src)?;
                 match tag {
-                    1 => ::ntex_grpc::NativeType::deserialize(&mut msg.name, tag, wire_type, src)
+                    1 => ::ntex_grpc::NativeType::deserialize(&mut self.name, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, "name"))?,
                     2 => {
-                        ::ntex_grpc::NativeType::deserialize(&mut msg.msg_id, tag, wire_type, src)
+                        ::ntex_grpc::NativeType::deserialize(&mut self.msg_id, tag, wire_type, src)
                             .map_err(|err| err.push(STRUCT_NAME, "msg_id"))?
                     }
                     _ => ::ntex_grpc::encoding::skip_field(wire_type, tag, src)?,
                 }
             }
-            Ok(msg)
+            Ok(())
         }
 
         #[inline]
@@ -132,19 +141,31 @@ mod _priv_impl_helloworld {
         fn read(
             src: &mut ::ntex_grpc::Bytes,
         ) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {
-            const STRUCT_NAME: &str = "HelloReply";
             let mut msg = Self::default();
+            ::ntex_grpc::Message::merge_from(&mut msg, src)?;
+            Ok(msg)
+        }
+
+        #[inline]
+        fn merge_from(
+            &mut self,
+            src: &mut ::ntex_grpc::Bytes,
+        ) -> ::std::result::Result<(), ::ntex_grpc::DecodeError> {
+            const STRUCT_NAME: &str = "HelloReply";
             while !src.is_empty() {
                 let (tag, wire_type) = ::ntex_grpc::encoding::decode_key(src)?;
                 match tag {
-                    1 => {
-                        ::ntex_grpc::NativeType::deserialize(&mut msg.message, tag, wire_type, src)
-                            .map_err(|err| err.push(STRUCT_NAME, "message"))?
-                    }
+                    1 => ::ntex_grpc::NativeType::deserialize(
+                        &mut self.message,
+                        tag,
+                        wire_type,
+                        src,
+                    )
+                    .map_err(|err| err.push(STRUCT_NAME, "message"))?,
                     _ => ::ntex_grpc::encoding::skip_field(wire_type, tag, src)?,
                 }
             }
-            Ok(msg)
+            Ok(())
         }
 
         #[inline]
@@ -217,7 +238,7 @@ mod _priv_impl_helloworld {
     }
 
     impl<T: ::ntex_grpc::client::Transport<GreeterSayHelloMethod>> GreeterClient<T> {
-        /// Sends a greeting
+        ///  Sends a greeting
         pub fn say_hello<'a>(
             &'a self,
             req: &'a super::HelloRequest,

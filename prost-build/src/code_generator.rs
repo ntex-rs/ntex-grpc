@@ -1090,7 +1090,7 @@ impl CodeGenerator<'_> {
         }
 
         match field.r#type() {
-            Type::Message => false,
+            Type::Message => true,
             _ => self.syntax == Syntax::Proto2,
         }
     }

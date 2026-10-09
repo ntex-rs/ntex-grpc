@@ -248,25 +248,47 @@ pub fn check_wire_type(expected: WireType, actual: WireType) -> Result<(), Decod
     Ok(())
 }
 
+/// Groups nested deeper than this inside a group fail to decode, the
+/// default recursion limit of protobuf implementations.
+const GROUP_DEPTH_LIMIT: usize = 100;
+
 /// Splits the body of a group off the buffer.
 ///
 /// The buffer must start right after the start group key with the given tag.
 /// Returns the fields between the keys and advances the buffer past the
-/// matching end group key.
+/// matching end group key. Groups nested more than 100 levels deep in the
+/// body fail.
 pub fn split_group(tag: u32, buf: &mut Bytes) -> Result<Bytes, DecodeError> {
+    // tags of the open nested groups, a loop instead of recursion keeps
+    // deeply nested input from overflowing the stack
+    let mut open = [0u32; GROUP_DEPTH_LIMIT];
+    let mut depth = 0;
     let mut rest = buf.clone();
     loop {
         let body_len = buf.len() - rest.len();
         let (inner_tag, inner_wire_type) = decode_key(&mut rest)?;
-        if inner_wire_type == WireType::EndGroup {
-            if inner_tag != tag {
-                return Err(DecodeError::new("unexpected end group tag"));
+        match inner_wire_type {
+            WireType::StartGroup => {
+                if depth == GROUP_DEPTH_LIMIT {
+                    return Err(DecodeError::new("groups nested too deeply"));
+                }
+                open[depth] = inner_tag;
+                depth += 1;
             }
-            let body = buf.split_to(body_len);
-            *buf = rest;
-            return Ok(body);
+            WireType::EndGroup => {
+                let expected = if depth == 0 { tag } else { open[depth - 1] };
+                if inner_tag != expected {
+                    return Err(DecodeError::new("unexpected end group tag"));
+                }
+                if depth == 0 {
+                    let body = buf.split_to(body_len);
+                    *buf = rest;
+                    return Ok(body);
+                }
+                depth -= 1;
+            }
+            _ => skip_field(inner_wire_type, inner_tag, &mut rest)?,
         }
-        skip_field(inner_wire_type, inner_tag, &mut rest)?;
     }
 }
 
@@ -572,6 +594,41 @@ mod tests {
         let mut buf = Bytes::from_static(&[0x08, 0x01, 0x14]);
         assert!(split_group(3, &mut buf).is_err());
         assert_eq!(buf.len(), 3);
+    }
+
+    fn nested_groups(depth: usize) -> Bytes {
+        let mut buf = BytePages::default();
+        for _ in 0..depth {
+            encode_key(5, WireType::StartGroup, &mut buf);
+        }
+        for _ in 0..depth {
+            encode_key(5, WireType::EndGroup, &mut buf);
+        }
+        encode_key(3, WireType::EndGroup, &mut buf);
+        buf.freeze()
+    }
+
+    #[test]
+    fn group_depth_limit() {
+        let mut buf = nested_groups(GROUP_DEPTH_LIMIT);
+        skip_field(WireType::StartGroup, 3, &mut buf).unwrap();
+        assert!(buf.is_empty());
+
+        let mut buf = nested_groups(GROUP_DEPTH_LIMIT + 1);
+        let err = skip_field(WireType::StartGroup, 3, &mut buf).unwrap_err();
+        assert!(err.to_string().contains("groups nested too deeply"));
+
+        // no recursion, deep input does not overflow the stack
+        let mut buf = nested_groups(100_000);
+        assert!(split_group(3, &mut buf).is_err());
+
+        // nested end group tag must match its start group
+        let mut buf = BytePages::default();
+        encode_key(5, WireType::StartGroup, &mut buf);
+        encode_key(6, WireType::EndGroup, &mut buf);
+        encode_key(3, WireType::EndGroup, &mut buf);
+        let err = split_group(3, &mut buf.freeze()).unwrap_err();
+        assert!(err.to_string().contains("unexpected end group tag"));
     }
 
     #[test]

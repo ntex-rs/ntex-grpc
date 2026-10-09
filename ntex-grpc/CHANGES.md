@@ -24,6 +24,9 @@
 * A zstd message that compresses more than 64 times is decoded in a single
   pass, the size its frame stores is trusted as far as its blocks can hold
 
+* The first chunk of a message that arrives in several frames is copied once,
+  straight into a buffer sized for the message
+
 * Messages under 64 bytes, and messages that do not get smaller, are sent
   uncompressed even if the call uses compression
 

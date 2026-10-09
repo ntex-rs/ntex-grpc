@@ -50,18 +50,28 @@ impl Data {
         if data.is_empty() {
             return;
         }
-        let mut buf = match mem::replace(self, Data::Empty) {
-            Data::Chunk(cur) => BytesMut::from(cur),
-            Data::MutChunk(buf) => buf,
+        let buf = match mem::replace(self, Data::Empty) {
+            Data::Chunk(cur) => {
+                // the first chunk is copied once, into a buffer for the message
+                let len = cur.len() + data.len();
+                let size = message_size(&cur, &data, limit).map_or(len, |s| s.max(len));
+                let mut buf = BytesMut::with_capacity(size);
+                buf.extend_from_slice(&cur);
+                buf.extend_from_slice(&data);
+                buf
+            }
+            Data::MutChunk(mut buf) => {
+                if let Some(size) = message_size(&buf, &data, limit) {
+                    buf.reserve_exact(size.saturating_sub(buf.len()));
+                }
+                buf.extend_from_slice(&data);
+                buf
+            }
             Data::Empty => {
                 *self = Data::Chunk(data);
                 return;
             }
         };
-        if let Some(size) = message_size(&buf, &data, limit) {
-            buf.reserve_exact(size.saturating_sub(buf.len()));
-        }
-        buf.extend_from_slice(&data);
         *self = Data::MutChunk(buf);
     }
 }
@@ -267,6 +277,7 @@ mod tests {
         let mut data = Data::Empty;
         push(&mut data, &msg[..10]);
         push(&mut data, &msg[10..]);
+        assert_eq!(capacity(&data), 125);
         assert_eq!(data.get(), msg);
     }
 

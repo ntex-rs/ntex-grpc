@@ -201,19 +201,31 @@ fn duration_into_std() {
 }
 
 #[test]
-fn duration_subsecond_negative_into_std_wraps_around() {
-    // BUG: a negative duration smaller than a second keeps `seconds == 0` after
-    // normalize(), so the conversion takes the non-negative branch and the
-    // negative `nanos` wrap around into a large positive value instead of
-    // producing a NegativeDurationError.
-    assert_eq!(
-        time::Duration::try_from(Duration {
-            seconds: 0,
-            nanos: -1
-        })
-        .unwrap(),
-        time::Duration::new(4, 294_967_295)
-    );
+fn duration_negative_into_std() {
+    // smaller than a second, seconds stays zero
+    let err = time::Duration::try_from(Duration {
+        seconds: 0,
+        nanos: -1,
+    })
+    .unwrap_err();
+    assert_eq!(err.0, time::Duration::new(0, 1));
+    assert_eq!(err.to_string(), "Duration is negative: -1ns");
+
+    // seconds and nanos with different signs
+    let err = time::Duration::try_from(Duration {
+        seconds: 1,
+        nanos: -1_500_000_000,
+    })
+    .unwrap_err();
+    assert_eq!(err.0, time::Duration::new(0, 500_000_000));
+
+    // the smallest duration does not overflow
+    let err = time::Duration::try_from(Duration {
+        seconds: i64::MIN,
+        nanos: -999_999_999,
+    })
+    .unwrap_err();
+    assert_eq!(err.0, time::Duration::new(1 << 63, 999_999_999));
 }
 
 #[test]

@@ -248,24 +248,35 @@ pub fn check_wire_type(expected: WireType, actual: WireType) -> Result<(), Decod
     Ok(())
 }
 
+/// Splits the body of a group off the buffer.
+///
+/// The buffer must start right after the start group key with the given tag.
+/// Returns the fields between the keys and advances the buffer past the
+/// matching end group key.
+pub fn split_group(tag: u32, buf: &mut Bytes) -> Result<Bytes, DecodeError> {
+    let mut rest = buf.clone();
+    loop {
+        let body_len = buf.len() - rest.len();
+        let (inner_tag, inner_wire_type) = decode_key(&mut rest)?;
+        if inner_wire_type == WireType::EndGroup {
+            if inner_tag != tag {
+                return Err(DecodeError::new("unexpected end group tag"));
+            }
+            let body = buf.split_to(body_len);
+            *buf = rest;
+            return Ok(body);
+        }
+        skip_field(inner_wire_type, inner_tag, &mut rest)?;
+    }
+}
+
 pub fn skip_field(wire_type: WireType, tag: u32, buf: &mut Bytes) -> Result<(), DecodeError> {
     let len = match wire_type {
         WireType::Varint => decode_varint(buf).map(|_| 0)?,
         WireType::ThirtyTwoBit => 4,
         WireType::SixtyFourBit => 8,
         WireType::LengthDelimited => decode_varint(buf)?,
-        WireType::StartGroup => loop {
-            let (inner_tag, inner_wire_type) = decode_key(buf)?;
-            match inner_wire_type {
-                WireType::EndGroup => {
-                    if inner_tag != tag {
-                        return Err(DecodeError::new("unexpected end group tag"));
-                    }
-                    break 0;
-                }
-                _ => skip_field(inner_wire_type, inner_tag, buf)?,
-            }
-        },
+        WireType::StartGroup => split_group(tag, buf).map(|_| 0)?,
         WireType::EndGroup => return Err(DecodeError::new("unexpected end group tag")),
     };
 
@@ -534,6 +545,33 @@ mod tests {
         let mut buf = buf.freeze();
         skip_field(WireType::StartGroup, 3, &mut buf).unwrap();
         assert_eq!(buf, Bytes::from_static(&[0xff]));
+    }
+
+    #[test]
+    fn split_group_body() {
+        // group 3 { field 1 varint; group 2 { } } followed by 0xff
+        let mut buf = BytePages::default();
+        encode_key(1, WireType::Varint, &mut buf);
+        encode_varint(1, &mut buf);
+        encode_key(2, WireType::StartGroup, &mut buf);
+        encode_key(2, WireType::EndGroup, &mut buf);
+        encode_key(3, WireType::EndGroup, &mut buf);
+        buf.extend_from_slice(&[0xff]);
+
+        let mut buf = buf.freeze();
+        let body = split_group(3, &mut buf).unwrap();
+        assert_eq!(body, Bytes::from_static(&[0x08, 0x01, 0x13, 0x14]));
+        assert_eq!(buf, Bytes::from_static(&[0xff]));
+
+        // empty group
+        let mut buf = Bytes::from_static(&[0x1c]);
+        assert!(split_group(3, &mut buf).unwrap().is_empty());
+        assert!(buf.is_empty());
+
+        // buffer is not advanced on error
+        let mut buf = Bytes::from_static(&[0x08, 0x01, 0x14]);
+        assert!(split_group(3, &mut buf).is_err());
+        assert_eq!(buf.len(), 3);
     }
 
     #[test]

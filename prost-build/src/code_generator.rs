@@ -497,10 +497,6 @@ impl CodeGenerator<'_> {
     }
 
     fn append_field(&mut self, fq_message_name: &str, field: FieldDescriptorProto) {
-        let type_ = field.r#type();
-        if type_ == Type::Group {
-            panic!("protobuf group is not supported: {}", field.name());
-        }
         let repeated = field.label == Some(Label::Repeated as i32);
         let optional = self.optional(&field);
         let ty = self.resolve_type(&field, fq_message_name);
@@ -1177,6 +1173,7 @@ impl CodeGenerator<'_> {
             Type::Fixed32 | Type::Fixed64 | Type::Sfixed32 | Type::Sfixed64 => {
                 Some("::ntex_grpc::types::Fixed")
             }
+            Type::Group => Some("::ntex_grpc::types::Group"),
             _ => None,
         }
     }

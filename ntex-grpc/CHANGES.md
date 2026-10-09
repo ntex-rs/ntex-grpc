@@ -2,6 +2,9 @@
 
 ## [3.3.0] - Unreleased
 
+* Support proto2 `group` fields, codegen panicked on them. Add the
+  `types::Group` field format and `encoding::split_group()`
+
 * Add `encode_grpc_message()`, percent-encodes a `grpc-message` value
 
 * Server and `#[server]` percent-encode the request data they put in a

@@ -113,19 +113,28 @@ mod _priv_impl_duration {
 
         #[inline]
         fn read(src: &mut crate::Bytes) -> ::std::result::Result<Self, crate::DecodeError> {
-            const STRUCT_NAME: &str = "Duration";
             let mut msg = Self::default();
+            crate::Message::merge_from(&mut msg, src)?;
+            Ok(msg)
+        }
+
+        #[inline]
+        fn merge_from(
+            &mut self,
+            src: &mut crate::Bytes,
+        ) -> ::std::result::Result<(), crate::DecodeError> {
+            const STRUCT_NAME: &str = "Duration";
             while !src.is_empty() {
                 let (tag, wire_type) = crate::encoding::decode_key(src)?;
                 match tag {
-                    1 => crate::NativeType::deserialize(&mut msg.seconds, tag, wire_type, src)
+                    1 => crate::NativeType::deserialize(&mut self.seconds, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, "seconds"))?,
-                    2 => crate::NativeType::deserialize(&mut msg.nanos, tag, wire_type, src)
+                    2 => crate::NativeType::deserialize(&mut self.nanos, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, "nanos"))?,
                     _ => crate::encoding::skip_field(wire_type, tag, src)?,
                 }
             }
-            Ok(msg)
+            Ok(())
         }
 
         #[inline]

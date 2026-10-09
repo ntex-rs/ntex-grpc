@@ -18,6 +18,16 @@ pub trait Message: Default + Sized + fmt::Debug {
     /// Decodes an instance of the message from a buffer
     fn read(src: &mut Bytes) -> Result<Self, DecodeError>;
 
+    /// Decodes a message from a buffer and merges it into `self`.
+    ///
+    /// Singular scalar fields are replaced, repeated fields are appended and
+    /// message fields are merged recursively. The default implementation
+    /// replaces `self` with the decoded message.
+    fn merge_from(&mut self, src: &mut Bytes) -> Result<(), DecodeError> {
+        *self = Self::read(src)?;
+        Ok(())
+    }
+
     /// Encodes and writes the message to a buffer
     fn write(&self, dst: &mut BytePages);
 
@@ -171,8 +181,7 @@ impl<T: Message + PartialEq> NativeType for T {
 
     /// Deserialize from the input
     fn merge(&mut self, src: &mut Bytes) -> Result<(), DecodeError> {
-        *self = Message::read(src)?;
-        Ok(())
+        Message::merge_from(self, src)
     }
 }
 
@@ -324,10 +333,14 @@ impl<T: NativeType> NativeType for Option<T> {
         wtype: WireType,
         src: &mut Bytes,
     ) -> Result<(), DecodeError> {
-        let mut value: T = Default::default();
-        value.deserialize(tag, wtype, src)?;
-        *self = Some(value);
-        Ok(())
+        if let Some(value) = self {
+            value.deserialize(tag, wtype, src)
+        } else {
+            let mut value: T = Default::default();
+            value.deserialize(tag, wtype, src)?;
+            *self = Some(value);
+            Ok(())
+        }
     }
 
     #[inline]
@@ -878,6 +891,52 @@ mod tests {
         );
         assert!(decode_repeated::<i64>(&[0x0d, 0, 0, 0, 0]).is_err());
         assert!(decode_repeated::<i64>(&[0x08, 0xff]).is_err());
+    }
+
+    #[test]
+    fn message_merge() {
+        use crate::google_types::Duration;
+
+        let mut d = Duration::read(&mut Bytes::from_static(&[0x08, 0x05])).unwrap();
+        d.merge_from(&mut Bytes::from_static(&[0x10, 0x07]))
+            .unwrap();
+        assert_eq!(
+            d,
+            Duration {
+                seconds: 5,
+                nanos: 7
+            }
+        );
+
+        // repeated singular message field is merged, scalar fields are replaced
+        let mut src =
+            Bytes::from_static(&[0x0a, 0x04, 0x08, 0x05, 0x10, 0x01, 0x0a, 0x02, 0x10, 0x07]);
+        let mut v: Option<Duration> = None;
+        while !src.is_empty() {
+            let (tag, wtype) = encoding::decode_key(&mut src).unwrap();
+            v.deserialize(tag, wtype, &mut src).unwrap();
+        }
+        assert_eq!(
+            v,
+            Some(Duration {
+                seconds: 5,
+                nanos: 7
+            })
+        );
+
+        // `merge` of a message field merges as well
+        let mut d = Duration {
+            seconds: 3,
+            nanos: 0,
+        };
+        NativeType::merge(&mut d, &mut Bytes::from_static(&[0x10, 0x09])).unwrap();
+        assert_eq!(
+            d,
+            Duration {
+                seconds: 3,
+                nanos: 9
+            }
+        );
     }
 
     #[test]

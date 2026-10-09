@@ -13,12 +13,12 @@ use ntex_bytes::{Buf, BufMut, BytePages, Bytes};
 use ntex_util::hash_map::HashMap as HashMapBase;
 
 use crate::encoding::{self, DecodeError, WireType};
-use crate::types::{DefaultValue, NativeType};
+use crate::types::{DefaultValue, Message, NativeType};
 
 /// Encoding of a protobuf field of type `T`.
 ///
-/// Implemented by marker types: [`Native`], [`ZigZag`], [`Fixed`], [`Unpacked`]
-/// and [`Map`].
+/// Implemented by marker types: [`Native`], [`ZigZag`], [`Fixed`], [`Unpacked`],
+/// [`Map`] and [`Group`].
 pub trait FieldFormat<T> {
     /// Serialize protobuf field
     fn serialize(value: &T, tag: u32, default: DefaultValue<&T>, dst: &mut BytePages);
@@ -351,6 +351,104 @@ where
         src: &mut Bytes,
     ) -> Result<(), DecodeError> {
         <F as FieldFormat<Vec<T>>>::deserialize(value, tag, wtype, src)
+    }
+}
+
+/// Group encoding of proto2 `group` fields.
+///
+/// The message is written between a start group and an end group key with
+/// the field tag, without a length prefix. Supports messages, `Option` and
+/// `Vec` of them.
+#[derive(Copy, Clone, Debug)]
+pub struct Group;
+
+impl Group {
+    fn write<T: Message>(value: &T, tag: u32, dst: &mut BytePages) {
+        encoding::encode_key(tag, WireType::StartGroup, dst);
+        value.write(dst);
+        encoding::encode_key(tag, WireType::EndGroup, dst);
+    }
+
+    fn len<T: Message>(value: &T, tag: u32) -> usize {
+        2 * encoding::key_len(tag) + value.encoded_len()
+    }
+
+    fn merge<T: Message>(
+        value: &mut T,
+        tag: u32,
+        wtype: WireType,
+        src: &mut Bytes,
+    ) -> Result<(), DecodeError> {
+        encoding::check_wire_type(WireType::StartGroup, wtype)?;
+        let mut body = encoding::split_group(tag, src)?;
+        value.merge_from(&mut body)
+    }
+}
+
+impl<T: Message> FieldFormat<T> for Group {
+    #[inline]
+    fn serialize(value: &T, tag: u32, _: DefaultValue<&T>, dst: &mut BytePages) {
+        Group::write(value, tag, dst);
+    }
+
+    #[inline]
+    fn serialized_len(value: &T, tag: u32, _: DefaultValue<&T>) -> usize {
+        Group::len(value, tag)
+    }
+
+    #[inline]
+    fn deserialize(
+        value: &mut T,
+        tag: u32,
+        wtype: WireType,
+        src: &mut Bytes,
+    ) -> Result<(), DecodeError> {
+        Group::merge(value, tag, wtype, src)
+    }
+}
+
+impl<T: Message> FieldFormat<Option<T>> for Group {
+    fn serialize(value: &Option<T>, tag: u32, _: DefaultValue<&Option<T>>, dst: &mut BytePages) {
+        if let Some(value) = value {
+            Group::write(value, tag, dst);
+        }
+    }
+
+    fn serialized_len(value: &Option<T>, tag: u32, _: DefaultValue<&Option<T>>) -> usize {
+        value.as_ref().map_or(0, |value| Group::len(value, tag))
+    }
+
+    fn deserialize(
+        value: &mut Option<T>,
+        tag: u32,
+        wtype: WireType,
+        src: &mut Bytes,
+    ) -> Result<(), DecodeError> {
+        Group::merge(value.get_or_insert_with(T::default), tag, wtype, src)
+    }
+}
+
+impl<T: Message> FieldFormat<Vec<T>> for Group {
+    fn serialize(value: &Vec<T>, tag: u32, _: DefaultValue<&Vec<T>>, dst: &mut BytePages) {
+        for item in value {
+            Group::write(item, tag, dst);
+        }
+    }
+
+    fn serialized_len(value: &Vec<T>, tag: u32, _: DefaultValue<&Vec<T>>) -> usize {
+        value.iter().map(|item| Group::len(item, tag)).sum()
+    }
+
+    fn deserialize(
+        value: &mut Vec<T>,
+        tag: u32,
+        wtype: WireType,
+        src: &mut Bytes,
+    ) -> Result<(), DecodeError> {
+        let mut item = T::default();
+        Group::merge(&mut item, tag, wtype, src)?;
+        value.push(item);
+        Ok(())
     }
 }
 
@@ -806,5 +904,110 @@ mod tests {
         assert_eq!(write::<F, _>(&vec![-1i32, 0], DefaultValue::Default), bytes);
         assert_eq!(read::<F, Vec<i32>>(&bytes).unwrap(), [-1, 0]);
         assert!(read::<F, Vec<i32>>(&[0x08, 0x01]).is_err());
+    }
+
+    #[derive(Default, Debug, PartialEq)]
+    struct Msg {
+        a: u32,
+        b: u32,
+    }
+
+    impl Message for Msg {
+        fn read(src: &mut Bytes) -> Result<Self, DecodeError> {
+            let mut msg = Self::default();
+            msg.merge_from(src)?;
+            Ok(msg)
+        }
+
+        fn merge_from(&mut self, src: &mut Bytes) -> Result<(), DecodeError> {
+            while !src.is_empty() {
+                let (tag, wtype) = encoding::decode_key(src)?;
+                match tag {
+                    1 => self.a.deserialize(tag, wtype, src)?,
+                    2 => self.b.deserialize(tag, wtype, src)?,
+                    _ => encoding::skip_field(wtype, tag, src)?,
+                }
+            }
+            Ok(())
+        }
+
+        fn write(&self, dst: &mut BytePages) {
+            self.a.serialize(1, DefaultValue::Default, dst);
+            self.b.serialize(2, DefaultValue::Default, dst);
+        }
+
+        fn encoded_len(&self) -> usize {
+            self.a.serialized_len(1, DefaultValue::Default)
+                + self.b.serialized_len(2, DefaultValue::Default)
+        }
+    }
+
+    #[test]
+    fn group() {
+        let msg = Msg { a: 5, b: 0 };
+        let bytes = [0x0b, 0x08, 0x05, 0x0c];
+        assert_eq!(write::<Group, _>(&msg, DefaultValue::Default), bytes);
+        assert_eq!(read::<Group, Msg>(&bytes).unwrap(), msg);
+
+        // an empty group is still written
+        let empty = [0x0b, 0x0c];
+        assert_eq!(
+            write::<Group, _>(&Msg::default(), DefaultValue::Default),
+            empty
+        );
+        assert_eq!(read::<Group, Msg>(&empty).unwrap(), Msg::default());
+
+        // a second occurrence is merged
+        let bytes = [0x0b, 0x08, 0x05, 0x0c, 0x0b, 0x10, 0x07, 0x0c];
+        assert_eq!(read::<Group, Msg>(&bytes).unwrap(), Msg { a: 5, b: 7 });
+
+        // unknown fields and nested unknown groups are skipped
+        let bytes = [0x0b, 0x1b, 0x08, 0x01, 0x1c, 0x08, 0x05, 0x0c];
+        assert_eq!(read::<Group, Msg>(&bytes).unwrap(), Msg { a: 5, b: 0 });
+
+        let boxed = Box::new(Msg { a: 1, b: 2 });
+        let bytes = [0x0b, 0x08, 0x01, 0x10, 0x02, 0x0c];
+        assert_eq!(write::<Group, _>(&boxed, DefaultValue::Default), bytes);
+        assert_eq!(read::<Group, Box<Msg>>(&bytes).unwrap(), boxed);
+    }
+
+    #[test]
+    fn group_option() {
+        assert!(write::<Group, Option<Msg>>(&None, DefaultValue::Default).is_empty());
+        let value = Some(Msg::default());
+        let bytes = [0x0b, 0x0c];
+        assert_eq!(write::<Group, _>(&value, DefaultValue::Default), bytes);
+        assert_eq!(read::<Group, Option<Msg>>(&bytes).unwrap(), value);
+
+        let bytes = [0x0b, 0x08, 0x05, 0x0c, 0x0b, 0x10, 0x07, 0x0c];
+        assert_eq!(
+            read::<Group, Option<Msg>>(&bytes).unwrap(),
+            Some(Msg { a: 5, b: 7 })
+        );
+    }
+
+    #[test]
+    fn group_repeated() {
+        assert!(write::<Group, Vec<Msg>>(&vec![], DefaultValue::Default).is_empty());
+        let value = vec![Msg { a: 5, b: 0 }, Msg::default()];
+        let bytes = [0x0b, 0x08, 0x05, 0x0c, 0x0b, 0x0c];
+        assert_eq!(write::<Group, _>(&value, DefaultValue::Default), bytes);
+        assert_eq!(read::<Group, Vec<Msg>>(&bytes).unwrap(), value);
+    }
+
+    #[test]
+    fn group_errors() {
+        // length delimited instead of a group
+        let err = read::<Group, Msg>(&[0x0a, 0x00]).unwrap_err();
+        assert!(err.to_string().contains("invalid wire type"));
+        // end group without a start
+        assert!(read::<Group, Msg>(&[0x0c]).is_err());
+        // end group key with another tag
+        let err = read::<Group, Msg>(&[0x0b, 0x14]).unwrap_err();
+        assert!(err.to_string().contains("unexpected end group tag"));
+        // no end group key
+        assert!(read::<Group, Msg>(&[0x0b, 0x08, 0x05]).is_err());
+        assert!(read::<Group, Option<Msg>>(&[0x0b]).is_err());
+        assert!(read::<Group, Vec<Msg>>(&[0x0b]).is_err());
     }
 }

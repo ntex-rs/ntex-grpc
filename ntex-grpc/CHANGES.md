@@ -2,6 +2,10 @@
 
 ## [3.2.0] - Unreleased
 
+* Simplify message compression: decompression reads through `io::copy`, and
+  compression errors reach the client and server as a gRPC status, the same
+  way as decompression errors
+
 * Server gives back the memory of its map of open streams after a burst of
   requests, instead of keeping it for the life of the connection
 

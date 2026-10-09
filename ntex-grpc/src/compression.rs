@@ -1,5 +1,5 @@
 use std::io::{self, Read, Write};
-use std::iter;
+use std::{fmt, iter};
 
 use ntex_bytes::{BytePage, BytePages, Bytes, BytesMut};
 use ntex_http::HeaderValue;
@@ -60,8 +60,8 @@ impl Compression {
         }
     }
 
-    /// Messages that are this size or larger once decompressed are
-    /// decompressed on the blocking thread pool.
+    /// Compressed messages of this size or larger are decompressed on the
+    /// blocking thread pool.
     const fn decompress_limit(self) -> usize {
         match self {
             Compression::Gzip => 128 * 1024,
@@ -74,14 +74,19 @@ impl Compression {
     ///
     /// The pages are passed to the encoder one by one, they are not joined
     /// into a single buffer first.
-    pub(crate) async fn compress(self, data: &mut BytePages) -> io::Result<Bytes> {
+    pub(crate) async fn compress(
+        self,
+        data: &mut BytePages,
+    ) -> Result<Bytes, (GrpcStatus, HeaderValue)> {
         let len = data.len();
         let pages: Vec<BytePage> = iter::from_fn(|| data.take()).collect();
         offload(len >= self.compress_limit(), move || {
             self.compress_sync(len, &pages)
         })
         .await
-        .unwrap_or_else(|err| Err(io::Error::other(err)))
+        .map_err(io::Error::other)
+        .flatten()
+        .map_err(|err| error(GrpcStatus::Internal, "grpc: error while compressing", err))
     }
 
     fn compress_sync(self, len: usize, pages: &[BytePage]) -> io::Result<Bytes> {
@@ -124,7 +129,8 @@ impl Compression {
         .unwrap_or_else(|err| {
             Err(error(
                 GrpcStatus::Internal,
-                format!("grpc: failed to decompress the message: {err}"),
+                "grpc: failed to decompress the message",
+                err,
             ))
         })
     }
@@ -153,70 +159,36 @@ impl Compression {
     ) -> Result<Bytes, (GrpcStatus, HeaderValue)> {
         let limit = max_size.saturating_add(1);
         let hint = self.size_hint(data, limit);
-        let res = match self {
+        let out = match self {
             Compression::Gzip => read(flate2::read::MultiGzDecoder::new(data), hint, limit),
-            Compression::Zstd => match zstd::Decoder::with_buffer(data) {
-                Ok(dec) => read(dec, hint, limit),
-                Err(err) => {
-                    return Err(error(
-                        GrpcStatus::Internal,
-                        format!("grpc: failed to decompress the message: {err}"),
-                    ));
-                }
-            },
-        };
-        match res {
-            Err(err) => Err(error(
-                GrpcStatus::Internal,
-                format!("grpc: failed to read decompressed data: {err}"),
-            )),
-            Ok(out) if out.len() > max_size => Err(error(
-                GrpcStatus::ResourceExhausted,
-                format!("grpc: received message after decompression larger than max {max_size}"),
-            )),
-            Ok(out) => Ok(freeze(out)),
+            Compression::Zstd => {
+                zstd::Decoder::with_buffer(data).and_then(|dec| read(dec, hint, limit))
+            }
         }
+        .map_err(|err| {
+            error(
+                GrpcStatus::Internal,
+                "grpc: failed to read decompressed data",
+                err,
+            )
+        })?;
+        if out.len() > max_size {
+            let msg =
+                format!("grpc: received message after decompression larger than max {max_size}");
+            let msg = HeaderValue::try_from(msg).unwrap_or_else(|_| {
+                HeaderValue::from_static("grpc: received message after decompression too large")
+            });
+            return Err((GrpcStatus::ResourceExhausted, msg));
+        }
+        Ok(freeze(out))
     }
 }
 
 /// Reads at most `limit` bytes from `r` into a buffer of `hint` bytes, which
 /// grows if the data does not fit.
-fn read(mut r: impl Read, hint: usize, limit: usize) -> io::Result<BytesMut> {
+fn read(r: impl Read, hint: usize, limit: usize) -> io::Result<BytesMut> {
     let mut out = BytesMut::with_capacity(hint);
-    let mut len = 0;
-    loop {
-        if len == out.len() {
-            if len >= limit {
-                break;
-            }
-            if len >= hint {
-                // the buffer is full, it only grows if there is more data
-                let mut probe = [0; 32];
-                let n = match r.read(&mut probe[..(limit - len).min(32)]) {
-                    Ok(0) => break,
-                    Ok(n) => n,
-                    Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(err) => return Err(err),
-                };
-                out.extend_from_slice(&probe[..n]);
-                len += n;
-            }
-            let cap = if len < hint {
-                hint
-            } else {
-                out.capacity().max(len + 8 * 1024).min(limit)
-            };
-            out.resize(cap, 0);
-            continue;
-        }
-        match r.read(&mut out[len..]) {
-            Ok(0) => break,
-            Ok(n) => len += n,
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-            Err(err) => return Err(err),
-        }
-    }
-    out.truncate(len);
+    io::copy(&mut r.take(limit as u64), &mut out)?;
     Ok(out)
 }
 
@@ -252,10 +224,16 @@ thread_local! {
     static OFFLOADED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn error(status: GrpcStatus, msg: String) -> (GrpcStatus, HeaderValue) {
-    let msg = HeaderValue::try_from(msg)
-        .unwrap_or_else(|_| HeaderValue::from_static("grpc: failed to decompress the message"));
-    (status, msg)
+/// Returns `status` with a message of `msg: err`, or of `msg` alone if `err`
+/// is not valid in a header.
+fn error(
+    status: GrpcStatus,
+    msg: &'static str,
+    err: impl fmt::Display,
+) -> (GrpcStatus, HeaderValue) {
+    let val = HeaderValue::try_from(format!("{msg}: {err}"))
+        .unwrap_or_else(|_| HeaderValue::from_static(msg));
+    (status, val)
 }
 
 #[cfg(test)]
@@ -566,6 +544,15 @@ mod tests {
         let out = freeze(buf);
         assert_ne!(out.as_ptr(), ptr);
         assert_eq!(out, data[..]);
+    }
+
+    #[test]
+    fn errors() {
+        let (status, msg) = error(GrpcStatus::Internal, "grpc: failed", "bad data");
+        assert_eq!(status, GrpcStatus::Internal);
+        assert_eq!(msg, "grpc: failed: bad data");
+        let (_, msg) = error(GrpcStatus::Internal, "grpc: failed", "bad\ndata");
+        assert_eq!(msg, "grpc: failed");
     }
 
     #[test]

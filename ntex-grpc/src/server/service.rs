@@ -349,16 +349,8 @@ where
                                             buf.put_u32(payload.len() as u32);
                                             buf.append(payload);
                                         }
-                                        Err(err) => {
-                                            let msg = HeaderValue::try_from(format!(
-                                                "grpc: error while compressing: {err}"
-                                            ))
-                                            .unwrap_or_else(|_| {
-                                                HeaderValue::from_static(
-                                                    "grpc: error while compressing",
-                                                )
-                                            });
-                                            send_error(&stream, GrpcStatus::Internal, msg);
+                                        Err((status, msg)) => {
+                                            send_error(&stream, status, msg);
                                             return Ok(());
                                         }
                                     }

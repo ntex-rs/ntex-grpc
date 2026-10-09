@@ -2,6 +2,10 @@
 
 ## [3.3.0] - Unreleased
 
+* Converting a negative `Duration` smaller than a second to
+  `std::time::Duration` returns `NegativeDurationError`, it wrapped around
+  to a large positive value
+
 * Skipping an unknown group does not recurse, deeply nested groups
   overflowed the stack. Groups nested more than 100 levels deep fail with
   "groups nested too deeply"

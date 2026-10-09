@@ -74,16 +74,16 @@ impl TryFrom<Duration> for time::Duration {
     /// Converts a `Duration` to a `std::time::Duration`, failing if the duration is negative.
     fn try_from(mut duration: Duration) -> Result<time::Duration, NegativeDurationError> {
         duration.normalize();
-        if duration.seconds >= 0 {
-            Ok(time::Duration::new(
-                duration.seconds as u64,
-                duration.nanos as u32,
-            ))
+        // after normalize() nanos has the sign of seconds, or any sign if
+        // seconds is zero
+        let magnitude = time::Duration::new(
+            duration.seconds.unsigned_abs(),
+            duration.nanos.unsigned_abs(),
+        );
+        if duration.seconds < 0 || duration.nanos < 0 {
+            Err(NegativeDurationError(magnitude))
         } else {
-            Err(NegativeDurationError(time::Duration::new(
-                (-duration.seconds) as u64,
-                (-duration.nanos) as u32,
-            )))
+            Ok(magnitude)
         }
     }
 }

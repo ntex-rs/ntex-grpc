@@ -2,6 +2,9 @@
 
 ## [3.2.1] - Unreleased
 
+* Skip unknown fields inside map entries, they failed decoding with
+  "Map deserialization error"
+
 * Add `types::FieldFormat` with `ZigZag`, `Native` and `Map` formats, used by
   generated code for `sint32` and `sint64` fields
 

@@ -36,6 +36,8 @@ pub struct CodeGenerator<'a> {
     /// Fields that are part of a message cycle and are stored in a `Box`,
     /// `(message, field)` with message names without the leading dot
     boxed: HashSet<(String, String)>,
+    /// Modules of the nested types being generated, relative to the file
+    mod_path: Vec<String>,
 }
 
 /// Singular message fields that lead back to their own message, directly or
@@ -189,6 +191,7 @@ impl CodeGenerator<'_> {
             path: Vec::new(),
             priv_buf: String::new(),
             package: file.package.unwrap_or_default(),
+            mod_path: Vec::new(),
         };
 
         debug!(
@@ -309,8 +312,9 @@ impl CodeGenerator<'_> {
         self.buf.push_str(&to_upper_camel(&message_name));
         self.buf.push_str(" {\n");
 
+        let type_path = self.type_path(&to_upper_camel(&message_name));
         self.priv_buf.push_str("impl ::ntex_grpc::Message for ");
-        self.priv_buf.push_str(&to_upper_camel(&message_name));
+        self.priv_buf.push_str(&type_path);
         self.priv_buf.push_str(" {\n");
 
         let mut has_fields = false;
@@ -515,14 +519,13 @@ impl CodeGenerator<'_> {
 
         // default
         self.priv_buf.push_str(&format!(
-            "impl ::std::default::Default for {} {{
+            "impl ::std::default::Default for {type_path} {{
                  #[inline]
                  fn default() -> Self {{
                      Self {{ {default} }}
                  }}
              }}\n\n
-        ",
-            to_upper_camel(&message_name)
+        "
         ));
         // ==========================================
 
@@ -539,11 +542,7 @@ impl CodeGenerator<'_> {
             self.path.push(4);
             for (idx, nested_enum) in message.enum_type.into_iter().enumerate() {
                 self.path.push(idx as i32);
-                let enum_name = format!(
-                    "{}::{}",
-                    to_snake(&message_name),
-                    to_upper_camel(nested_enum.name())
-                );
+                let enum_name = self.type_path(&to_upper_camel(nested_enum.name()));
                 self.append_enum(enum_name, nested_enum);
                 self.path.pop();
             }
@@ -556,7 +555,7 @@ impl CodeGenerator<'_> {
                     Some(fields) => fields,
                     None => continue,
                 };
-                self.append_oneof(&message_name, &fq_message_name, oneof, idx, fields);
+                self.append_oneof(&fq_message_name, oneof, idx, fields);
             }
 
             self.pop_mod();
@@ -674,7 +673,6 @@ impl CodeGenerator<'_> {
 
     fn append_oneof(
         &mut self,
-        message_name: &str,
         fq_message_name: &str,
         oneof: OneofDescriptorProto,
         idx: i32,
@@ -686,11 +684,8 @@ impl CodeGenerator<'_> {
         self.path.pop();
         self.path.pop();
 
-        let name = format!(
-            "{}::{}",
-            to_snake(message_name),
-            to_upper_camel(oneof.name())
-        );
+        // path from the file module, the oneof enum is in the message module
+        let name = self.type_path(&to_upper_camel(oneof.name()));
 
         let oneof_name = format!("{}.{}", fq_message_name, oneof.name());
         self.append_type_attributes(&oneof_name);
@@ -1121,8 +1116,19 @@ impl CodeGenerator<'_> {
 
         self.package.push('.');
         self.package.push_str(module);
+        self.mod_path.push(to_snake(module));
 
         self.depth += 1;
+    }
+
+    /// Path of a nested type from the file module, the private impls are
+    /// generated in a module of the file
+    fn type_path(&self, name: &str) -> String {
+        self.mod_path
+            .iter()
+            .map(String::as_str)
+            .chain(iter::once(name))
+            .join("::")
     }
 
     fn pop_mod(&mut self) {
@@ -1130,6 +1136,7 @@ impl CodeGenerator<'_> {
 
         let idx = self.package.rfind('.').unwrap();
         self.package.truncate(idx);
+        self.mod_path.pop();
 
         self.push_indent();
         self.buf.push_str("}\n\n");
@@ -1885,5 +1892,71 @@ mod tests {
         assert!(!code.contains("required"));
         let code = generate("proto3", Label::Optional);
         assert!(!code.contains("required"));
+    }
+
+    #[test]
+    fn test_nested_impl_paths() {
+        // Outer { Inner { enum Kind; oneof choice { int32 x } } }
+        let mut x = FieldDescriptorProto {
+            name: Some("x".to_string()),
+            number: Some(1),
+            oneof_index: Some(0),
+            ..Default::default()
+        };
+        x.set_type(Type::Int32);
+        x.set_label(Label::Optional);
+        let mut inner = message("Inner", vec![x], vec![]);
+        inner.oneof_decl.push(OneofDescriptorProto {
+            name: Some("choice".to_string()),
+            ..Default::default()
+        });
+        inner.enum_type.push(EnumDescriptorProto {
+            name: Some("Kind".to_string()),
+            value: vec![EnumValueDescriptorProto {
+                name: Some("ZERO".to_string()),
+                number: Some(0),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let file = FileDescriptorProto {
+            name: Some("test.proto".to_string()),
+            package: Some("pkg".to_string()),
+            syntax: Some("proto3".to_string()),
+            message_type: vec![message("Outer", vec![], vec![inner])],
+            source_code_info: Some(SourceCodeInfo {
+                location: [
+                    vec![4, 0],
+                    vec![4, 0, 3, 0],
+                    vec![4, 0, 3, 0, 2, 0],
+                    vec![4, 0, 3, 0, 4, 0],
+                    vec![4, 0, 3, 0, 4, 0, 2, 0],
+                    vec![4, 0, 3, 0, 8, 0],
+                ]
+                .into_iter()
+                .map(|path| Location {
+                    path,
+                    ..Default::default()
+                })
+                .collect(),
+            }),
+            ..Default::default()
+        };
+        let mut code = String::new();
+        CodeGenerator::generate(
+            &mut Config::new(),
+            &ExternPaths::new(&[], false).unwrap(),
+            &EnumValues::new(),
+            file,
+            &mut code,
+        );
+
+        // the private impls are outside of the nested modules
+        assert!(code.contains("impl ::ntex_grpc::Message for Outer {"));
+        assert!(code.contains("impl ::ntex_grpc::Message for outer::Inner {"));
+        assert!(code.contains("impl ::std::default::Default for outer::Inner {"));
+        assert!(code.contains("impl ::ntex_grpc::NativeType for outer::inner::Kind {"));
+        assert!(code.contains("impl ::ntex_grpc::NativeType for outer::inner::Choice {"));
+        assert!(code.contains("outer::inner::Choice::X(ref value)"));
     }
 }

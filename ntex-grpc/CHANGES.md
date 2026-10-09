@@ -2,6 +2,10 @@
 
 ## [3.3.0] - Unreleased
 
+* Codegen writes the impls of nested messages, enums and oneofs with their
+  module path, the code failed to compile for types nested more than one
+  level deep or named like a top-level type
+
 * Converting a negative `Duration` smaller than a second to
   `std::time::Duration` returns `NegativeDurationError`, it wrapped around
   to a large positive value

@@ -259,7 +259,7 @@ where
             h2::MessageKind::Data(data, _cap) => {
                 let mut streams = self.streams.borrow_mut();
                 if let Some(inflight) = streams.get_mut(&id) {
-                    inflight.data.push(data);
+                    inflight.data.push(data, self.max_size);
                     if let Err((status, msg)) = self.check_request(inflight.data.as_slice()) {
                         streams.remove(&id);
                         drop(streams);
@@ -275,7 +275,9 @@ where
                 let inflight = self.streams.borrow_mut().remove(&id);
                 if let Some(mut inflight) = inflight {
                     match data {
-                        h2::StreamEof::Data(chunk, _cap) => inflight.data.push(chunk),
+                        h2::StreamEof::Data(chunk, _cap) => {
+                            inflight.data.push(chunk, self.max_size);
+                        }
                         h2::StreamEof::Trailers(hdrs) => {
                             for (name, val) in &hdrs {
                                 inflight.headers.insert(name.clone(), val.clone());

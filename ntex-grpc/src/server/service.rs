@@ -340,26 +340,25 @@ where
                                     .send_payload(Bytes::from_static(EMPTY_MESSAGE), false)
                                     .await;
                             } else {
-                                let mut buf = BytePages::default();
+                                #[cfg(not(feature = "compression"))]
+                                let compressed = false;
+                                // a small message, or one that does not get
+                                // smaller, is sent uncompressed
                                 #[cfg(feature = "compression")]
-                                if let Some(enc) = encoding {
-                                    match enc.compress(&mut res.payload).await {
-                                        Ok(payload) => {
-                                            buf.put_u8(1);
-                                            buf.put_u32(payload.len() as u32);
-                                            buf.append(payload);
-                                        }
+                                let compressed = match encoding {
+                                    Some(enc) => match enc.compress(&mut res.payload).await {
+                                        Ok(compressed) => compressed,
                                         Err((status, msg)) => {
                                             send_error(&stream, status, msg);
                                             return Ok(());
                                         }
-                                    }
-                                }
-                                if buf.is_empty() {
-                                    buf.put_u8(0); // compression
-                                    buf.put_u32(res.payload.len() as u32); // length
-                                    res.payload.move_to(&mut buf);
-                                }
+                                    },
+                                    None => false,
+                                };
+                                let mut buf = BytePages::default();
+                                buf.put_u8(u8::from(compressed));
+                                buf.put_u32(res.payload.len() as u32); // length
+                                res.payload.move_to(&mut buf);
 
                                 let _ = stream.send_pages(buf, false).await;
                             }

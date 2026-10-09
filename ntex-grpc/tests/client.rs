@@ -1371,6 +1371,28 @@ async fn compression() {
         assert_eq!(res.req_size, 5);
         assert_eq!(res.headers().get(GRPC_ENCODING).unwrap(), enc.name());
 
+        // nor a small one, 63 bytes with the field tag and length
+        let small = BytesValue {
+            value: Bytes::from(vec![b'a'; 61]),
+        };
+        let mut req = Request::<_, EchoBody>::new(&client, &small);
+        req.compression(enc);
+        let res = req.send().await.unwrap();
+        assert_eq!(res.output, small);
+        assert_eq!(res.req_size, 68);
+        assert_eq!(res.res_size, 68);
+
+        // 64 bytes are
+        let small = BytesValue {
+            value: Bytes::from(vec![b'a'; 62]),
+        };
+        let mut req = Request::<_, EchoBody>::new(&client, &small);
+        req.compression(enc);
+        let res = req.send().await.unwrap();
+        assert_eq!(res.output, small);
+        assert!(res.req_size < 69, "{}", res.req_size);
+        assert_eq!(res.res_size, res.req_size);
+
         // large messages are compressed on the blocking pool
         let mut seed = 0x2545_f491_4f6c_dd1d_u64;
         let random: Vec<u8> = (0..256 * 1024)
@@ -1389,6 +1411,10 @@ async fn compression() {
             req.compression(enc).max_message_size(8 * 1024 * 1024);
             let res = req.send().await.unwrap();
             assert_eq!(res.output, input);
+            // random data does not get smaller, it is sent as is
+            let len = ntex_grpc::Message::encoded_len(&input) + 5;
+            assert_eq!(res.req_size == len, input.value[0] != b'a');
+            assert_eq!(res.res_size, res.req_size);
         }
     }
 

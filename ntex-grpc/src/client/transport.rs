@@ -441,7 +441,7 @@ fn synthesized(
 
 /// Encodes the request message with its length prefix.
 ///
-/// An empty message is never compressed.
+/// A message is sent uncompressed if it is small or does not get smaller.
 #[cfg_attr(not(feature = "compression"), allow(clippy::unused_async))]
 async fn encode_message<M: Message>(
     val: &M,
@@ -453,20 +453,20 @@ async fn encode_message<M: Message>(
     #[cfg(feature = "compression")]
     if let Some(enc) = ctx.get_compression() {
         let len = val.encoded_len();
-        if len != 0 {
+        if len >= crate::compression::MIN_SIZE {
             // the uncompressed message must fit the length prefix too
             send_size(len, usize::MAX)?;
             let mut msg = BytePages::default();
             val.write(&mut msg);
-            let msg = enc.compress(&mut msg).await.map_err(|(status, msg)| {
+            let compressed = enc.compress(&mut msg).await.map_err(|(status, msg)| {
                 let mut hdrs = HeaderMap::new();
                 hdrs.insert(consts::GRPC_MESSAGE, msg);
                 ClientError::GrpcStatus(status, hdrs, None)
             })?;
             let len = send_size(msg.len(), max_size)?;
-            buf.put_u8(1);
+            buf.put_u8(u8::from(compressed));
             buf.put_u32(len);
-            buf.append(msg);
+            msg.move_to(&mut buf);
             return Ok(buf);
         }
     }

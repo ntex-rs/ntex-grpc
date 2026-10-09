@@ -374,18 +374,31 @@ mod compression {
                     call(&client, Some(enc), message(1, &compress(enc, input))).await;
                 assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0", "{trailers:?}");
                 assert_eq!(headers.get(GRPC_ENCODING).unwrap(), enc);
-                assert_eq!(data[0], 1);
                 let len = u32::from_be_bytes(data[1..5].try_into().unwrap()) as usize;
                 assert_eq!(len, data.len() - 5);
-                assert_eq!(decompress(enc, &data[5..]), *input);
+                if input[0] == b'a' {
+                    assert_eq!(data[0], 1);
+                    assert_eq!(decompress(enc, &data[5..]), *input);
+                } else {
+                    // it does not get smaller
+                    assert_eq!(data, message(0, input));
+                }
             }
 
             // the response is compressed if the request is not
-            let (headers, data, trailers) = call(&client, Some(enc), message(0, b"abc")).await;
+            let input = [b'a'; 64];
+            let (headers, data, trailers) = call(&client, Some(enc), message(0, &input)).await;
             assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
             assert_eq!(headers.get(GRPC_ENCODING).unwrap(), enc);
             assert_eq!(data[0], 1);
-            assert_eq!(decompress(enc, &data[5..]), b"abc");
+            assert_eq!(decompress(enc, &data[5..]), input);
+
+            // a small message is not compressed
+            let (headers, data, trailers) =
+                call(&client, Some(enc), message(1, &compress(enc, &input[1..]))).await;
+            assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+            assert_eq!(headers.get(GRPC_ENCODING).unwrap(), enc);
+            assert_eq!(data, message(0, &input[1..]));
 
             // an empty message is not compressed
             let (headers, data, trailers) =

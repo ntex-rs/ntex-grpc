@@ -10,7 +10,7 @@ use ntex_util::{HashMap, time::Millis, time::timeout_checked};
 #[cfg(feature = "compression")]
 use crate::Compression;
 use crate::utils::{self, Data};
-use crate::{consts, status::GrpcStatus};
+use crate::{consts, encode_grpc_message, status::GrpcStatus};
 
 use super::{ServerError, ServerRequest, ServerResponse};
 
@@ -264,10 +264,7 @@ where
                 if !path.contains('/') {
                     // not a `service/method` path, the method is unknown
                     let msg =
-                        HeaderValue::try_from(format!("grpc: malformed method name: /{path}"))
-                            .unwrap_or_else(|_| {
-                                HeaderValue::from_static("grpc: malformed method name")
-                            });
+                        encode_grpc_message(&format!("grpc: malformed method name: /{path}"));
                     reject(&stream, StatusCode::OK, GrpcStatus::Unimplemented, msg, eof);
                     return Ok(());
                 }
@@ -501,11 +498,9 @@ fn check_content_type(hdrs: &HeaderMap) -> Option<HeaderValue> {
 fn check_method(method: Option<&Method>) -> Option<HeaderValue> {
     match method {
         Some(&Method::POST) => None,
-        Some(method) => HeaderValue::try_from(format!("grpc: method {method} is not supported"))
-            .ok()
-            .or(Some(HeaderValue::from_static(
-                "grpc: method is not supported",
-            ))),
+        Some(method) => Some(encode_grpc_message(&format!(
+            "grpc: method {method} is not supported"
+        ))),
         None => Some(HeaderValue::from_static("grpc: method is not supported")),
     }
 }
@@ -637,6 +632,11 @@ mod tests {
         assert_eq!(
             check_method(Some(&Method::from_bytes(b"BREW").unwrap())).unwrap(),
             "grpc: method BREW is not supported"
+        );
+        // `%` is a valid token character, it is percent-encoded
+        assert_eq!(
+            check_method(Some(&Method::from_bytes(b"A%B").unwrap())).unwrap(),
+            "grpc: method A%25B is not supported"
         );
         assert_eq!(check_method(None).unwrap(), "grpc: method is not supported");
     }

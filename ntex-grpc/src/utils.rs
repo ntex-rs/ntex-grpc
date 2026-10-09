@@ -1,4 +1,4 @@
-use std::{borrow::Cow, mem};
+use std::{borrow::Cow, fmt::Write, mem};
 
 use base64::engine::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
@@ -226,16 +226,37 @@ pub(crate) fn is_grpc_content_type(ct: &[u8]) -> bool {
         && matches!(ct.get(prefix.len()), None | Some(b'+' | b';'))
 }
 
-/// Builds a `grpc-message` of `prefix: value`.
+/// Encode a `grpc-message` value.
 ///
-/// `grpc-message` is percent-encoded, so the value is only added if it is
-/// plain text.
+/// The gRPC spec sends the message percent-encoded: `%` and every byte that
+/// is not printable ASCII are written as `%XX`, using the UTF-8 bytes of
+/// the text.
+///
+/// ```
+/// let val = ntex_grpc::encode_grpc_message("100% café");
+/// assert_eq!(val, "100%25 caf%C3%A9");
+/// ```
+pub fn encode_grpc_message(msg: &str) -> HeaderValue {
+    let mut encoded = String::with_capacity(msg.len());
+    for b in msg.bytes() {
+        if b == b'%' || !(b' '..=b'~').contains(&b) {
+            let _ = write!(encoded, "%{b:02X}");
+        } else {
+            encoded.push(char::from(b));
+        }
+    }
+    // SAFETY: the output is printable ASCII, which is a valid header value
+    unsafe { HeaderValue::from_shared_unchecked(encoded.into()) }
+}
+
+/// Builds a `grpc-message` of `prefix: value`, percent-encoded.
+///
+/// The value is left out if it is not UTF-8.
 pub(crate) fn grpc_message(prefix: &'static str, val: &HeaderValue) -> HeaderValue {
-    val.to_str()
-        .ok()
-        .filter(|v| !v.contains(['%', '\t']))
-        .and_then(|v| HeaderValue::try_from(format!("{prefix}: {v}")).ok())
-        .unwrap_or_else(|| HeaderValue::from_static(prefix))
+    match val.to_str() {
+        Ok(v) => encode_grpc_message(&format!("{prefix}: {v}")),
+        Err(_) => encode_grpc_message(prefix),
+    }
 }
 
 /// Decodes a percent-encoded `grpc-message`.
@@ -369,6 +390,30 @@ mod tests {
         assert_eq!(dec("YQ,").unwrap(), [&b"a"[..], b""]);
         assert!(dec("YQ,Y").is_none());
         assert!(dec("YQ;YQ").is_none());
+    }
+
+    #[test]
+    fn encode_message() {
+        assert_eq!(encode_grpc_message(""), "");
+        assert_eq!(encode_grpc_message("plain text ~!"), "plain text ~!");
+        assert_eq!(encode_grpc_message("100%"), "100%25");
+        assert_eq!(encode_grpc_message("a\tb\r\n\x7f"), "a%09b%0D%0A%7F");
+        assert_eq!(encode_grpc_message("\u{20ac}"), "%E2%82%AC");
+
+        // decoding gives the text back
+        for msg in ["", "100% done", "a\nb", "caf\u{e9} \u{20ac}", "%41%zz"] {
+            assert_eq!(percent_decode(&encode_grpc_message(msg)), msg);
+        }
+    }
+
+    #[test]
+    fn message_with_value() {
+        let val = |v: &'static [u8]| grpc_message("bad", &HeaderValue::from_bytes(v).unwrap());
+        assert_eq!(val(b"text/html"), "bad: text/html");
+        assert_eq!(val(b"100%\tx"), "bad: 100%25%09x");
+        assert_eq!(val("caf\u{e9}".as_bytes()), "bad: caf%C3%A9");
+        // not utf-8
+        assert_eq!(val(b"caf\xe9"), "bad");
     }
 
     #[test]

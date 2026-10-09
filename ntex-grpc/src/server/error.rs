@@ -20,7 +20,8 @@ impl ServerError {
     /// trailers.
     ///
     /// The message is sent as is. The gRPC spec expects it to be
-    /// percent-encoded if it contains anything other than printable ASCII.
+    /// percent-encoded, build it with
+    /// [`encode_grpc_message()`](crate::encode_grpc_message).
     pub fn new(status: GrpcStatus, message: HeaderValue, headers: Option<HeaderMap>) -> Self {
         Self {
             status,

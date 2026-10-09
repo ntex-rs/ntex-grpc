@@ -16,8 +16,8 @@ use crate::GrpcStatus;
 ///
 /// An empty message is never compressed. Large messages are compressed and
 /// decompressed on the blocking thread pool of the runtime: with gzip from
-/// 16 KiB when compressing and 128 KiB when decompressing, with zstd from
-/// 512 KiB.
+/// 16 KiB when compressing and 128 KiB of compressed data when
+/// decompressing, with zstd from 512 KiB.
 ///
 /// Requires the `compression` feature.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -110,29 +110,23 @@ impl Compression {
 
     /// Decompresses `data`, the result must not be larger than `max_size`.
     ///
-    /// Small messages are decompressed in place. A message that turns out
-    /// larger than the decompress limit is decompressed again on the thread
-    /// pool, so a small input cannot keep the worker busy for long.
+    /// A large compressed message is decompressed on the thread pool, a
+    /// small one in place.
     pub(crate) async fn decompress(
         self,
         data: Bytes,
         max_size: usize,
     ) -> Result<Bytes, (GrpcStatus, HeaderValue)> {
-        if data.len() < self.decompress_limit() {
-            let limit = max_size.min(self.decompress_limit());
-            match self.decompress_sync(&data, limit) {
-                Err((GrpcStatus::ResourceExhausted, _)) if max_size > limit => {}
-                res => return res,
-            }
-        }
-        offload(true, move || self.decompress_sync(&data, max_size))
-            .await
-            .unwrap_or_else(|err| {
-                Err(error(
-                    GrpcStatus::Internal,
-                    format!("grpc: failed to decompress the message: {err}"),
-                ))
-            })
+        offload(data.len() >= self.decompress_limit(), move || {
+            self.decompress_sync(&data, max_size)
+        })
+        .await
+        .unwrap_or_else(|err| {
+            Err(error(
+                GrpcStatus::Internal,
+                format!("grpc: failed to decompress the message: {err}"),
+            ))
+        })
     }
 
     /// The decompressed size stored in `data`, at most `limit`. gzip stores
@@ -414,12 +408,11 @@ mod tests {
 
             let limit = enc.decompress_limit();
             for (size, max, blocking) in [
-                // small once decompressed
+                // a small compressed message stays in place, however large
+                // it is once decompressed
                 (limit - 1, usize::MAX, false),
                 (limit, usize::MAX, false),
-                // decompressed again on the pool
-                (limit + 1, usize::MAX, true),
-                // over the limit of the message, no need to go on
+                (limit * 4, usize::MAX, false),
                 (limit + 1, limit, false),
             ] {
                 let data = compress(enc, &vec![b'a'; size]).await;

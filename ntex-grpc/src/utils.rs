@@ -117,7 +117,8 @@ pub fn encode_binary_header(value: &[u8]) -> HeaderValue {
 /// with `-bin`.
 ///
 /// Accepts base64 with or without padding. Returns `None` if the value is
-/// not valid base64.
+/// not valid base64, that includes several values joined with `,`, use
+/// [`decode_binary_header_values()`] for those.
 ///
 /// ```
 /// use ntex_grpc::{HeaderValue, decode_binary_header};
@@ -126,7 +127,32 @@ pub fn encode_binary_header(value: &[u8]) -> HeaderValue {
 /// assert_eq!(decode_binary_header(&val).unwrap(), [0xff, 0x00]);
 /// ```
 pub fn decode_binary_header(value: &HeaderValue) -> Option<Vec<u8>> {
-    let value = value.as_bytes();
+    decode_base64(value.as_bytes())
+}
+
+/// Decode all binary metadata values of a header whose name ends with
+/// `-bin`.
+///
+/// A peer or proxy may join several values of a header into one, separated
+/// by `,`. Each is decoded like [`decode_binary_header()`], spaces around
+/// them are ignored. Returns `None` if any of them is not valid base64.
+///
+/// ```
+/// use ntex_grpc::{HeaderValue, decode_binary_header_values};
+///
+/// let val = HeaderValue::from_static("/wA=, AQ");
+/// assert_eq!(decode_binary_header_values(&val).unwrap(), [vec![0xff, 0x00], vec![0x01]]);
+/// ```
+pub fn decode_binary_header_values(value: &HeaderValue) -> Option<Vec<Vec<u8>>> {
+    value
+        .as_bytes()
+        .split(|b| *b == b',')
+        .map(|val| decode_base64(val.trim_ascii()))
+        .collect()
+}
+
+/// Decodes base64 with or without padding.
+fn decode_base64(value: &[u8]) -> Option<Vec<u8>> {
     // padded base64 is a multiple of 4 bytes long
     if value.len().is_multiple_of(4) {
         STANDARD.decode(value).ok()
@@ -333,6 +359,16 @@ mod tests {
         assert!(dec("YQ=").is_none());
         assert!(dec("Y").is_none());
         assert!(dec("YQ=\t").is_none());
+        assert!(dec("YQ,YQ").is_none());
+
+        let dec = |v: &'static str| decode_binary_header_values(&HeaderValue::from_static(v));
+        assert_eq!(dec("").unwrap(), [b""]);
+        assert_eq!(dec("YQ").unwrap(), [b"a"]);
+        assert_eq!(dec("YQ==,YWI").unwrap(), [&b"a"[..], b"ab"]);
+        assert_eq!(dec("YQ , YWJj,\tYWI=").unwrap(), [&b"a"[..], b"abc", b"ab"]);
+        assert_eq!(dec("YQ,").unwrap(), [&b"a"[..], b""]);
+        assert!(dec("YQ,Y").is_none());
+        assert!(dec("YQ;YQ").is_none());
     }
 
     #[test]

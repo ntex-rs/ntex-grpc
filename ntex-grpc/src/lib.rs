@@ -51,7 +51,7 @@ pub use crate::encoding::DecodeError;
 pub use crate::service::{MethodDef, ServiceDef};
 pub use crate::status::GrpcStatus;
 pub use crate::types::{Message, NativeType};
-pub use crate::utils::{decode_binary_header, encode_binary_header};
+pub use crate::utils::{decode_binary_header, decode_binary_header_values, encode_binary_header};
 
 /// Protobuf well-known types.
 ///

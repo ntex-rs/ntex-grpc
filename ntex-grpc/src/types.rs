@@ -11,7 +11,7 @@ use ntex_util::hash_map::HashMap as HashMapBase;
 
 pub use crate::encoding::WireType;
 use crate::encoding::{self, DecodeError};
-pub use crate::format::{FieldFormat, Map, MapType, Native, ZigZag};
+pub use crate::format::{FieldFormat, Fixed, Map, MapType, Native, ZigZag};
 
 /// Protobuf struct read/write operations
 pub trait Message: Default + Sized + fmt::Debug {

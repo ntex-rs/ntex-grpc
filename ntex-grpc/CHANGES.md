@@ -5,6 +5,9 @@
 * Add `types::FieldFormat` with `ZigZag`, `Native` and `Map` formats, used by
   generated code for `sint32` and `sint64` fields
 
+* Add `types::Fixed` format, used by generated code for `fixed32`, `fixed64`,
+  `sfixed32` and `sfixed64` fields
+
 * `float` fields are encoded as fixed32 without a length prefix, they were not
   readable by other protobuf implementations and `encoded_len()` was one byte
   short per field

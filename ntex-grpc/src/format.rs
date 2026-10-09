@@ -1,14 +1,15 @@
 //! Field encodings that differ from the default encoding of a Rust type.
 //!
 //! Generated code uses [`NativeType`] for most fields. A field whose protobuf
-//! type shares a Rust type with another protobuf type, such as `sint32` and
-//! `int32` that are both `i32`, is encoded through a [`FieldFormat`] marker.
+//! type shares a Rust type with another protobuf type, such as `sint32`,
+//! `sfixed32` and `int32` that are all `i32`, is encoded through a
+//! [`FieldFormat`] marker.
 #![allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{BuildHasher, Hash};
 use std::marker::PhantomData;
 
-use ntex_bytes::{BytePages, Bytes};
+use ntex_bytes::{Buf, BufMut, BytePages, Bytes};
 use ntex_util::hash_map::HashMap as HashMapBase;
 
 use crate::encoding::{self, DecodeError, WireType};
@@ -16,7 +17,7 @@ use crate::types::{DefaultValue, NativeType};
 
 /// Encoding of a protobuf field of type `T`.
 ///
-/// Implemented by marker types: [`Native`], [`ZigZag`] and [`Map`].
+/// Implemented by marker types: [`Native`], [`ZigZag`], [`Fixed`] and [`Map`].
 pub trait FieldFormat<T> {
     /// Serialize protobuf field
     fn serialize(value: &T, tag: u32, default: DefaultValue<&T>, dst: &mut BytePages);
@@ -77,50 +78,111 @@ impl<T: NativeType> FieldFormat<T> for Native {
 #[derive(Copy, Clone, Debug)]
 pub struct ZigZag;
 
-trait ZigZagInt: Copy + Default + PartialEq {
-    fn encode(self) -> u64;
-    fn decode(value: u64) -> Self;
+/// Fixed width little-endian encoding of `fixed32`, `fixed64`, `sfixed32`
+/// and `sfixed64` fields.
+///
+/// Supports `u32`, `u64`, `i32`, `i64`, `Option` and `Vec` of them. Repeated
+/// fields are written packed, both packed and unpacked values are read.
+#[derive(Copy, Clone, Debug)]
+pub struct Fixed;
+
+/// Encoding of a single scalar value
+trait Scalar<T> {
+    const WIRE_TYPE: WireType;
+
+    fn len(value: T) -> usize;
+
+    fn write(value: T, dst: &mut BytePages);
+
+    fn read(src: &mut Bytes) -> Result<T, DecodeError>;
 }
 
-impl ZigZagInt for i32 {
+impl Scalar<i32> for ZigZag {
+    const WIRE_TYPE: WireType = WireType::Varint;
+
     #[inline]
-    fn encode(self) -> u64 {
-        u64::from(((self << 1) ^ (self >> 31)) as u32)
+    fn len(value: i32) -> usize {
+        encoding::encoded_len_varint(zigzag32(value))
     }
 
     #[inline]
-    fn decode(value: u64) -> Self {
+    fn write(value: i32, dst: &mut BytePages) {
+        encoding::encode_varint(zigzag32(value), dst);
+    }
+
+    #[inline]
+    fn read(src: &mut Bytes) -> Result<i32, DecodeError> {
         // sint32 values are 32 bit, upper bits of the varint are ignored
-        let value = value as u32;
-        ((value >> 1) as i32) ^ -((value & 1) as i32)
+        let value = encoding::decode_varint(src)? as u32;
+        Ok(((value >> 1) as i32) ^ -((value & 1) as i32))
     }
 }
 
-impl ZigZagInt for i64 {
+impl Scalar<i64> for ZigZag {
+    const WIRE_TYPE: WireType = WireType::Varint;
+
     #[inline]
-    fn encode(self) -> u64 {
-        ((self << 1) ^ (self >> 63)) as u64
+    fn len(value: i64) -> usize {
+        encoding::encoded_len_varint(zigzag64(value))
     }
 
     #[inline]
-    fn decode(value: u64) -> Self {
-        ((value >> 1) as i64) ^ -((value & 1) as i64)
+    fn write(value: i64, dst: &mut BytePages) {
+        encoding::encode_varint(zigzag64(value), dst);
+    }
+
+    #[inline]
+    fn read(src: &mut Bytes) -> Result<i64, DecodeError> {
+        let value = encoding::decode_varint(src)?;
+        Ok(((value >> 1) as i64) ^ -((value & 1) as i64))
     }
 }
 
 #[inline]
-fn zigzag_len<T: ZigZagInt>(value: T) -> usize {
-    encoding::encoded_len_varint(value.encode())
+fn zigzag32(value: i32) -> u64 {
+    u64::from(((value << 1) ^ (value >> 31)) as u32)
 }
 
 #[inline]
-fn zigzag_read<T: ZigZagInt>(src: &mut Bytes) -> Result<T, DecodeError> {
-    encoding::decode_varint(src).map(T::decode)
+fn zigzag64(value: i64) -> u64 {
+    ((value << 1) ^ (value >> 63)) as u64
 }
 
-macro_rules! zigzag {
-    ($ty:ty) => {
-        impl FieldFormat<$ty> for ZigZag {
+macro_rules! fixed {
+    ($ty:ty, $wire_type:expr, $put:ident, $get:ident) => {
+        impl Scalar<$ty> for Fixed {
+            const WIRE_TYPE: WireType = $wire_type;
+
+            #[inline]
+            fn len(_: $ty) -> usize {
+                size_of::<$ty>()
+            }
+
+            #[inline]
+            fn write(value: $ty, dst: &mut BytePages) {
+                dst.$put(value);
+            }
+
+            #[inline]
+            fn read(src: &mut Bytes) -> Result<$ty, DecodeError> {
+                if src.len() < size_of::<$ty>() {
+                    Err(DecodeError::incomplete())
+                } else {
+                    Ok(src.$get())
+                }
+            }
+        }
+    };
+}
+
+fixed!(u32, WireType::ThirtyTwoBit, put_u32_le, get_u32_le);
+fixed!(i32, WireType::ThirtyTwoBit, put_i32_le, get_i32_le);
+fixed!(u64, WireType::SixtyFourBit, put_u64_le, get_u64_le);
+fixed!(i64, WireType::SixtyFourBit, put_i64_le, get_i64_le);
+
+macro_rules! scalar {
+    ($fmt:ident, $ty:ty) => {
+        impl FieldFormat<$ty> for $fmt {
             #[inline]
             fn serialize(value: &$ty, tag: u32, default: DefaultValue<&$ty>, dst: &mut BytePages) {
                 let skip = match default {
@@ -129,8 +191,8 @@ macro_rules! zigzag {
                     DefaultValue::Value(d) => value == d,
                 };
                 if !skip {
-                    encoding::encode_key(tag, WireType::Varint, dst);
-                    encoding::encode_varint(value.encode(), dst);
+                    encoding::encode_key(tag, <$fmt as Scalar<$ty>>::WIRE_TYPE, dst);
+                    <$fmt as Scalar<$ty>>::write(*value, dst);
                 }
             }
 
@@ -144,7 +206,7 @@ macro_rules! zigzag {
                 if skip {
                     0
                 } else {
-                    encoding::key_len(tag) + zigzag_len(*value)
+                    encoding::key_len(tag) + <$fmt as Scalar<$ty>>::len(*value)
                 }
             }
 
@@ -155,13 +217,13 @@ macro_rules! zigzag {
                 wtype: WireType,
                 src: &mut Bytes,
             ) -> Result<(), DecodeError> {
-                encoding::check_wire_type(WireType::Varint, wtype)?;
-                *value = zigzag_read(src)?;
+                encoding::check_wire_type(<$fmt as Scalar<$ty>>::WIRE_TYPE, wtype)?;
+                *value = <$fmt as Scalar<$ty>>::read(src)?;
                 Ok(())
             }
         }
 
-        impl FieldFormat<Option<$ty>> for ZigZag {
+        impl FieldFormat<Option<$ty>> for $fmt {
             #[inline]
             fn serialize(
                 value: &Option<$ty>,
@@ -170,12 +232,7 @@ macro_rules! zigzag {
                 dst: &mut BytePages,
             ) {
                 if let Some(value) = value {
-                    <ZigZag as FieldFormat<$ty>>::serialize(
-                        value,
-                        tag,
-                        DefaultValue::Unknown,
-                        dst,
-                    );
+                    <$fmt as FieldFormat<$ty>>::serialize(value, tag, DefaultValue::Unknown, dst);
                 }
             }
 
@@ -186,7 +243,7 @@ macro_rules! zigzag {
                 _: DefaultValue<&Option<$ty>>,
             ) -> usize {
                 value.as_ref().map_or(0, |value| {
-                    <ZigZag as FieldFormat<$ty>>::serialized_len(value, tag, DefaultValue::Unknown)
+                    <$fmt as FieldFormat<$ty>>::serialized_len(value, tag, DefaultValue::Unknown)
                 })
             }
 
@@ -197,14 +254,14 @@ macro_rules! zigzag {
                 wtype: WireType,
                 src: &mut Bytes,
             ) -> Result<(), DecodeError> {
-                *value = Some(<ZigZag as FieldFormat<$ty>>::deserialize_default(
+                *value = Some(<$fmt as FieldFormat<$ty>>::deserialize_default(
                     tag, wtype, src,
                 )?);
                 Ok(())
             }
         }
 
-        impl FieldFormat<Vec<$ty>> for ZigZag {
+        impl FieldFormat<Vec<$ty>> for $fmt {
             fn serialize(
                 value: &Vec<$ty>,
                 tag: u32,
@@ -212,11 +269,11 @@ macro_rules! zigzag {
                 dst: &mut BytePages,
             ) {
                 if !value.is_empty() {
-                    let len: usize = value.iter().map(|v| zigzag_len(*v)).sum();
+                    let len: usize = value.iter().map(|v| <$fmt as Scalar<$ty>>::len(*v)).sum();
                     encoding::encode_key(tag, WireType::LengthDelimited, dst);
                     encoding::encode_varint(len as u64, dst);
                     for item in value {
-                        encoding::encode_varint(item.encode(), dst);
+                        <$fmt as Scalar<$ty>>::write(*item, dst);
                     }
                 }
             }
@@ -225,7 +282,7 @@ macro_rules! zigzag {
                 if value.is_empty() {
                     0
                 } else {
-                    let len: usize = value.iter().map(|v| zigzag_len(*v)).sum();
+                    let len: usize = value.iter().map(|v| <$fmt as Scalar<$ty>>::len(*v)).sum();
                     encoding::key_len(tag) + encoding::encoded_len_varint(len as u64) + len
                 }
             }
@@ -236,18 +293,17 @@ macro_rules! zigzag {
                 wtype: WireType,
                 src: &mut Bytes,
             ) -> Result<(), DecodeError> {
-                match wtype {
-                    WireType::Varint => value.push(zigzag_read(src)?),
-                    WireType::LengthDelimited => {
-                        let len = encoding::decode_varint(src)? as usize;
-                        let mut buf = src
-                            .split_to_checked(len)
-                            .ok_or_else(DecodeError::incomplete)?;
-                        while !buf.is_empty() {
-                            value.push(zigzag_read(&mut buf)?);
-                        }
+                if wtype == WireType::LengthDelimited {
+                    let len = encoding::decode_varint(src)? as usize;
+                    let mut buf = src
+                        .split_to_checked(len)
+                        .ok_or_else(DecodeError::incomplete)?;
+                    while !buf.is_empty() {
+                        value.push(<$fmt as Scalar<$ty>>::read(&mut buf)?);
                     }
-                    _ => encoding::check_wire_type(WireType::Varint, wtype)?,
+                } else {
+                    encoding::check_wire_type(<$fmt as Scalar<$ty>>::WIRE_TYPE, wtype)?;
+                    value.push(<$fmt as Scalar<$ty>>::read(src)?);
                 }
                 Ok(())
             }
@@ -255,8 +311,12 @@ macro_rules! zigzag {
     };
 }
 
-zigzag!(i32);
-zigzag!(i64);
+scalar!(ZigZag, i32);
+scalar!(ZigZag, i64);
+scalar!(Fixed, u32);
+scalar!(Fixed, i32);
+scalar!(Fixed, u64);
+scalar!(Fixed, i64);
 
 /// Map container used by the [`Map`] format.
 pub trait MapType: Default {
@@ -569,5 +629,113 @@ mod tests {
         ];
         assert_eq!(write::<F, _>(&map, DefaultValue::Default), bytes);
         assert_eq!(read::<F, BTreeMap<i32, i32>>(&bytes).unwrap(), map);
+    }
+
+    #[test]
+    fn fixed() {
+        assert_eq!(
+            write::<Fixed, _>(&u32::MAX, DefaultValue::Default),
+            [0x0d, 0xff, 0xff, 0xff, 0xff]
+        );
+        assert_eq!(
+            write::<Fixed, _>(&-2i32, DefaultValue::Default),
+            [0x0d, 0xfe, 0xff, 0xff, 0xff]
+        );
+        assert_eq!(
+            write::<Fixed, _>(&1u64, DefaultValue::Default),
+            [0x09, 1, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            write::<Fixed, _>(&-1i64, DefaultValue::Unknown),
+            [0x09, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+        );
+        assert!(write::<Fixed, _>(&0u32, DefaultValue::Default).is_empty());
+        assert!(write::<Fixed, _>(&7i64, DefaultValue::Value(&7)).is_empty());
+        assert_eq!(write::<Fixed, _>(&0i32, DefaultValue::Unknown).len(), 5);
+
+        assert_eq!(
+            read::<Fixed, u32>(&[0x0d, 1, 2, 3, 4]).unwrap(),
+            0x0403_0201
+        );
+        assert_eq!(
+            read::<Fixed, i32>(&[0x0d, 0xfe, 0xff, 0xff, 0xff]).unwrap(),
+            -2
+        );
+        assert_eq!(
+            read::<Fixed, u64>(&[0x09, 1, 0, 0, 0, 0, 0, 0, 0x80]).unwrap(),
+            0x8000_0000_0000_0001
+        );
+        assert_eq!(
+            read::<Fixed, i64>(&[0x09, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]).unwrap(),
+            -1
+        );
+    }
+
+    #[test]
+    fn fixed_errors() {
+        // varint and wrong width
+        assert!(read::<Fixed, u32>(&[0x08, 0x01]).is_err());
+        assert!(read::<Fixed, u32>(&[0x09, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
+        assert!(read::<Fixed, u64>(&[0x0d, 0, 0, 0, 0]).is_err());
+        // truncated
+        assert!(read::<Fixed, u32>(&[0x0d, 0, 0, 0]).is_err());
+        assert!(read::<Fixed, i64>(&[0x09, 0, 0, 0, 0, 0, 0, 0]).is_err());
+        assert!(read::<Fixed, Option<i32>>(&[0x0d, 0]).is_err());
+        assert!(read::<Fixed, Vec<u32>>(&[0x0a, 0x03, 0, 0, 0]).is_err());
+        assert!(read::<Fixed, Vec<u64>>(&[0x08, 0x01]).is_err());
+    }
+
+    #[test]
+    fn fixed_option() {
+        assert!(write::<Fixed, Option<u32>>(&None, DefaultValue::Default).is_empty());
+        assert_eq!(
+            write::<Fixed, _>(&Some(0u32), DefaultValue::Default),
+            [0x0d, 0, 0, 0, 0]
+        );
+        assert_eq!(read::<Fixed, Option<i64>>(&[]).unwrap(), None);
+        assert_eq!(
+            read::<Fixed, Option<i64>>(&[0x09, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn fixed_repeated() {
+        assert!(write::<Fixed, Vec<u64>>(&vec![], DefaultValue::Default).is_empty());
+        let bytes = [0x0a, 0x08, 1, 0, 0, 0, 0xff, 0xff, 0xff, 0xff];
+        assert_eq!(
+            write::<Fixed, _>(&vec![1i32, -1], DefaultValue::Default),
+            bytes
+        );
+        assert_eq!(read::<Fixed, Vec<i32>>(&bytes).unwrap(), [1, -1]);
+        assert_eq!(read::<Fixed, Vec<u32>>(&bytes).unwrap(), [1, u32::MAX]);
+
+        // unpacked and mixed input
+        let bytes = [
+            0x09, 1, 0, 0, 0, 0, 0, 0, 0, 0x0a, 0x08, 2, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        assert_eq!(read::<Fixed, Vec<u64>>(&bytes).unwrap(), [1, 2]);
+        assert_eq!(
+            write::<Fixed, _>(&vec![1u64], DefaultValue::Default),
+            [0x0a, 0x08, 1, 0, 0, 0, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn map_fixed() {
+        type F = Map<Fixed, ZigZag>;
+        type G = Map<Native, Fixed>;
+
+        let mut map = BTreeMap::new();
+        map.insert(5u64, -3i32);
+        let bytes = [0x0a, 0x0b, 0x09, 5, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x05];
+        assert_eq!(write::<F, _>(&map, DefaultValue::Default), bytes);
+        assert_eq!(read::<F, BTreeMap<u64, i32>>(&bytes).unwrap(), map);
+
+        let mut map = HashMap::<String, i32>::default();
+        map.insert("k".into(), -1);
+        let bytes = [0x0a, 0x08, 0x0a, 0x01, b'k', 0x15, 0xff, 0xff, 0xff, 0xff];
+        assert_eq!(write::<G, _>(&map, DefaultValue::Default), bytes);
+        assert_eq!(read::<G, HashMap<String, i32>>(&bytes).unwrap(), map);
     }
 }

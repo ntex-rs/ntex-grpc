@@ -424,6 +424,11 @@ fn wrapper_wire_format() {
         -1.5f64 => [0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0xbf],
     );
     check_wrapper!(
+        FloatValue,
+        1.5f32 => [0x0d, 0x00, 0x00, 0xc0, 0x3f],
+        -1.5f32 => [0x0d, 0x00, 0x00, 0xc0, 0xbf],
+    );
+    check_wrapper!(
         Int64Value,
         1i64 => [0x08, 0x01],
         i64::MAX => [0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
@@ -461,34 +466,4 @@ fn string_value_rejects_invalid_utf8() {
     let err = decode::<StringValue>(&[0x0a, 0x01, 0xff]).unwrap_err();
     assert!(err.to_string().contains("StringValue.value"), "{err}");
     assert!(err.to_string().contains("not UTF-8"), "{err}");
-}
-
-#[test]
-fn float_value_writes_a_bogus_length_prefix() {
-    // BUG: an `f32` field is written as `key + varint(4) + 4 bytes` instead of
-    // the fixed32 form `key + 4 bytes`, while `encoded_len()` reports the
-    // correct 5 bytes. So `encoded_len()` disagrees with `write()` and the
-    // bytes are not readable by a conforming protobuf implementation.
-    let msg = FloatValue { value: 1.5 };
-    let mut pages = BytePages::default();
-    msg.write(&mut pages);
-    let buf = pages.freeze();
-
-    assert_eq!(&buf[..], [0x0d, 0x04, 0x00, 0x00, 0xc0, 0x3f].as_slice());
-    assert_eq!(msg.encoded_len(), 5);
-    assert_eq!(buf.len(), 6);
-
-    // it still round-trips within this crate
-    assert_eq!(FloatValue::read(&mut buf.clone()).unwrap(), msg);
-    // ... but the spec conformant encoding is rejected
-    assert!(decode::<FloatValue>(&[0x0d, 0x00, 0x00, 0xc0, 0x3f]).is_err());
-
-    let def = FloatValue::default();
-    assert_eq!(def.encoded_len(), 0);
-    assert_eq!(decode::<FloatValue>(&[]).unwrap(), def);
-
-    let mut src = UNKNOWN_FIELDS.to_vec();
-    src.extend_from_slice(&buf[..]);
-    assert_eq!(decode::<FloatValue>(&src).unwrap(), msg);
-    assert!(decode::<FloatValue>(&buf[..buf.len() - 1]).is_err());
 }

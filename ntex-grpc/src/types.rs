@@ -65,7 +65,7 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
     /// Encode field tag and length
     fn encode_type(&self, tag: u32, dst: &mut BytePages) {
         encoding::encode_key(tag, Self::TYPE, dst);
-        if !matches!(Self::TYPE, WireType::Varint | WireType::SixtyFourBit) {
+        if Self::TYPE == WireType::LengthDelimited {
             encoding::encode_varint(self.value_len() as u64, dst);
         }
     }
@@ -114,9 +114,7 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
     ) -> Result<(), DecodeError> {
         encoding::check_wire_type(Self::TYPE, wtype)?;
 
-        if matches!(Self::TYPE, WireType::Varint | WireType::SixtyFourBit) {
-            self.merge(src)
-        } else {
+        if Self::TYPE == WireType::LengthDelimited {
             let len = encoding::decode_varint(src)? as usize;
             let mut buf = src.split_to_checked(len).ok_or_else(|| {
                 DecodeError::new(format!(
@@ -126,6 +124,8 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
                 ))
             })?;
             self.merge(&mut buf)
+        } else {
+            self.merge(src)
         }
     }
 
@@ -826,26 +826,25 @@ mod tests {
 
     #[test]
     fn fixed_width_roundtrip() {
-        // 64 bit fields carry no length prefix
+        // fixed width fields carry no length prefix
         roundtrip(&1.5_f64, 1, &[0x09, 0, 0, 0, 0, 0, 0, 0xf8, 0x3f]);
+        roundtrip(&1.5_f32, 1, &[0x0d, 0, 0, 0xc0, 0x3f]);
         assert_eq!(NativeType::value_len(&1.5_f64), 8);
-
-        // 32 bit fields are written with a length prefix, see `encode_type`
-        let f32_bytes = [0x0d, 0x04, 0, 0, 0xc0, 0x3f];
-        let buf = encode(&1.5_f32, 1, DefaultValue::Unknown);
-        assert_eq!(buf.as_ref(), &f32_bytes);
         assert_eq!(NativeType::value_len(&1.5_f32), 4);
 
-        let mut src = buf;
-        let (tag, wire_type) = encoding::decode_key(&mut src).unwrap();
-        assert_eq!((tag, wire_type), (1, WireType::ThirtyTwoBit));
-        assert_eq!(
-            f32::deserialize_default(tag, wire_type, &mut src)
-                .unwrap()
-                .to_bits(),
-            1.5_f32.to_bits()
-        );
-        assert!(src.is_empty());
+        // repeated fixed width fields are not packed
+        let v = vec![1.5_f32, -1.5];
+        let expected = [0x0d, 0, 0, 0xc0, 0x3f, 0x0d, 0, 0, 0xc0, 0xbf];
+        assert_eq!(encode(&v, 1, DefaultValue::Default).as_ref(), &expected);
+        assert_eq!(v.serialized_len(1, DefaultValue::Default), expected.len());
+
+        let mut src = Bytes::copy_from_slice(&expected);
+        let mut decoded = Vec::<f32>::new();
+        while !src.is_empty() {
+            let (tag, wire_type) = encoding::decode_key(&mut src).unwrap();
+            decoded.deserialize(tag, wire_type, &mut src).unwrap();
+        }
+        assert_eq!(decoded, v);
     }
 
     #[test]

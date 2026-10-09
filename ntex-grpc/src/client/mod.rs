@@ -138,8 +138,9 @@ pub enum ClientError {
     ),
     /// The response had no HTTP status.
     ///
-    /// Holds the status, the headers and the body received. The status is
-    /// `None`, a status other than 200 is reported as [`ClientError::GrpcStatus`].
+    /// Holds the status, the headers and up to 64 KiB of the body received.
+    /// The status is `None`, a status other than 200 is reported as
+    /// [`ClientError::GrpcStatus`].
     #[error("Http response {0:?}, headers: {1:?}, body: {2:?}")]
     Response(Option<StatusCode>, HeaderMap, Bytes),
     /// The response ended before a complete reply message arrived.
@@ -185,7 +186,8 @@ pub enum ClientError {
     ///
     /// The client adds a `grpc-message` describing the problem then, and
     /// keeps the response body in the third field. The body is `None` if the
-    /// status came from the server.
+    /// status came from the server. Only the first 64 KiB of a response that
+    /// is not a grpc one are kept, the client stops reading there.
     #[error("Grpc status")]
     GrpcStatus(GrpcStatus, HeaderMap, Option<Bytes>),
 }

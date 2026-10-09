@@ -33,6 +33,14 @@ impl Data {
         }
     }
 
+    pub(crate) fn truncate(&mut self, len: usize) {
+        match self {
+            Data::Chunk(data) => data.truncate(len),
+            Data::MutChunk(data) => data.truncate(len),
+            Data::Empty => {}
+        }
+    }
+
     pub(crate) fn push(&mut self, data: Bytes) {
         if !data.is_empty() {
             *self = match mem::replace(self, Data::Empty) {

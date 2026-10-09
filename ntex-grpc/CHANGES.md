@@ -19,6 +19,9 @@
   the client stops sending. Data after the request message is rejected with
   `INTERNAL` instead of being ignored
 
+* Client keeps at most 64 KiB of a response body that is not a grpc one, e.g.
+  an error page from a proxy, and stops reading the response there
+
 * Server rejects a request message larger than 4 MiB with
   `RESOURCE_EXHAUSTED`. Add `GrpcServer::max_message_size()` to change the
   limit

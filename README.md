@@ -199,8 +199,8 @@ error is turned into a reply, so the client still sees `grpc-status: 0`.
 
 The server sends a gRPC status itself in these cases:
 
-* `NOT_FOUND` for an unknown method;
-* `UNIMPLEMENTED` for an rpc that has no `#[method]`;
+* `UNIMPLEMENTED` for an unknown method, a path that is not
+  `/service/method` or an rpc that has no `#[method]`;
 * `INVALID_ARGUMENT` if the request message doesn't decode;
 * `INVALID_ARGUMENT` with HTTP status 415 if the request `content-type` is not
   `application/grpc`;

@@ -79,7 +79,7 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                             None
                         )),
                         None => Err(::ntex_grpc::server::ServerError::new(
-                            ::ntex_grpc::GrpcStatus::NotFound,
+                            ::ntex_grpc::GrpcStatus::Unimplemented,
                             ::ntex_grpc::HeaderValue::from_shared(
                                 ::ntex_grpc::ByteString::from(format!("Service method is not found: {0}", req.name)).into_bytes()
                             ).unwrap(),

@@ -4,7 +4,9 @@ use std::{cell::Cell, fmt, iter, mem::MaybeUninit, slice, thread::LocalKey};
 use flate2::{Compress, Crc, FlushCompress, Status, bufread::GzDecoder};
 use ntex_bytes::{BufMut, BytePage, BytePages, Bytes, BytesMut};
 use ntex_http::HeaderValue;
-use zstd::zstd_safe::zstd_sys::{ZSTD_EndDirective, ZSTD_ErrorCode, ZSTD_getErrorCode};
+use zstd::zstd_safe::zstd_sys::{
+    ZSTD_BLOCKSIZE_MAX, ZSTD_EndDirective, ZSTD_ErrorCode, ZSTD_MAGICNUMBER, ZSTD_getErrorCode,
+};
 use zstd::zstd_safe::{CCtx, CParameter, DCtx, InBuffer, OutBuffer, ResetDirective, WriteBuf};
 
 use crate::GrpcStatus;
@@ -166,20 +168,29 @@ impl Compression {
     /// The decompressed size stored in `data`, at most `limit`.
     ///
     /// The size is not checked until the data is decompressed, so at most
-    /// [`RESERVE_RATIO`] times the size of `data` is trusted. gzip stores the
-    /// size of the last member only.
+    /// [`RESERVE_RATIO`] times the size of `data` is trusted, or for zstd as
+    /// much as the blocks of the frame can hold. gzip stores the size of the
+    /// last member only.
     fn size_hint(self, data: &[u8], limit: usize) -> usize {
+        let trusted = data.len().saturating_mul(RESERVE_RATIO);
         let size = match self {
             Compression::Gzip => data
                 .last_chunk()
-                .map_or(0, |size: &[u8; 4]| u32::from_le_bytes(*size) as usize),
-            Compression::Zstd => zstd::zstd_safe::get_frame_content_size(data)
-                .ok()
-                .flatten()
-                .map_or(0, |size| usize::try_from(size).unwrap_or(usize::MAX)),
+                .map_or(0, |size: &[u8; 4]| u32::from_le_bytes(*size) as usize)
+                .min(trusted),
+            Compression::Zstd => {
+                let size = zstd::zstd_safe::get_frame_content_size(data)
+                    .ok()
+                    .flatten()
+                    .map_or(0, |size| usize::try_from(size).unwrap_or(usize::MAX));
+                if size > trusted {
+                    size.min(zstd_bound(data).unwrap_or(trusted))
+                } else {
+                    size
+                }
+            }
         };
         size.min(limit)
-            .min(data.len().saturating_mul(RESERVE_RATIO))
     }
 
     /// Decompresses `data`, reading at most one byte over `max_size`.
@@ -420,6 +431,41 @@ impl Read for Members<'_> {
             // the member is complete, the next one starts where it ends
             let input = input.clone();
             self.0.reset(input);
+        }
+    }
+}
+
+/// The most the first zstd frame of `data` decodes to by the sizes of its
+/// blocks, a compressed block holds at most 128 KiB. Returns `None` if the
+/// frame is incomplete or invalid.
+fn zstd_bound(data: &[u8]) -> Option<usize> {
+    let (&desc, rest) = data
+        .strip_prefix(&ZSTD_MAGICNUMBER.to_le_bytes())?
+        .split_first()?;
+    let single = desc & 0x20 != 0;
+    let size_len = match desc >> 6 {
+        0 => usize::from(single),
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    };
+    let dict_len = [0, 1, 2, 4][usize::from(desc & 3)];
+    let mut rest = rest.get(usize::from(!single) + dict_len + size_len..)?;
+    let mut bound = 0_usize;
+    loop {
+        let (header, tail) = rest.split_first_chunk::<3>()?;
+        let header = u32::from_le_bytes([header[0], header[1], header[2], 0]);
+        let size = (header >> 3) as usize;
+        let (output, input) = match (header >> 1) & 3 {
+            0 => (size, size),
+            1 => (size, 1),
+            2 => (ZSTD_BLOCKSIZE_MAX as usize, size),
+            _ => return None,
+        };
+        bound = bound.saturating_add(output);
+        rest = tail.get(input..)?;
+        if header & 1 != 0 {
+            return Some(bound);
         }
     }
 }
@@ -966,6 +1012,95 @@ mod tests {
     }
 
     #[test]
+    fn zstd_bounds() {
+        const BLOCK: usize = 128 * 1024;
+        for data in [
+            Vec::new(),
+            text(1000),
+            random(1000),
+            random(300_000),
+            text(1_000_000),
+            vec![0; 1_000_000],
+        ] {
+            let mut frames = vec![frame(Compression::Zstd, &data)];
+            frames.extend(compress_in(Compression::Zstd, &data, usize::MAX));
+            for compressed in frames {
+                let bound = zstd_bound(&compressed).unwrap();
+                assert!(bound >= data.len(), "{bound} {}", data.len());
+                assert!(bound <= data.len().next_multiple_of(BLOCK).max(BLOCK));
+                assert!(zstd_bound(&compressed[..compressed.len() - 1]).is_none());
+            }
+        }
+
+        // a frame with every kind of header, and a raw, an RLE and a
+        // compressed block
+        let blocks = |last: u32| {
+            let mut blocks = Vec::new();
+            blocks.extend_from_slice(&(3_u32 << 3).to_le_bytes()[..3]);
+            blocks.extend_from_slice(b"abc");
+            blocks.extend_from_slice(&(1_u32 << 1 | 1000 << 3).to_le_bytes()[..3]);
+            blocks.push(b'x');
+            blocks.extend_from_slice(&(last | 2 << 1 | 5 << 3).to_le_bytes()[..3]);
+            blocks.extend_from_slice(&[0xff; 5]);
+            blocks
+        };
+        for desc in 0..=255_u8 {
+            if desc & 0x18 != 0 {
+                continue;
+            }
+            let single = desc & 0x20 != 0;
+            let len = usize::from(!single)
+                + [0, 1, 2, 4][usize::from(desc & 3)]
+                + [usize::from(single), 2, 4, 8][usize::from(desc >> 6)];
+            let mut frame = ZSTD_MAGICNUMBER.to_le_bytes().to_vec();
+            frame.push(desc);
+            frame.extend(iter::repeat_n(0xff, len));
+            frame.extend(blocks(1));
+            assert_eq!(zstd_bound(&frame), Some(1003 + BLOCK), "{desc:x}");
+            frame.push(0xff);
+            assert_eq!(zstd_bound(&frame), Some(1003 + BLOCK), "{desc:x}");
+            frame.truncate(frame.len() - 2);
+            assert_eq!(zstd_bound(&frame), None, "{desc:x}");
+        }
+
+        // the frame stores more than its blocks hold
+        let mut frame = ZSTD_MAGICNUMBER.to_le_bytes().to_vec();
+        frame.extend([0x80, 0, 0, 0, 0, 1]);
+        frame.extend(blocks(0));
+        assert_eq!(zstd_bound(&frame), None);
+        let hint = Compression::Zstd.size_hint(&frame, usize::MAX);
+        assert_eq!(hint, frame.len() * RESERVE_RATIO);
+        frame.extend_from_slice(&(1_u32 | 3 << 1).to_le_bytes()[..3]);
+        assert_eq!(zstd_bound(&frame), None);
+        frame.truncate(frame.len() - 3);
+        frame.extend_from_slice(&1_u32.to_le_bytes()[..3]);
+        assert_eq!(zstd_bound(&frame), Some(1003 + BLOCK));
+        let hint = Compression::Zstd.size_hint(&frame, usize::MAX);
+        assert_eq!(hint, 1003 + BLOCK);
+        assert!(
+            Compression::Zstd
+                .decompress_sync(&Bytes::from(frame), usize::MAX)
+                .is_err()
+        );
+        for data in [&b""[..], b"abc", &[0x28, 0xb5, 0x2f, 0xfe, 0]] {
+            assert_eq!(zstd_bound(data), None);
+        }
+
+        // a message that compresses more than 64 times is decoded in a
+        // single pass
+        clear();
+        let data = vec![0; 1_000_000];
+        let compressed = compress_in(Compression::Zstd, &data, usize::MAX).unwrap();
+        assert!(compressed.len() * RESERVE_RATIO < data.len());
+        let out = Compression::Zstd
+            .decompress_sync(&compressed, usize::MAX)
+            .unwrap();
+        assert_eq!(out, data);
+        let size = ZSTD_DECODER.take().unwrap().sizeof();
+        assert!(size < 128 * 1024, "{size}");
+    }
+
+    #[test]
     fn zstd_window() {
         let data = text(2 * 1024 * 1024);
         let compressed = Compression::Zstd
@@ -1233,13 +1368,16 @@ mod tests {
             assert_eq!(enc.size_hint(&compressed, 100), 100);
             assert_eq!(enc.size_hint(b"", usize::MAX), 0);
 
-            // only 64 times the compressed size is trusted
+            // only 64 times the compressed size is trusted, or as much as
+            // the zstd blocks hold
             let data = vec![b'a'; 100_000];
             let compressed = compress(enc, &data).await;
-            assert_eq!(
-                enc.size_hint(&compressed, usize::MAX),
-                compressed.len() * 64
-            );
+            let hint = match enc {
+                Compression::Gzip => compressed.len() * 64,
+                Compression::Zstd => data.len(),
+            };
+            assert!(hint > compressed.len() * 64 || enc == Compression::Gzip);
+            assert_eq!(enc.size_hint(&compressed, usize::MAX), hint);
             assert_eq!(enc.decompress(compressed, data.len()).await.unwrap(), data);
         }
         // zstd stores the size in the frame

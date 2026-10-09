@@ -448,7 +448,6 @@ async fn encode_message<M: Message>(
     ctx: &RequestContext,
 ) -> Result<BytePages, ClientError> {
     let max_size = ctx.get_max_send_message_size();
-    let mut buf = BytePages::default();
 
     #[cfg(feature = "compression")]
     if let Some(enc) = ctx.get_compression() {
@@ -464,14 +463,13 @@ async fn encode_message<M: Message>(
                 ClientError::GrpcStatus(status, hdrs, None)
             })?;
             let len = send_size(msg.len(), max_size)?;
-            buf.put_u8(u8::from(compressed));
-            buf.put_u32(len);
-            msg.move_to(&mut buf);
-            return Ok(buf);
+            utils::prepend_prefix(&mut msg, compressed, len);
+            return Ok(msg);
         }
     }
 
     let len = send_size(val.encoded_len(), max_size)?;
+    let mut buf = BytePages::default();
     buf.put_u8(0);
     buf.put_u32(len);
     val.write(&mut buf);

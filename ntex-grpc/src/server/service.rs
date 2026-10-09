@@ -1,6 +1,6 @@
 use std::{cell::RefCell, error::Error, hash::Hash, rc::Rc};
 
-use ntex_bytes::{Buf, BufMut, BytePages, ByteString, Bytes};
+use ntex_bytes::{Buf, ByteString, Bytes};
 use ntex_h2::{self as h2, StreamRef, frame::Reason, frame::StreamId};
 use ntex_http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use ntex_io::{Filter, Io, IoBoxed};
@@ -397,12 +397,8 @@ where
                                         return Ok(());
                                     }
                                 };
-                                let mut buf = BytePages::default();
-                                buf.put_u8(u8::from(compressed));
-                                buf.put_u32(len);
-                                res.payload.move_to(&mut buf);
-
-                                let _ = stream.send_pages(buf, false).await;
+                                utils::prepend_prefix(&mut res.payload, compressed, len);
+                                let _ = stream.send_pages(res.payload, false).await;
                             }
 
                             let mut trailers = HeaderMap::default();

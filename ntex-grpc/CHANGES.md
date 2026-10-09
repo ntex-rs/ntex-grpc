@@ -8,6 +8,10 @@
   call with `RESOURCE_EXHAUSTED`, a message of 4 GiB or more got a truncated
   length prefix. Add `GrpcServer::max_send_message_size()` to change the limit
 
+* The length prefix of a server response and of a compressed request is put
+  in front of the message as a page of its own, the end of the message is no
+  longer copied into a new buffer
+
 * Simplify message compression: compression errors reach the client and
   server as a gRPC status, the same way as decompression errors
 

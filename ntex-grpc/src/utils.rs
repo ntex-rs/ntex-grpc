@@ -2,7 +2,7 @@ use std::{borrow::Cow, mem};
 
 use base64::engine::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
-use ntex_bytes::{Bytes, BytesMut};
+use ntex_bytes::{BytePages, Bytes, BytesMut};
 use ntex_http::{HeaderMap, HeaderValue};
 use urly::quoting::{Component, unquote};
 
@@ -89,6 +89,13 @@ fn message_size(cur: &[u8], data: &[u8], limit: usize) -> Option<usize> {
     );
     let len = u32::from_be_bytes([a, b, c, d]) as usize;
     (len <= limit).then_some(5 + len)
+}
+
+/// Puts the message prefix, the compressed flag and the length, in front of
+/// `msg` as a page of its own, the message is not copied.
+pub(crate) fn prepend_prefix(msg: &mut BytePages, compressed: bool, len: u32) {
+    let [a, b, c, d] = len.to_be_bytes();
+    msg.prepend(Bytes::copy_from_slice(&[u8::from(compressed), a, b, c, d]));
 }
 
 /// Encode a binary metadata value.
@@ -212,6 +219,24 @@ pub(crate) fn percent_decode(val: &HeaderValue) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefix() {
+        let mut msg = BytePages::default();
+        msg.extend_from_slice(&[7; 100]);
+        let body = msg.take().unwrap();
+        let ptr = body.as_ref().as_ptr();
+        msg.append(body);
+
+        prepend_prefix(&mut msg, true, 0x0102_0304);
+        assert_eq!(msg.len(), 105);
+        assert_eq!(msg.take().unwrap().as_ref(), &[1, 1, 2, 3, 4]);
+        // the message is not copied
+        let body = msg.take().unwrap();
+        assert_eq!(body.as_ref().as_ptr(), ptr);
+        assert_eq!(body.as_ref(), &[7; 100]);
+        assert!(msg.take().is_none());
+    }
 
     fn push(data: &mut Data, chunk: &[u8]) {
         data.push(Bytes::copy_from_slice(chunk), 100);

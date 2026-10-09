@@ -187,7 +187,10 @@ async fn send_request<T: MethodDef>(
                     if let Some((st, msg)) = check_message(status, &hdrs, &payload, max_size) {
                         return Err(synthesized_status(st, hdrs, msg, payload.get()));
                     }
-                    continue;
+                    if !limit_other_body(status, &hdrs, &mut payload) {
+                        continue;
+                    }
+                    // not a grpc response, the rest of the body is not read
                 }
                 h2::MessageKind::Eof(data) => {
                     match data {
@@ -198,6 +201,7 @@ async fn send_request<T: MethodDef>(
                             {
                                 return Err(synthesized_status(st, hdrs, msg, payload.get()));
                             }
+                            limit_other_body(status, &hdrs, &mut payload);
                             missing = Some((
                                 GrpcStatus::Internal,
                                 HeaderValue::from_static(NO_TRAILERS),
@@ -300,6 +304,8 @@ async fn send_request<T: MethodDef>(
     .map_err(|e| e.with_service(client.service()))
 }
 
+/// The most of a response body that is not a grpc one, kept for the error.
+const MAX_OTHER_BODY: usize = 64 * 1024;
 const NO_TRAILERS: &str = "Response ended without trailers";
 const NO_GRPC_STATUS: &str = "Response trailers have no grpc-status";
 const EXTRA_DATA: &str = "cardinality violation: expected <EOF> for non server-streaming RPCs, but received another message";
@@ -355,6 +361,25 @@ fn operation_error(
     }
 }
 
+/// Whether the response is a grpc one, its body is a grpc message then.
+fn is_grpc(status: Option<StatusCode>, hdrs: &HeaderMap) -> bool {
+    status == Some(StatusCode::OK)
+        && hdrs
+            .get(header::CONTENT_TYPE)
+            .is_some_and(|val| is_grpc_content_type(val.as_bytes()))
+}
+
+/// Keeps at most [`MAX_OTHER_BODY`] bytes of a response body that is not a
+/// grpc one, e.g. an error page from a proxy. Returns true once the limit is
+/// reached, the rest of the body is dropped.
+fn limit_other_body(status: Option<StatusCode>, hdrs: &HeaderMap, payload: &mut Data) -> bool {
+    if payload.as_slice().len() <= MAX_OTHER_BODY || is_grpc(status, hdrs) {
+        return false;
+    }
+    payload.truncate(MAX_OTHER_BODY);
+    true
+}
+
 /// Checks the response message as data arrives.
 ///
 /// Fails on a message over the size limit, or on data after the message,
@@ -366,7 +391,7 @@ fn check_message(
     payload: &Data,
     max_size: usize,
 ) -> Option<(GrpcStatus, HeaderValue)> {
-    if status != Some(StatusCode::OK) || check_content_type(hdrs).is_some() {
+    if !is_grpc(status, hdrs) {
         return None;
     }
     let data = payload.as_slice();
@@ -480,19 +505,21 @@ fn check_content_type(hdrs: &HeaderMap) -> Option<(GrpcStatus, HeaderValue)> {
             HeaderValue::from_static("Response has no content-type"),
         ));
     };
-    let ct = val.as_bytes();
-    let prefix = b"application/grpc";
-    if ct.len() >= prefix.len()
-        && ct[..prefix.len()].eq_ignore_ascii_case(prefix)
-        && matches!(ct.get(prefix.len()), None | Some(b'+' | b';'))
-    {
+    if is_grpc_content_type(val.as_bytes()) {
         return None;
     }
-
     Some((
         GrpcStatus::Unknown,
         utils::grpc_message("Invalid content-type", val),
     ))
+}
+
+/// `application/grpc`, optionally with a `+` or `;` suffix, in any case.
+fn is_grpc_content_type(ct: &[u8]) -> bool {
+    let prefix = b"application/grpc";
+    ct.len() >= prefix.len()
+        && ct[..prefix.len()].eq_ignore_ascii_case(prefix)
+        && matches!(ct.get(prefix.len()), None | Some(b'+' | b';'))
 }
 
 /// Reads `grpc-status`, an unknown or invalid code is an error with the

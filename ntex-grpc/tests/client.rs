@@ -60,6 +60,10 @@ method!(TwoMessages, "/test.Svc/TwoMessages");
 method!(ExtraData, "/test.Svc/ExtraData");
 method!(Disconnect, "/test.Svc/Disconnect");
 method!(GoAway, "/test.Svc/GoAway");
+method!(BigError, "/test.Svc/BigError");
+method!(BigHtml, "/test.Svc/BigHtml");
+method!(BigGrpc, "/test.Svc/BigGrpc");
+method!(LimitError, "/test.Svc/LimitError");
 
 /// Replies with a message, takes an input.
 struct Upload;
@@ -427,6 +431,65 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                                 .send_payload(Bytes::from_static(b"\0\0\x40\0\x01"), false)
                                 .await
                                 .unwrap();
+                        }
+                        // an http error with a body that never ends
+                        "/test.Svc/BigError" => {
+                            stream
+                                .send_response(
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    grpc_headers(),
+                                    false,
+                                )
+                                .unwrap();
+                            while stream
+                                .send_payload(Bytes::from(vec![b'x'; 30_000]), false)
+                                .await
+                                .is_ok()
+                            {}
+                        }
+                        // an http error with a body at the limit, then a status
+                        "/test.Svc/LimitError" => {
+                            let mut trailers = HeaderMap::new();
+                            trailers.insert(GRPC_STATUS, HeaderValue::from_static("8"));
+                            stream
+                                .send_response(
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    grpc_headers(),
+                                    false,
+                                )
+                                .unwrap();
+                            stream
+                                .send_payload(Bytes::from(vec![b'x'; 64 * 1024]), false)
+                                .await
+                                .unwrap();
+                            stream.send_trailers(trailers).unwrap();
+                        }
+                        // a non-grpc body that passes the limit in its last frame
+                        "/test.Svc/BigHtml" => {
+                            let mut hdrs = grpc_headers();
+                            hdrs.insert(
+                                header::CONTENT_TYPE,
+                                HeaderValue::from_static("text/html"),
+                            );
+                            stream.send_response(StatusCode::OK, hdrs, false).unwrap();
+                            stream
+                                .send_payload(Bytes::from(vec![b'x'; 60_000]), false)
+                                .await
+                                .unwrap();
+                            stream
+                                .send_payload(Bytes::from(vec![b'y'; 10_000]), true)
+                                .await
+                                .unwrap();
+                        }
+                        // a grpc message larger than the limit for other bodies
+                        "/test.Svc/BigGrpc" => {
+                            stream
+                                .send_response(StatusCode::OK, grpc_headers(), false)
+                                .unwrap();
+                            let mut body = vec![0, 0, 1, 0x86, 0xa0];
+                            body.resize(100_005, 0);
+                            stream.send_payload(Bytes::from(body), false).await.unwrap();
+                            stream.send_trailers(status_ok()).unwrap();
                         }
                         // a 3 byte message
                         "/test.Svc/Sized" => {
@@ -1107,6 +1170,50 @@ async fn extra_data() {
     let res = send::<Message>(&client).await.unwrap();
     assert_eq!(res.res_size, 5);
     assert_eq!(*resets.borrow(), [Reason::CANCEL]);
+}
+
+#[ntex::test]
+async fn other_body_limit() {
+    let (client, resets) = client_with_resets();
+    // the client stops reading at 64 KiB, without waiting for the end
+    let err = ntex::time::timeout(Duration::from_secs(5), send::<BigError>(&client))
+        .await
+        .expect("the client must not wait for the end of the stream")
+        .unwrap_err();
+    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Unavailable);
+    assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), "HTTP status 503");
+    assert_eq!(body.as_deref(), Some(&[b'x'; 64 * 1024][..]));
+    ntex::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(*resets.borrow(), [Reason::CANCEL]);
+
+    // a body at the limit is read to the end
+    let err = send::<LimitError>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, _, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::ResourceExhausted);
+    assert!(body.is_none());
+
+    // the last frame passes the limit
+    let err = send::<BigHtml>(&client).await.unwrap_err();
+    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, GrpcStatus::Unknown);
+    assert_eq!(
+        hdrs.get(GRPC_MESSAGE).unwrap(),
+        "Invalid content-type: text/html"
+    );
+    let body = body.as_deref().unwrap();
+    assert_eq!(body.len(), 64 * 1024);
+    assert_eq!(&body[59_999..60_001], b"xy");
+
+    // a grpc message is not limited
+    let res = send::<BigGrpc>(&client).await.unwrap();
+    assert_eq!(res.res_size, 100_005);
 }
 
 #[ntex::test]

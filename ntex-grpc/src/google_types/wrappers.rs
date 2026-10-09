@@ -107,17 +107,26 @@ mod _priv_impl_wrappers {
 
         #[inline]
         fn read(src: &mut crate::Bytes) -> ::std::result::Result<Self, crate::DecodeError> {
-            const STRUCT_NAME: &str = "DoubleValue";
             let mut msg = Self::default();
+            crate::Message::merge_from(&mut msg, src)?;
+            Ok(msg)
+        }
+
+        #[inline]
+        fn merge_from(
+            &mut self,
+            src: &mut crate::Bytes,
+        ) -> ::std::result::Result<(), crate::DecodeError> {
+            const STRUCT_NAME: &str = "DoubleValue";
             while !src.is_empty() {
                 let (tag, wire_type) = crate::encoding::decode_key(src)?;
                 match tag {
-                    1 => crate::NativeType::deserialize(&mut msg.value, tag, wire_type, src)
+                    1 => crate::NativeType::deserialize(&mut self.value, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, "value"))?,
                     _ => crate::encoding::skip_field(wire_type, tag, src)?,
                 }
             }
-            Ok(msg)
+            Ok(())
         }
 
         #[inline]
@@ -147,17 +156,26 @@ mod _priv_impl_wrappers {
 
         #[inline]
         fn read(src: &mut crate::Bytes) -> ::std::result::Result<Self, crate::DecodeError> {
-            const STRUCT_NAME: &str = "FloatValue";
             let mut msg = Self::default();
+            crate::Message::merge_from(&mut msg, src)?;
+            Ok(msg)
+        }
+
+        #[inline]
+        fn merge_from(
+            &mut self,
+            src: &mut crate::Bytes,
+        ) -> ::std::result::Result<(), crate::DecodeError> {
+            const STRUCT_NAME: &str = "FloatValue";
             while !src.is_empty() {
                 let (tag, wire_type) = crate::encoding::decode_key(src)?;
                 match tag {
-                    1 => crate::NativeType::deserialize(&mut msg.value, tag, wire_type, src)
+                    1 => crate::NativeType::deserialize(&mut self.value, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, "value"))?,
                     _ => crate::encoding::skip_field(wire_type, tag, src)?,
                 }
             }
-            Ok(msg)
+            Ok(())
         }
 
         #[inline]
@@ -187,17 +205,26 @@ mod _priv_impl_wrappers {
 
         #[inline]
         fn read(src: &mut crate::Bytes) -> ::std::result::Result<Self, crate::DecodeError> {
-            const STRUCT_NAME: &str = "Int64Value";
             let mut msg = Self::default();
+            crate::Message::merge_from(&mut msg, src)?;
+            Ok(msg)
+        }
+
+        #[inline]
+        fn merge_from(
+            &mut self,
+            src: &mut crate::Bytes,
+        ) -> ::std::result::Result<(), crate::DecodeError> {
+            const STRUCT_NAME: &str = "Int64Value";
             while !src.is_empty() {
                 let (tag, wire_type) = crate::encoding::decode_key(src)?;
                 match tag {
-                    1 => crate::NativeType::deserialize(&mut msg.value, tag, wire_type, src)
+                    1 => crate::NativeType::deserialize(&mut self.value, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, "value"))?,
                     _ => crate::encoding::skip_field(wire_type, tag, src)?,
                 }
             }
-            Ok(msg)
+            Ok(())
         }
 
         #[inline]
@@ -227,17 +254,26 @@ mod _priv_impl_wrappers {
 
         #[inline]
         fn read(src: &mut crate::Bytes) -> ::std::result::Result<Self, crate::DecodeError> {
-            const STRUCT_NAME: &str = "UInt64Value";
             let mut msg = Self::default();
+            crate::Message::merge_from(&mut msg, src)?;
+            Ok(msg)
+        }
+
+        #[inline]
+        fn merge_from(
+            &mut self,
+            src: &mut crate::Bytes,
+        ) -> ::std::result::Result<(), crate::DecodeError> {
+            const STRUCT_NAME: &str = "UInt64Value";
             while !src.is_empty() {
                 let (tag, wire_type) = crate::encoding::decode_key(src)?;
                 match tag {
-                    1 => crate::NativeType::deserialize(&mut msg.value, tag, wire_type, src)
+                    1 => crate::NativeType::deserialize(&mut self.value, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, "value"))?,
                     _ => crate::encoding::skip_field(wire_type, tag, src)?,
                 }
             }
-            Ok(msg)
+            Ok(())
         }
 
         #[inline]
@@ -267,17 +303,26 @@ mod _priv_impl_wrappers {
 
         #[inline]
         fn read(src: &mut crate::Bytes) -> ::std::result::Result<Self, crate::DecodeError> {
-            const STRUCT_NAME: &str = "Int32Value";
             let mut msg = Self::default();
+            crate::Message::merge_from(&mut msg, src)?;
+            Ok(msg)
+        }
+
+        #[inline]
+        fn merge_from(
+            &mut self,
+            src: &mut crate::Bytes,
+        ) -> ::std::result::Result<(), crate::DecodeError> {
+            const STRUCT_NAME: &str = "Int32Value";
             while !src.is_empty() {
                 let (tag, wire_type) = crate::encoding::decode_key(src)?;
                 match tag {
-                    1 => crate::NativeType::deserialize(&mut msg.value, tag, wire_type, src)
+                    1 => crate::NativeType::deserialize(&mut self.value, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, "value"))?,
                     _ => crate::encoding::skip_field(wire_type, tag, src)?,
                 }
             }
-            Ok(msg)
+            Ok(())
         }
 
         #[inline]
@@ -307,17 +352,26 @@ mod _priv_impl_wrappers {
 
         #[inline]
         fn read(src: &mut crate::Bytes) -> ::std::result::Result<Self, crate::DecodeError> {
-            const STRUCT_NAME: &str = "UInt32Value";
             let mut msg = Self::default();
+            crate::Message::merge_from(&mut msg, src)?;
+            Ok(msg)
+        }
+
+        #[inline]
+        fn merge_from(
+            &mut self,
+            src: &mut crate::Bytes,
+        ) -> ::std::result::Result<(), crate::DecodeError> {
+            const STRUCT_NAME: &str = "UInt32Value";
             while !src.is_empty() {
                 let (tag, wire_type) = crate::encoding::decode_key(src)?;
                 match tag {
-                    1 => crate::NativeType::deserialize(&mut msg.value, tag, wire_type, src)
+                    1 => crate::NativeType::deserialize(&mut self.value, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, "value"))?,
                     _ => crate::encoding::skip_field(wire_type, tag, src)?,
                 }
             }
-            Ok(msg)
+            Ok(())
         }
 
         #[inline]
@@ -347,17 +401,26 @@ mod _priv_impl_wrappers {
 
         #[inline]
         fn read(src: &mut crate::Bytes) -> ::std::result::Result<Self, crate::DecodeError> {
-            const STRUCT_NAME: &str = "BoolValue";
             let mut msg = Self::default();
+            crate::Message::merge_from(&mut msg, src)?;
+            Ok(msg)
+        }
+
+        #[inline]
+        fn merge_from(
+            &mut self,
+            src: &mut crate::Bytes,
+        ) -> ::std::result::Result<(), crate::DecodeError> {
+            const STRUCT_NAME: &str = "BoolValue";
             while !src.is_empty() {
                 let (tag, wire_type) = crate::encoding::decode_key(src)?;
                 match tag {
-                    1 => crate::NativeType::deserialize(&mut msg.value, tag, wire_type, src)
+                    1 => crate::NativeType::deserialize(&mut self.value, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, "value"))?,
                     _ => crate::encoding::skip_field(wire_type, tag, src)?,
                 }
             }
-            Ok(msg)
+            Ok(())
         }
 
         #[inline]
@@ -387,17 +450,26 @@ mod _priv_impl_wrappers {
 
         #[inline]
         fn read(src: &mut crate::Bytes) -> ::std::result::Result<Self, crate::DecodeError> {
-            const STRUCT_NAME: &str = "StringValue";
             let mut msg = Self::default();
+            crate::Message::merge_from(&mut msg, src)?;
+            Ok(msg)
+        }
+
+        #[inline]
+        fn merge_from(
+            &mut self,
+            src: &mut crate::Bytes,
+        ) -> ::std::result::Result<(), crate::DecodeError> {
+            const STRUCT_NAME: &str = "StringValue";
             while !src.is_empty() {
                 let (tag, wire_type) = crate::encoding::decode_key(src)?;
                 match tag {
-                    1 => crate::NativeType::deserialize(&mut msg.value, tag, wire_type, src)
+                    1 => crate::NativeType::deserialize(&mut self.value, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, "value"))?,
                     _ => crate::encoding::skip_field(wire_type, tag, src)?,
                 }
             }
-            Ok(msg)
+            Ok(())
         }
 
         #[inline]
@@ -427,17 +499,26 @@ mod _priv_impl_wrappers {
 
         #[inline]
         fn read(src: &mut crate::Bytes) -> ::std::result::Result<Self, crate::DecodeError> {
-            const STRUCT_NAME: &str = "BytesValue";
             let mut msg = Self::default();
+            crate::Message::merge_from(&mut msg, src)?;
+            Ok(msg)
+        }
+
+        #[inline]
+        fn merge_from(
+            &mut self,
+            src: &mut crate::Bytes,
+        ) -> ::std::result::Result<(), crate::DecodeError> {
+            const STRUCT_NAME: &str = "BytesValue";
             while !src.is_empty() {
                 let (tag, wire_type) = crate::encoding::decode_key(src)?;
                 match tag {
-                    1 => crate::NativeType::deserialize(&mut msg.value, tag, wire_type, src)
+                    1 => crate::NativeType::deserialize(&mut self.value, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, "value"))?,
                     _ => crate::encoding::skip_field(wire_type, tag, src)?,
                 }
             }
-            Ok(msg)
+            Ok(())
         }
 
         #[inline]

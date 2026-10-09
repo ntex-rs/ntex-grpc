@@ -14,6 +14,9 @@
 * Add `types::Unpacked` format, used by generated code for unpacked repeated
   scalar fields
 
+* Add `Message::merge_from()`, a message field that appears more than once
+  is merged instead of replaced, as the protobuf spec requires
+
 * `float` fields are encoded as fixed32 without a length prefix, they were not
   readable by other protobuf implementations and `encoded_len()` was one byte
   short per field

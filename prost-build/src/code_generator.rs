@@ -238,7 +238,7 @@ impl CodeGenerator<'_> {
                 "{ops}serialize(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::Default, dst);",
             ));
             read.push_str(&format!(
-                "{field_no} => {ops}deserialize(&mut msg.{field_name}, tag, wire_type, src)
+                "{field_no} => {ops}deserialize(&mut self.{field_name}, tag, wire_type, src)
                     .map_err(|err| err.push(STRUCT_NAME, \"{field_name}\"))?,",
             ));
             encoded_len.push_str(&format!(
@@ -273,7 +273,7 @@ impl CodeGenerator<'_> {
             ));
             read.push_str(&format!(
                 "
-               {} => ::ntex_grpc::NativeType::deserialize(&mut msg.{}, tag, wire_type, src)
+               {} => ::ntex_grpc::NativeType::deserialize(&mut self.{}, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, \"{}\"))?,",
                 fields.iter().map(|(field, _)| field.number()).join("| "),
                 to_snake(oneof.name()),
@@ -320,13 +320,19 @@ impl CodeGenerator<'_> {
         self.priv_buf.push_str(&format!(
             "#[inline]
              fn read(src: &mut ::ntex_grpc::Bytes) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {{
-                 const STRUCT_NAME: &str = \"{}\";
                  let mut msg = Self::default();
+                 ::ntex_grpc::Message::merge_from(&mut msg, src)?;
+                 Ok(msg)
+             }}
+
+             #[inline]
+             fn merge_from(&mut self, src: &mut ::ntex_grpc::Bytes) -> ::std::result::Result<(), ::ntex_grpc::DecodeError> {{
+                 const STRUCT_NAME: &str = \"{}\";
                  while !src.is_empty() {{
                     let (tag, wire_type) = ::ntex_grpc::encoding::decode_key(src)?;
                     {read}
                  }}
-                 Ok(msg)
+                 Ok(())
              }}\n\n",
             to_upper_camel(&message_name)
         ));
@@ -546,7 +552,11 @@ impl CodeGenerator<'_> {
                 "{name}::{field_name}(ref value) => {ops}serialize(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown, dst),",
             ));
             read.push_str(&format!(
-                "{field_no} => {name}::{field_name}({ops}deserialize_default({field_no}, wire_type, src)?),\n",
+                "{field_no} => if let {name}::{field_name}(ref mut value) = *self {{
+                    {ops}deserialize(value, {field_no}, wire_type, src)?;
+                }} else {{
+                    *self = {name}::{field_name}({ops}deserialize_default({field_no}, wire_type, src)?);
+                }},\n",
             ));
             encoded_len.push_str(&format!(
                 "{name}::{field_name}(ref value) => {ops}serialized_len(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown),",
@@ -598,10 +608,10 @@ impl CodeGenerator<'_> {
             #[inline]
             /// Decodes an instance of the message from a buffer, and merges it into self.
             fn deserialize(&mut self, tag: u32, wire_type: ::ntex_grpc::WireType, src: &mut ::ntex_grpc::Bytes) -> ::std::result::Result<(), ::ntex_grpc::DecodeError> {{
-                *self = match tag {{
+                match tag {{
                     {}
                     _ => unreachable!(\"invalid {}, tag: {{}}\", tag),
-                }};
+                }}
                 Ok(())
             }}\n", read.trim_end(), to_upper_camel(oneof.name())));
 

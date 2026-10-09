@@ -17,6 +17,9 @@
   unset fields are no longer written as empty messages. This is a breaking
   change for code that uses generated structs
 
+* Generate `Message::merge_from()`, repeated occurrences of a message field or
+  of the same oneof message variant are merged
+
 * Fix multi-line service and method comments being joined into one doc line
 
 * Fence code examples from proto comments, so rustdoc does not run them as Rust doctests

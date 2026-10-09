@@ -449,9 +449,7 @@ impl<T: NativeType> NativeType for Vec<T> {
     fn encoded_len(&self, tag: u32) -> usize {
         if T::TYPE == WireType::Varint {
             let len = self.iter().map(NativeType::value_len).sum::<usize>();
-            self.iter().map(NativeType::value_len).sum::<usize>()
-                + encoding::key_len(tag)
-                + encoding::encoded_len_varint(len as u64)
+            len + encoding::key_len(tag) + encoding::encoded_len_varint(len as u64)
         } else {
             self.iter().map(|value| value.encoded_len(tag)).sum()
         }
@@ -749,5 +747,15 @@ mod tests {
         let (tag, wire_type) = encoding::decode_key(&mut buf2).unwrap();
         msg3.deserialize(tag, wire_type, &mut buf2).unwrap();
         assert_eq!(msg, msg3);
+    }
+
+    #[test]
+    fn packed_varint_len() {
+        let v: Vec<u32> = vec![1, 300, 70000];
+        let mut buf = BytePages::default();
+        v.serialize(5, DefaultValue::Default, &mut buf);
+        // key + length + 1 + 2 + 3 bytes of values
+        assert_eq!(NativeType::encoded_len(&v, 5), 8);
+        assert_eq!(buf.len(), 8);
     }
 }

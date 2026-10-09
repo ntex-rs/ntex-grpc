@@ -2,6 +2,12 @@
 
 ## [3.2.0] - Unreleased
 
+* The length of a packed repeated field sums its values once
+
+* Server does not send a response message larger than 2 GiB - 1 and fails the
+  call with `RESOURCE_EXHAUSTED`, a message of 4 GiB or more got a truncated
+  length prefix. Add `GrpcServer::max_send_message_size()` to change the limit
+
 * Simplify message compression: compression errors reach the client and
   server as a gRPC status, the same way as decompression errors
 

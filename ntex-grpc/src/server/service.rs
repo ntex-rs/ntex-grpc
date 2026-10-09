@@ -28,6 +28,9 @@ const HDR_APP_GRPC: HeaderValue = HeaderValue::from_static("application/grpc");
 /// The default limit of a request message.
 const DEFAULT_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
+/// The default limit of a response message.
+const DEFAULT_MAX_SEND_MESSAGE_SIZE: usize = i32::MAX as usize;
+
 const MILLIS_IN_HOUR: u64 = 60 * 60 * 1000;
 const MILLIS_IN_MINUTE: u64 = 60 * 1000;
 
@@ -35,6 +38,7 @@ const MILLIS_IN_MINUTE: u64 = 60 * 1000;
 pub struct GrpcServer<T> {
     factory: Rc<T>,
     max_message_size: usize,
+    max_send_message_size: usize,
 }
 
 impl<T> GrpcServer<T> {
@@ -43,6 +47,7 @@ impl<T> GrpcServer<T> {
         Self {
             factory: Rc::new(factory),
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
+            max_send_message_size: DEFAULT_MAX_SEND_MESSAGE_SIZE,
         }
     }
 
@@ -54,6 +59,18 @@ impl<T> GrpcServer<T> {
     /// is 4 MiB.
     pub fn max_message_size(mut self, size: usize) -> Self {
         self.max_message_size = size;
+        self
+    }
+
+    #[must_use]
+    /// Set the largest response message the server sends, in bytes.
+    ///
+    /// A larger message fails the call with `RESOURCE_EXHAUSTED`. A message
+    /// is never sent if it is 4 GiB or larger, its length does not fit the
+    /// length prefix. A compressed message is checked after compression. The
+    /// default is 2 GiB - 1.
+    pub fn max_send_message_size(mut self, size: usize) -> Self {
+        self.max_send_message_size = size;
         self
     }
 }
@@ -71,7 +88,10 @@ where
 
         let _ = h2::server::handle_one(
             io,
-            Pipeline::new((), PublishService::new(svc, cfg, self.max_message_size)),
+            Pipeline::new(
+                (),
+                PublishService::new(svc, cfg, self.max_message_size, self.max_send_message_size),
+            ),
             Pipeline::new((), ControlService),
         )
         .await;
@@ -127,6 +147,7 @@ struct PublishService<S: Service<(), ServerRequest>> {
     cfg: SharedCfg,
     service: S,
     max_size: usize,
+    max_send_size: usize,
     streams: RefCell<HashMap<StreamId, Inflight>>,
 }
 
@@ -141,11 +162,12 @@ impl<S> PublishService<S>
 where
     S: Service<(), ServerRequest, Res = ServerResponse, Error = ServerError>,
 {
-    fn new(service: S, cfg: SharedCfg, max_size: usize) -> Self {
+    fn new(service: S, cfg: SharedCfg, max_size: usize, max_send_size: usize) -> Self {
         Self {
             cfg,
             service,
             max_size,
+            max_send_size,
             streams: RefCell::new(HashMap::default()),
         }
     }
@@ -346,18 +368,38 @@ where
                                 // smaller, is sent uncompressed
                                 #[cfg(feature = "compression")]
                                 let compressed = match encoding {
-                                    Some(enc) => match enc.compress(&mut res.payload).await {
-                                        Ok(compressed) => compressed,
-                                        Err((status, msg)) => {
-                                            send_error(&stream, status, msg);
+                                    Some(enc) => {
+                                        // the uncompressed message must fit
+                                        // the length prefix too
+                                        if let Err(msg) = send_size(res.payload.len(), usize::MAX)
+                                        {
+                                            send_error(
+                                                &stream,
+                                                GrpcStatus::ResourceExhausted,
+                                                msg,
+                                            );
                                             return Ok(());
                                         }
-                                    },
+                                        match enc.compress(&mut res.payload).await {
+                                            Ok(compressed) => compressed,
+                                            Err((status, msg)) => {
+                                                send_error(&stream, status, msg);
+                                                return Ok(());
+                                            }
+                                        }
+                                    }
                                     None => false,
+                                };
+                                let len = match send_size(res.payload.len(), self.max_send_size) {
+                                    Ok(len) => len,
+                                    Err(msg) => {
+                                        send_error(&stream, GrpcStatus::ResourceExhausted, msg);
+                                        return Ok(());
+                                    }
                                 };
                                 let mut buf = BytePages::default();
                                 buf.put_u8(u8::from(compressed));
-                                buf.put_u32(res.payload.len() as u32); // length
+                                buf.put_u32(len);
                                 res.payload.move_to(&mut buf);
 
                                 let _ = stream.send_pages(buf, false).await;
@@ -435,6 +477,20 @@ fn hdrs() -> HeaderMap {
     hdrs
 }
 
+/// Returns the length prefix of a response message, or the error message if
+/// the message must not be sent.
+fn send_size(len: usize, max_size: usize) -> Result<u32, HeaderValue> {
+    let msg = if len > max_size {
+        format!("grpc: trying to send message larger than max ({len} vs. {max_size})")
+    } else if let Ok(len) = u32::try_from(len) {
+        return Ok(len);
+    } else {
+        format!("grpc: message too large ({len} bytes)")
+    };
+    Err(HeaderValue::try_from(msg)
+        .unwrap_or_else(|_| HeaderValue::from_static("grpc: message too large")))
+}
+
 fn send_error(stream: &StreamRef, st: GrpcStatus, msg: HeaderValue) {
     let mut trailers = HeaderMap::default();
     trailers.insert(consts::GRPC_STATUS, st.into());
@@ -492,6 +548,22 @@ fn try_parse_grpc_timeout(val: &HeaderValue) -> Result<Millis, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn send_size_limit() {
+        assert_eq!(send_size(0, 0).unwrap(), 0);
+        assert_eq!(send_size(3, 3).unwrap(), 3);
+        assert_eq!(
+            send_size(4, 3).unwrap_err(),
+            "grpc: trying to send message larger than max (4 vs. 3)"
+        );
+        let max = u32::MAX as usize;
+        assert_eq!(send_size(max, usize::MAX).unwrap(), u32::MAX);
+        assert_eq!(
+            send_size(max + 1, usize::MAX).unwrap_err(),
+            "grpc: message too large (4294967296 bytes)"
+        );
+    }
 
     #[test]
     fn inflight_size() {

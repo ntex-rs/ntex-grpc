@@ -353,7 +353,7 @@ where
                             if let Some(enc) = encoding
                                 && !res.payload.is_empty()
                             {
-                                match enc.compress(res.payload.freeze()).await {
+                                match enc.compress(&mut res.payload).await {
                                     Ok(payload) => {
                                         buf.put_u8(1);
                                         buf.put_u32(payload.len() as u32);

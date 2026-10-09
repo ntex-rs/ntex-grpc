@@ -458,7 +458,7 @@ async fn encode_message<M: Message>(
             send_size(len, usize::MAX)?;
             let mut msg = BytePages::default();
             val.write(&mut msg);
-            let msg = enc.compress(msg.freeze()).await.map_err(|err| {
+            let msg = enc.compress(&mut msg).await.map_err(|err| {
                 let msg = HeaderValue::try_from(format!("grpc: error while compressing: {err}"))
                     .unwrap_or_else(|_| HeaderValue::from_static("grpc: error while compressing"));
                 let mut hdrs = HeaderMap::new();

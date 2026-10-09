@@ -2,6 +2,11 @@
 
 ## [3.3.0] - Unreleased
 
+* Add `encode_grpc_message()`, percent-encodes a `grpc-message` value
+
+* Server and `#[server]` percent-encode the request data they put in a
+  `grpc-message`, such as the method name or the `content-type`
+
 * Client ignores a user `grpc-accept-encoding` header, it was sent along
   with the client's own
 

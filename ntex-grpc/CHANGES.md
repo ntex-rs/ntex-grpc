@@ -14,7 +14,8 @@
   result once more. Decompression allocates the size stored in the message up
   front, the zstd encoder stores the message size in the frame. A message
   that spans several pages is compressed page by page instead of being joined
-  into one buffer first
+  into one buffer first. A message is decompressed once: the compressed size
+  decides whether that happens in place or on the thread pool
 
 * Server checks the request message length as data arrives and rejects a
   message over the limit before buffering the body, then resets the stream so

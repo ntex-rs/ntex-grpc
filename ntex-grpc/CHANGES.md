@@ -2,6 +2,9 @@
 
 ## [3.3.0] - Unreleased
 
+* Server rejects a `grpc-timeout` with a leading `+`, only digits are
+  allowed
+
 * Client rounds `grpc-timeout` up to its unit, it was rounded down so the
   server could give up first, and caps it at `99999999H` instead of
   panicking

@@ -1,6 +1,9 @@
 # Changes
 
-## [3.2.1] - Unreleased
+## [3.3.0] - Unreleased
+
+* Add `decode_binary_header_values()`, decodes a `-bin` header value that
+  holds several values joined with `,`
 
 * Server sends the response uncompressed if the request's
   `grpc-accept-encoding` does not list the request's encoding

@@ -152,7 +152,9 @@ pub enum ClientError {
     ///
     /// Holds the trailers if the server replied with `DEADLINE_EXCEEDED`.
     /// The headers are empty if the client stopped waiting by itself, the
-    /// stream is reset with `CANCEL` then.
+    /// stream is reset with `CANCEL` then. A `CANCEL` reset by the server
+    /// once the timeout has run out is reported here too, with the response
+    /// headers received so far.
     #[error("Deadline exceeded")]
     DeadlineExceeded(HeaderMap),
     /// The server replied with a status other than `OK`.
@@ -168,8 +170,9 @@ pub enum ClientError {
     ///   `UNIMPLEMENTED` and 503 to `UNAVAILABLE`. The response headers take
     ///   the place of the trailers here.
     /// * a stream reset by the server is mapped as the gRPC spec says, e.g.
-    ///   `REFUSED_STREAM` to `UNAVAILABLE` and `CANCEL` to `CANCELLED`. The
-    ///   response headers take the place of the trailers here.
+    ///   `REFUSED_STREAM` to `UNAVAILABLE` and `CANCEL` to `CANCELLED`, or
+    ///   to [`ClientError::DeadlineExceeded`] once the timeout has run out.
+    ///   The response headers take the place of the trailers here.
     /// * a connection that is closed, fails or goes away before the call
     ///   ends gives `UNAVAILABLE`. The response headers take the place of
     ///   the trailers here.

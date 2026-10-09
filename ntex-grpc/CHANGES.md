@@ -2,6 +2,9 @@
 
 ## [3.2.1] - Unreleased
 
+* Client reports a `CANCEL` stream reset after the request timeout ran out
+  as `ClientError::DeadlineExceeded`, it was reported as `CANCELLED`
+
 * Implement `Message` for `Box<T>`, used by recursive message fields
 
 * Write `-0.0` values of `float` and `double` fields, only `+0.0` is the

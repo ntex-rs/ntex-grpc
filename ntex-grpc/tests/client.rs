@@ -52,6 +52,7 @@ method!(EchoAll, "/test.Svc/EchoAll");
 method!(Accepted, "/test.Svc/Accepted");
 method!(NoContent, "/test.Svc/NoContent");
 method!(Refused, "/test.Svc/Refused");
+method!(Cancel, "/test.Svc/Cancel");
 method!(ResetAfterHeaders, "/test.Svc/ResetAfterHeaders");
 method!(Large, "/test.Svc/Large");
 method!(Sized, "/test.Svc/Sized");
@@ -432,6 +433,9 @@ fn connect() -> (Io, Rc<RefCell<Vec<Reason>>>) {
                         }
                         "/test.Svc/Refused" => {
                             stream.reset(Reason::REFUSED_STREAM);
+                        }
+                        "/test.Svc/Cancel" => {
+                            stream.reset(Reason::CANCEL);
                         }
                         "/test.Svc/ResetAfterHeaders" => {
                             stream
@@ -1005,6 +1009,19 @@ async fn stream_reset() {
         "Stream reset with ENHANCE_YOUR_CALM"
     );
     assert_eq!(body.as_deref(), Some(&b"\0\0"[..]));
+
+    // `CANCEL` before the deadline is `CANCELLED`, also with a timeout
+    for timeout in [None, Some(Duration::from_secs(60))] {
+        let mut req = Request::<_, Cancel>::new(&client, &());
+        if let Some(timeout) = timeout {
+            req.timeout(timeout);
+        }
+        let err = req.send().await.unwrap_err();
+        let ClientError::GrpcStatus(status, ..) = &*err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(*status, GrpcStatus::Cancelled);
+    }
 }
 
 #[ntex::test]

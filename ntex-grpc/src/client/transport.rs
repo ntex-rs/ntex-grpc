@@ -1,4 +1,5 @@
-use std::{convert::TryFrom, future::Future, str::FromStr, time::Duration};
+use std::time::{Duration, Instant};
+use std::{convert::TryFrom, future::Future, str::FromStr};
 
 use ntex_bytes::{Buf, BufMut, BytePages, Bytes};
 use ntex_error::Error;
@@ -34,9 +35,9 @@ impl<T: MethodDef> Transport<T> for h2::client::Client {
         val: &T::Input,
         ctx: &mut RequestContext,
     ) -> Result<Response<T>, Self::Error> {
-        with_deadline(ctx.get_timeout(), async {
+        with_deadline(ctx.get_timeout(), async |deadline| {
             let client = self.client().await.map_err(|e| e.map(ClientError::from))?;
-            send_request(&client, val, ctx).await
+            send_request(&client, val, ctx, deadline).await
         })
         .await
     }
@@ -50,9 +51,11 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
         val: &T::Input,
         ctx: &mut RequestContext,
     ) -> Result<Response<T>, Self::Error> {
-        with_deadline(ctx.get_timeout(), send_request(self, val, ctx))
-            .await
-            .map_err(|e| e.with_service(self.service()))
+        with_deadline(ctx.get_timeout(), async |deadline| {
+            send_request(self, val, ctx, deadline).await
+        })
+        .await
+        .map_err(|e| e.with_service(self.service()))
     }
 }
 
@@ -60,19 +63,25 @@ impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
 ///
 /// The pending stream is dropped, which resets it with `CANCEL`. A zero
 /// timeout has already run out, the request is not sent then.
-async fn with_deadline<R>(
+///
+/// `f` gets the deadline, the time the timeout runs out.
+async fn with_deadline<R, F>(
     timeout: Option<Duration>,
-    fut: impl Future<Output = Result<R, Error<ClientError>>>,
-) -> Result<R, Error<ClientError>> {
+    f: impl FnOnce(Option<Instant>) -> F,
+) -> Result<R, Error<ClientError>>
+where
+    F: Future<Output = Result<R, Error<ClientError>>>,
+{
     if let Some(timeout) = timeout {
         if timeout.is_zero() {
             return Err(Error::from(ClientError::DeadlineExceeded(HeaderMap::new())));
         }
-        time::timeout(timeout, fut)
+        let deadline = Instant::now().checked_add(timeout);
+        time::timeout(timeout, f(deadline))
             .await
             .unwrap_or_else(|()| Err(Error::from(ClientError::DeadlineExceeded(HeaderMap::new()))))
     } else {
-        fut.await
+        f(None).await
     }
 }
 
@@ -81,6 +90,7 @@ async fn send_request<T: MethodDef>(
     client: &h2::client::SimpleClient,
     val: &T::Input,
     ctx: &mut RequestContext,
+    deadline: Option<Instant>,
 ) -> Result<Response<T>, Error<ClientError>> {
     if let Some(err) = ctx.take_error() {
         return Err(Error::from(ClientError::Http(err)).with_service(client.service()));
@@ -238,7 +248,7 @@ async fn send_request<T: MethodDef>(
                         }
                         h2::StreamEof::Error(err) => {
                             if let h2::StreamError::Reset(reason) = *err {
-                                return Err(reset_error(reason, hdrs, payload.get()));
+                                return Err(reset_error(reason, hdrs, payload.get(), deadline));
                             }
                             return Err(err.map(ClientError::Stream));
                         }
@@ -330,8 +340,17 @@ fn http_status_error(st: StatusCode, hdrs: HeaderMap, body: Bytes) -> Error<Clie
 /// Maps a stream reset by the server.
 ///
 /// The response headers received so far are reported in place of the
-/// trailers.
-fn reset_error(reason: Reason, hdrs: HeaderMap, body: Bytes) -> Error<ClientError> {
+/// trailers. A `CANCEL` once the deadline has passed is reported as
+/// `DEADLINE_EXCEEDED`, the server stopped the call because of the timeout.
+fn reset_error(
+    reason: Reason,
+    hdrs: HeaderMap,
+    body: Bytes,
+    deadline: Option<Instant>,
+) -> Error<ClientError> {
+    if reason == Reason::CANCEL && deadline.is_some_and(|d| Instant::now() >= d) {
+        return Error::from(ClientError::DeadlineExceeded(hdrs));
+    }
     let msg = HeaderValue::try_from(format!("Stream reset with {reason:?}"))
         .unwrap_or_else(|_| HeaderValue::from_static("Stream reset"));
     synthesized_status(GrpcStatus::from(reason), hdrs, msg, body)
@@ -579,6 +598,31 @@ mod tests {
             Bytes::new(),
         );
         assert!(matches!(*err, ClientError::Operation(OperationError::Idle)));
+    }
+
+    #[test]
+    fn reset_at_deadline() {
+        let mut hdrs = HeaderMap::new();
+        hdrs.insert(header::CONTENT_TYPE, HeaderValue::from_static("x"));
+        let past = Instant::now().checked_sub(Duration::from_millis(1));
+        let future = Instant::now().checked_add(Duration::from_secs(60));
+
+        let status =
+            |reason, deadline| match &*reset_error(reason, hdrs.clone(), Bytes::new(), deadline) {
+                ClientError::GrpcStatus(st, ..) => Some(*st),
+                ClientError::DeadlineExceeded(h) => {
+                    assert_eq!(h.get(header::CONTENT_TYPE).unwrap(), "x");
+                    None
+                }
+                err => panic!("{err:?}"),
+            };
+        assert_eq!(status(Reason::CANCEL, past), None);
+        assert_eq!(status(Reason::CANCEL, future), Some(GrpcStatus::Cancelled));
+        assert_eq!(status(Reason::CANCEL, None), Some(GrpcStatus::Cancelled));
+        assert_eq!(
+            status(Reason::REFUSED_STREAM, past),
+            Some(GrpcStatus::Unavailable)
+        );
     }
 
     #[test]

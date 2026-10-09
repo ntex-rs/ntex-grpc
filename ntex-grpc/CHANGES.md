@@ -2,6 +2,12 @@
 
 ## [3.2.0] - Unreleased
 
+* Server sends an empty response message from a static buffer instead of
+  allocating a page for its 5-byte prefix
+
+* Server reports a request without a message and a truncated request message
+  with different `grpc-message` texts
+
 * Add the `compression` feature with gzip and zstd message compression. Client
   and server accept compressed messages and send
   `grpc-accept-encoding: gzip,zstd`. `Request::compression()` and

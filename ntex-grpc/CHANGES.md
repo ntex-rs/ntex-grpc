@@ -2,9 +2,18 @@
 
 ## [3.2.0] - Unreleased
 
-* Simplify message compression: decompression reads through `io::copy`, and
-  compression errors reach the client and server as a gRPC status, the same
-  way as decompression errors
+* Simplify message compression: compression errors reach the client and
+  server as a gRPC status, the same way as decompression errors
+
+* Use less memory for compressed messages. A zstd message is decoded straight
+  into its buffer, in one pass when the frame stores its size, gzip no longer
+  copies the input through a 32 KiB buffer, and the compressed message is
+  written into pages instead of a growing buffer. zstd uses a 512 KiB window,
+  and the buffer for a decompressed message is at most 64 times the size of
+  the compressed one until the data arrives
+
+* Messages under 64 bytes, and messages that do not get smaller, are sent
+  uncompressed even if the call uses compression
 
 * Server gives back the memory of its map of open streams after a burst of
   requests, instead of keeping it for the life of the connection

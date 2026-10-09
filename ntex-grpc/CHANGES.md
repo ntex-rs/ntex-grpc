@@ -2,6 +2,9 @@
 
 ## [3.3.0] - Unreleased
 
+* Client ignores a user `grpc-accept-encoding` header, it was sent along
+  with the client's own
+
 * Server answers a path that is not `/service/method` with HTTP status 200
   and `UNIMPLEMENTED`, it sent HTTP status 404 without a `grpc-status`
 

@@ -1350,6 +1350,7 @@ async fn reserved_headers() {
         "user-agent",
         "te",
         "grpc-encoding",
+        "grpc-accept-encoding",
         "grpc-message-type",
         "grpc-message",
         "grpc-status",
@@ -1357,9 +1358,7 @@ async fn reserved_headers() {
     ] {
         req.header(key, "custom");
     }
-    req.header("grpc-accept-encoding", "gzip")
-        .header("x-a", "1")
-        .timeout(Duration::from_secs(1));
+    req.header("x-a", "1").timeout(Duration::from_secs(1));
     let res = req.send().await.unwrap();
 
     let get_all = |name: &str| {
@@ -1382,11 +1381,10 @@ async fn reserved_headers() {
     assert!(get_all("grpc-message").is_empty());
     assert!(get_all("grpc-status").is_empty());
     assert_eq!(get_all("grpc-timeout"), ["1000000u"]);
-    // sent along with the client's value
     #[cfg(not(feature = "compression"))]
-    assert_eq!(get_all("grpc-accept-encoding"), ["gzip", "identity"]);
+    assert_eq!(get_all("grpc-accept-encoding"), ["identity"]);
     #[cfg(feature = "compression")]
-    assert_eq!(get_all("grpc-accept-encoding"), ["gzip", "gzip,zstd"]);
+    assert_eq!(get_all("grpc-accept-encoding"), ["gzip,zstd"]);
     assert_eq!(get_all("x-a"), ["1"]);
 }
 

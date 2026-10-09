@@ -1,6 +1,7 @@
 use std::io::{self, Read, Write};
+use std::iter;
 
-use ntex_bytes::{Bytes, BytesMut};
+use ntex_bytes::{BytePage, BytePages, Bytes, BytesMut};
 use ntex_http::HeaderValue;
 
 use crate::GrpcStatus;
@@ -68,28 +69,40 @@ impl Compression {
         }
     }
 
-    /// Compresses `data` with the default level of the encoding.
-    pub(crate) async fn compress(self, data: Bytes) -> io::Result<Bytes> {
-        let blocking = data.len() >= self.compress_limit();
-        offload(blocking, move || self.compress_sync(&data))
-            .await
-            .unwrap_or_else(|err| Err(io::Error::other(err)))
+    /// Compresses `data` with the default level of the encoding, `data` is
+    /// left empty.
+    ///
+    /// The pages are passed to the encoder one by one, they are not joined
+    /// into a single buffer first.
+    pub(crate) async fn compress(self, data: &mut BytePages) -> io::Result<Bytes> {
+        let len = data.len();
+        let pages: Vec<BytePage> = iter::from_fn(|| data.take()).collect();
+        offload(len >= self.compress_limit(), move || {
+            self.compress_sync(len, &pages)
+        })
+        .await
+        .unwrap_or_else(|err| Err(io::Error::other(err)))
     }
 
-    fn compress_sync(self, data: &[u8]) -> io::Result<Bytes> {
+    fn compress_sync(self, len: usize, pages: &[BytePage]) -> io::Result<Bytes> {
+        fn write<W: Write>(mut enc: W, pages: &[BytePage]) -> io::Result<W> {
+            for page in pages {
+                enc.write_all(page)?;
+            }
+            Ok(enc)
+        }
+
         let out = match self {
             Compression::Gzip => {
-                let mut enc =
+                let enc =
                     flate2::write::GzEncoder::new(BytesMut::new(), flate2::Compression::default());
-                enc.write_all(data)?;
-                enc.finish()?
+                write(enc, pages)?.finish()?
             }
             Compression::Zstd => {
                 // the frame stores the size, the receiver allocates it at once
                 let mut enc = zstd::Encoder::new(BytesMut::new(), 0)?;
-                enc.set_pledged_src_size(u64::try_from(data.len()).ok())?;
-                enc.write_all(data)?;
-                enc.finish()?
+                enc.set_pledged_src_size(u64::try_from(len).ok())?;
+                write(enc, pages)?.finish()?
             }
         };
         Ok(freeze(out))
@@ -259,8 +272,30 @@ mod tests {
 
     const ALL: [Compression; 2] = [Compression::Gzip, Compression::Zstd];
 
+    /// Compresses `data` stored in 4 KiB pages.
     async fn compress(enc: Compression, data: &[u8]) -> Bytes {
-        enc.compress(Bytes::copy_from_slice(data)).await.unwrap()
+        let mut pages = BytePages::new(ntex_bytes::BytePageSize::Size4);
+        pages.extend_from_slice(data);
+        let res = enc.compress(&mut pages).await.unwrap();
+        assert!(pages.is_empty());
+        res
+    }
+
+    #[ntex::test]
+    async fn compress_pages() {
+        let data: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+        for enc in ALL {
+            let mut pages = BytePages::new(ntex_bytes::BytePageSize::Size4);
+            pages.extend_from_slice(&data);
+            assert!(pages.num_pages() > 1);
+            let compressed = enc.compress(&mut pages).await.unwrap();
+            assert!(pages.is_empty());
+            assert_eq!(
+                enc.decompress(compressed, data.len()).await.unwrap(),
+                data,
+                "{enc:?}"
+            );
+        }
     }
 
     #[ntex::test]
@@ -370,8 +405,9 @@ mod tests {
         for enc in ALL {
             let limit = enc.compress_limit();
             for (size, blocking) in [(limit - 1, false), (limit, true)] {
-                let data = Bytes::from(vec![b'a'; size]);
-                let (res, used) = offloaded(enc.compress(data)).await;
+                let mut data = BytePages::default();
+                data.extend_from_slice(&vec![b'a'; size]);
+                let (res, used) = offloaded(enc.compress(&mut data)).await;
                 assert!(res.is_ok());
                 assert_eq!(used, blocking, "{enc:?} {size}");
             }

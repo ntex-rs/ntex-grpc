@@ -17,7 +17,8 @@ use crate::types::{DefaultValue, NativeType};
 
 /// Encoding of a protobuf field of type `T`.
 ///
-/// Implemented by marker types: [`Native`], [`ZigZag`], [`Fixed`] and [`Map`].
+/// Implemented by marker types: [`Native`], [`ZigZag`], [`Fixed`], [`Unpacked`]
+/// and [`Map`].
 pub trait FieldFormat<T> {
     /// Serialize protobuf field
     fn serialize(value: &T, tag: u32, default: DefaultValue<&T>, dst: &mut BytePages);
@@ -317,6 +318,41 @@ scalar!(Fixed, u32);
 scalar!(Fixed, i32);
 scalar!(Fixed, u64);
 scalar!(Fixed, i64);
+
+/// Repeated scalar field written unpacked, one tagged value per element.
+///
+/// Used for `proto2` repeated scalar fields and fields with `[packed = false]`.
+/// `F` is the format of the elements, both packed and unpacked values are read.
+#[derive(Copy, Clone, Debug)]
+pub struct Unpacked<F = Native>(PhantomData<F>);
+
+impl<T, F> FieldFormat<Vec<T>> for Unpacked<F>
+where
+    F: FieldFormat<T> + FieldFormat<Vec<T>>,
+{
+    fn serialize(value: &Vec<T>, tag: u32, _: DefaultValue<&Vec<T>>, dst: &mut BytePages) {
+        for item in value {
+            <F as FieldFormat<T>>::serialize(item, tag, DefaultValue::Unknown, dst);
+        }
+    }
+
+    fn serialized_len(value: &Vec<T>, tag: u32, _: DefaultValue<&Vec<T>>) -> usize {
+        value
+            .iter()
+            .map(|item| <F as FieldFormat<T>>::serialized_len(item, tag, DefaultValue::Unknown))
+            .sum()
+    }
+
+    #[inline]
+    fn deserialize(
+        value: &mut Vec<T>,
+        tag: u32,
+        wtype: WireType,
+        src: &mut Bytes,
+    ) -> Result<(), DecodeError> {
+        <F as FieldFormat<Vec<T>>>::deserialize(value, tag, wtype, src)
+    }
+}
 
 /// Map container used by the [`Map`] format.
 pub trait MapType: Default {
@@ -737,5 +773,38 @@ mod tests {
         let bytes = [0x0a, 0x08, 0x0a, 0x01, b'k', 0x15, 0xff, 0xff, 0xff, 0xff];
         assert_eq!(write::<G, _>(&map, DefaultValue::Default), bytes);
         assert_eq!(read::<G, HashMap<String, i32>>(&bytes).unwrap(), map);
+    }
+
+    #[test]
+    fn unpacked() {
+        type N = Unpacked;
+        type Z = Unpacked<ZigZag>;
+        type F = Unpacked<Fixed>;
+
+        assert!(write::<N, Vec<u32>>(&vec![], DefaultValue::Default).is_empty());
+        let bytes = [0x08, 0x00, 0x08, 0x07];
+        assert_eq!(write::<N, _>(&vec![0u32, 7], DefaultValue::Default), bytes);
+        assert_eq!(read::<N, Vec<u32>>(&bytes).unwrap(), [0, 7]);
+        assert_eq!(
+            read::<N, Vec<u32>>(&[0x0a, 0x02, 0x00, 0x07]).unwrap(),
+            [0, 7]
+        );
+        assert_eq!(
+            write::<N, _>(&vec![1.5f32], DefaultValue::Default),
+            [0x0d, 0, 0, 0xc0, 0x3f]
+        );
+
+        let bytes = [0x08, 0x01, 0x08, 0x02];
+        assert_eq!(write::<Z, _>(&vec![-1i64, 1], DefaultValue::Default), bytes);
+        assert_eq!(read::<Z, Vec<i64>>(&bytes).unwrap(), [-1, 1]);
+        assert_eq!(
+            read::<Z, Vec<i64>>(&[0x0a, 0x02, 0x01, 0x02]).unwrap(),
+            [-1, 1]
+        );
+
+        let bytes = [0x0d, 0xff, 0xff, 0xff, 0xff, 0x0d, 0, 0, 0, 0];
+        assert_eq!(write::<F, _>(&vec![-1i32, 0], DefaultValue::Default), bytes);
+        assert_eq!(read::<F, Vec<i32>>(&bytes).unwrap(), [-1, 0]);
+        assert!(read::<F, Vec<i32>>(&[0x08, 0x01]).is_err());
     }
 }

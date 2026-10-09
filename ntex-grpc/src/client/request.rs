@@ -497,7 +497,19 @@ where
 
 #[cfg(test)]
 mod tests {
+    use ntex_bytes::{ByteString, Bytes};
+
     use super::*;
+    use crate::google_types::BytesValue;
+
+    struct TestMethod;
+
+    impl MethodDef for TestMethod {
+        const NAME: &'static str = "TestMethod";
+        const PATH: ByteString = ByteString::from_static("/test.Svc/Test");
+        type Input = ();
+        type Output = BytesValue;
+    }
 
     #[test]
     fn context_header_and_clear() {
@@ -621,5 +633,106 @@ mod tests {
             duration_to_grpc_timeout(time::Duration::from_nanos(1)),
             "1n"
         );
+    }
+
+    #[test]
+    fn duration_to_grpc_timeout_units() {
+        // each unit is used once the smaller one needs more than 8 digits
+        for (secs, expect) in [
+            (100_000_u64, "100000S"),
+            (100_000_000, "1666666M"),
+            (6_000_000_000, "1666666H"),
+        ] {
+            let value = duration_to_grpc_timeout(time::Duration::from_secs(secs));
+            assert_eq!(value, expect, "{secs}");
+        }
+    }
+
+    #[test]
+    fn response_parts() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-a"),
+            HeaderValue::from_static("1"),
+        );
+        let mut trailers = HeaderMap::new();
+        trailers.insert(consts::GRPC_STATUS, HeaderValue::from_static("0"));
+        let response = || Response::<TestMethod> {
+            output: BytesValue {
+                value: Bytes::from_static(b"body"),
+            },
+            headers: headers.clone(),
+            trailers: trailers.clone(),
+            req_size: 5,
+            res_size: 9,
+        };
+
+        // derefs to the message
+        let mut res = response();
+        assert_eq!(res.value, Bytes::from_static(b"body"));
+        assert_eq!(res.headers().get("x-a").unwrap(), "1");
+        assert_eq!(res.trailers().get(consts::GRPC_STATUS).unwrap(), "0");
+        res.value = Bytes::from_static(b"other");
+        assert_eq!(res.into_inner().value, Bytes::from_static(b"other"));
+
+        let (output, headers, trailers) = response().into_parts();
+        assert_eq!(output.value, Bytes::from_static(b"body"));
+        assert_eq!(headers.get("x-a").unwrap(), "1");
+        assert_eq!(trailers.get(consts::GRPC_STATUS).unwrap(), "0");
+    }
+
+    struct BigMethod;
+
+    impl MethodDef for BigMethod {
+        const NAME: &'static str = "BigMethod";
+        const PATH: ByteString = ByteString::from_static("/test.Svc/Big");
+        type Input = BytesValue;
+        type Output = BytesValue;
+    }
+
+    /// Sends a message that does not fit the flow control window to a peer
+    /// that never replies, so the request runs into its deadline while the
+    /// stream is still open.
+    async fn aborted_request(disconnect: bool) -> ntex_h2::client::SimpleClient {
+        use ntex::{io::Io, service::cfg::SharedCfg, testing::IoTest};
+
+        let (cli, srv) = IoTest::create();
+        cli.remote_buffer_cap(64 * 1024);
+        srv.remote_buffer_cap(64 * 1024);
+        std::mem::forget(srv);
+
+        let client = ntex_h2::client::SimpleClient::new(
+            Io::new(cli, SharedCfg::new("CLI").build()),
+            false,
+            "localhost".into(),
+        );
+        let input = BytesValue {
+            value: Bytes::from(vec![0; 1024 * 1024]),
+        };
+        let mut ctx = RequestContext::new();
+        ctx.timeout(time::Duration::from_millis(50));
+        if disconnect {
+            ctx.disconnect_on_drop();
+        }
+
+        let err = <_ as Transport<BigMethod>>::request(&client, &input, &mut ctx)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(*err, crate::client::ClientError::DeadlineExceeded(_)),
+            "{err:?}"
+        );
+        client
+    }
+
+    #[ntex::test]
+    async fn disconnect_on_drop() {
+        // the unfinished stream takes the connection with it
+        let client = aborted_request(true).await;
+        assert!(client.is_disconnecting() || client.is_closed());
+
+        // without the flag the connection stays open
+        let client = aborted_request(false).await;
+        assert!(!client.is_disconnecting() && !client.is_closed());
     }
 }

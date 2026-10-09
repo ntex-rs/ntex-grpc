@@ -348,5 +348,27 @@ mod tests {
         // obs-text is not valid, but still readable
         let raw = HeaderValue::from_bytes(b"caf\xc3\xa9").unwrap();
         assert_eq!(percent_decode(&raw), "caf\u{e9}");
+        // not utf-8 either
+        let raw = HeaderValue::from_bytes(b"caf\xe9").unwrap();
+        assert_eq!(percent_decode(&raw), "caf\u{fffd}");
+    }
+
+    #[test]
+    fn data_slice() {
+        let mut data = Data::Empty;
+        assert!(data.as_slice().is_empty());
+        data.truncate(5);
+        assert!(data.get().is_empty());
+
+        let mut data = Data::Chunk(Bytes::from_static(b"abcdef"));
+        assert_eq!(data.as_slice(), b"abcdef");
+        data.truncate(3);
+        assert_eq!(data.get(), Bytes::from_static(b"abc"));
+
+        let mut data = Data::Empty;
+        push(&mut data, b"abcdef");
+        data.truncate(2);
+        assert_eq!(data.as_slice(), b"ab");
+        assert_eq!(data.get(), Bytes::from_static(b"ab"));
     }
 }

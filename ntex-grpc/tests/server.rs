@@ -1,4 +1,4 @@
-use ntex::io::Io;
+use ntex::io::{Io, IoBoxed};
 use ntex::service::{Pipeline, cfg::SharedCfg, fn_factory, fn_service};
 use ntex::testing::IoTest;
 use ntex_bytes::{BytePages, Bytes};
@@ -10,6 +10,9 @@ const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
 const GRPC_MESSAGE: HeaderName = HeaderName::from_static("grpc-message");
 const GRPC_ENCODING: HeaderName = HeaderName::from_static("grpc-encoding");
 const GRPC_ACCEPT_ENCODING: HeaderName = HeaderName::from_static("grpc-accept-encoding");
+const GRPC_TIMEOUT: HeaderName = HeaderName::from_static("grpc-timeout");
+const X_TEST: HeaderName = HeaderName::from_static("x-test");
+const X_EXTRA: HeaderName = HeaderName::from_static("x-extra");
 #[cfg(feature = "compression")]
 const ACCEPT_ENCODING: &str = "gzip,zstd";
 #[cfg(not(feature = "compression"))]
@@ -29,16 +32,59 @@ fn client_with(max_size: Option<usize>) -> SimpleClient {
 /// Like [`client`], with the server's limits of a request and a response
 /// message.
 fn client_limits(max_size: Option<usize>, max_send_size: Option<usize>) -> SimpleClient {
+    start(max_size, max_send_size, false)
+}
+
+/// Like [`client`], with the server behind a boxed io.
+fn client_boxed() -> SimpleClient {
+    start(None, None, true)
+}
+
+/// Answers a call, the behaviour is picked by the method name.
+async fn handle(req: ServerRequest) -> Result<ServerResponse, ServerError> {
+    let mut payload = BytePages::default();
+    payload.append(req.payload);
+
+    match req.name.as_ref() {
+        // fails with a status, a message and an extra trailer
+        "Fail" => {
+            let mut hdrs = HeaderMap::new();
+            hdrs.insert(X_TEST, HeaderValue::from_static("error"));
+            Err(ServerError::new(
+                ntex_grpc::GrpcStatus::NotFound,
+                HeaderValue::from_static("nothing here"),
+                Some(hdrs),
+            ))
+        }
+        // answers after the deadline of the tests has passed
+        "Slow" => {
+            ntex::time::sleep(ntex::time::Millis(5_000)).await;
+            Ok(ServerResponse::new(payload))
+        }
+        // echoes the `x-test` header of the request in the trailers
+        "Trailers" => {
+            let val = req
+                .headers
+                .get(X_TEST)
+                .cloned()
+                .unwrap_or_else(|| HeaderValue::from_static("none"));
+            Ok(ServerResponse::with_headers(
+                payload,
+                vec![(X_TEST, val), (X_EXTRA, HeaderValue::from_static("1"))],
+            ))
+        }
+        _ => Ok(ServerResponse::new(payload)),
+    }
+}
+
+/// Spawns a server and connects a client to it.
+fn start(max_size: Option<usize>, max_send_size: Option<usize>, boxed: bool) -> SimpleClient {
     let (cli, srv) = IoTest::create();
     cli.remote_buffer_cap(64 * 1024 * 1024);
     srv.remote_buffer_cap(64 * 1024 * 1024);
 
     let server = GrpcServer::new(fn_factory(async |&()| {
-        Ok::<_, std::io::Error>(fn_service(async |req: ServerRequest| {
-            let mut payload = BytePages::default();
-            payload.append(req.payload);
-            Ok::<_, ServerError>(ServerResponse::new(payload))
-        }))
+        Ok::<_, std::io::Error>(fn_service(handle))
     }));
     let server = match max_size {
         Some(size) => server.max_message_size(size),
@@ -50,19 +96,19 @@ fn client_limits(max_size: Option<usize>, max_send_size: Option<usize>) -> Simpl
     };
     let srv = Io::new(srv, SharedCfg::new("SRV").build());
     ntex::rt::spawn(async move {
-        let _ = Pipeline::new((), server).call(srv).await;
+        if boxed {
+            let _ = Pipeline::new((), server).call(IoBoxed::from(srv)).await;
+        } else {
+            let _ = Pipeline::new((), server).call(srv).await;
+        }
     });
 
     let io = Io::new(cli, SharedCfg::new("CLI").build());
     SimpleClient::new(io, false, "localhost".into())
 }
 
-/// Sends a request body, returns the response headers, body and trailers.
-async fn call(
-    client: &SimpleClient,
-    encoding: Option<&'static str>,
-    body: impl Into<Bytes>,
-) -> (HeaderMap, Vec<u8>, HeaderMap) {
+/// Request headers of a call.
+fn req_headers(encoding: Option<&'static str>) -> HeaderMap {
     let mut hdrs = HeaderMap::new();
     hdrs.insert(
         ntex_http::header::CONTENT_TYPE,
@@ -71,8 +117,27 @@ async fn call(
     if let Some(enc) = encoding {
         hdrs.insert(GRPC_ENCODING, HeaderValue::from_static(enc));
     }
+    hdrs
+}
+
+/// Sends a request body, returns the response headers, body and trailers.
+async fn call(
+    client: &SimpleClient,
+    encoding: Option<&'static str>,
+    body: impl Into<Bytes>,
+) -> (HeaderMap, Vec<u8>, HeaderMap) {
+    call_to(client, "/test.Svc/Call", req_headers(encoding), body).await
+}
+
+/// Like [`call`], with the method path and the request headers.
+async fn call_to(
+    client: &SimpleClient,
+    path: &'static str,
+    hdrs: HeaderMap,
+    body: impl Into<Bytes>,
+) -> (HeaderMap, Vec<u8>, HeaderMap) {
     let (snd, rcv) = client
-        .send(Method::POST, "/test.Svc/Call".into(), hdrs, false)
+        .send(Method::POST, path.into(), hdrs, false)
         .await
         .unwrap();
     // the server can reject the request and reset the stream before the body
@@ -341,6 +406,198 @@ async fn early_reject() {
     let (_, data, trailers) = call(&client, None, message(0, &[1; 100])).await;
     assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
     assert_eq!(data, message(0, &[1; 100]));
+}
+
+#[ntex::test]
+async fn service_error() {
+    let client = client();
+    let (_, data, trailers) = call_to(
+        &client,
+        "/test.Svc/Fail",
+        req_headers(None),
+        message(0, b"x"),
+    )
+    .await;
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "5");
+    assert_eq!(trailers.get(GRPC_MESSAGE).unwrap(), "nothing here");
+    // the headers of the error are kept
+    assert_eq!(trailers.get(X_TEST).unwrap(), "error");
+    assert!(data.is_empty());
+
+    // the connection still works
+    let (_, _, trailers) = call(&client, None, message(0, b"x")).await;
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+}
+
+#[ntex::test]
+async fn response_headers() {
+    let client = client();
+    let mut hdrs = req_headers(None);
+    hdrs.insert(X_TEST, HeaderValue::from_static("from-headers"));
+    let (_, data, trailers) =
+        call_to(&client, "/test.Svc/Trailers", hdrs, message(0, b"body")).await;
+    assert_eq!(data, message(0, b"body"));
+    // the status comes first, then the headers of the response
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+    assert_eq!(trailers.get(X_TEST).unwrap(), "from-headers");
+    assert_eq!(trailers.get(X_EXTRA).unwrap(), "1");
+}
+
+#[ntex::test]
+async fn request_trailers() {
+    let client = client();
+    let (snd, rcv) = client
+        .send(
+            Method::POST,
+            "/test.Svc/Trailers".into(),
+            req_headers(None),
+            false,
+        )
+        .await
+        .unwrap();
+    snd.send_payload(Bytes::from(message(0, b"body")), false)
+        .await
+        .unwrap();
+    let mut req_trailers = HeaderMap::new();
+    req_trailers.insert(X_TEST, HeaderValue::from_static("from-trailers"));
+    snd.send_trailers(req_trailers).unwrap();
+
+    let mut data = Vec::new();
+    let trailers = loop {
+        match rcv.recv().await.unwrap().kind {
+            h2::MessageKind::Headers { .. } => {}
+            h2::MessageKind::Data(chunk, cap) => {
+                data.extend_from_slice(&chunk);
+                cap.consume(chunk.len() as u32);
+            }
+            h2::MessageKind::Eof(h2::StreamEof::Trailers(trailers)) => break trailers,
+            kind => panic!("{kind:?}"),
+        }
+    };
+    assert_eq!(data, message(0, b"body"));
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+    // the request trailers reach the service as headers
+    assert_eq!(trailers.get(X_TEST).unwrap(), "from-trailers");
+}
+
+#[ntex::test]
+async fn grpc_timeout() {
+    let client = client();
+    // a valid timeout that does not run out
+    let mut hdrs = req_headers(None);
+    hdrs.insert(GRPC_TIMEOUT, HeaderValue::from_static("10S"));
+    let (_, data, trailers) = call_to(&client, "/test.Svc/Call", hdrs, message(0, b"x")).await;
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+    assert_eq!(data, message(0, b"x"));
+
+    // an invalid timeout is rejected, the service is not called
+    for val in ["abc", "1X", ""] {
+        let mut hdrs = req_headers(None);
+        hdrs.insert(GRPC_TIMEOUT, HeaderValue::from_str(val).unwrap());
+        let (_, data, trailers) = call_to(&client, "/test.Svc/Call", hdrs, message(0, b"x")).await;
+        assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "3", "{val}");
+        assert_eq!(
+            trailers.get(GRPC_MESSAGE).unwrap(),
+            "Cannot decode grpc-timeout header"
+        );
+        assert!(data.is_empty());
+    }
+
+    // the connection still works
+    let (_, _, trailers) = call(&client, None, message(0, b"x")).await;
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+}
+
+#[ntex::test]
+async fn deadline_exceeded() {
+    let client = client();
+    let mut hdrs = req_headers(None);
+    hdrs.insert(GRPC_TIMEOUT, HeaderValue::from_static("50m"));
+    let (_, data, trailers) = call_to(&client, "/test.Svc/Slow", hdrs, message(0, b"x")).await;
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "4");
+    assert_eq!(trailers.get(GRPC_MESSAGE).unwrap(), "Deadline exceeded");
+    assert!(data.is_empty());
+
+    // the connection still works
+    let (_, _, trailers) = call(&client, None, message(0, b"x")).await;
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+}
+
+#[ntex::test]
+async fn boxed_io() {
+    let client = client_boxed();
+    let (headers, data, trailers) = call(&client, None, message(0, b"body")).await;
+    assert_eq!(headers.get(GRPC_ACCEPT_ENCODING).unwrap(), ACCEPT_ENCODING);
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+    assert_eq!(data, message(0, b"body"));
+}
+
+#[ntex::test]
+async fn request_reset() {
+    let client = client();
+    let (snd, _rcv) = client
+        .send(
+            Method::POST,
+            "/test.Svc/Call".into(),
+            req_headers(None),
+            false,
+        )
+        .await
+        .unwrap();
+    snd.send_payload(Bytes::from_static(b"\0\0\0\0\x05ab"), false)
+        .await
+        .unwrap();
+    assert!(snd.reset(ntex_h2::frame::Reason::CANCEL));
+
+    // the request is dropped, the connection is closed
+    client.on_disconnect().await;
+    assert!(client.is_closed());
+}
+
+#[ntex::test]
+async fn request_disconnect() {
+    let client = client();
+    let (_snd, rcv) = client
+        .send(
+            Method::POST,
+            "/test.Svc/Call".into(),
+            req_headers(None),
+            false,
+        )
+        .await
+        .unwrap();
+    client.force_close();
+
+    // the open stream is closed with the connection, on both sides
+    match rcv.recv().await.unwrap().kind {
+        h2::MessageKind::Disconnect(_) => {}
+        kind => panic!("{kind:?}"),
+    }
+    ntex::time::sleep(ntex::time::Millis(50)).await;
+}
+
+#[ntex::test]
+async fn response_after_reset() {
+    let client = client();
+    let (snd, _rcv) = client
+        .send(
+            Method::POST,
+            "/test.Svc/Call".into(),
+            req_headers(None),
+            false,
+        )
+        .await
+        .unwrap();
+    // the whole request, then a reset before the server can answer
+    snd.send_payload(Bytes::from(message(0, b"body")), true)
+        .await
+        .unwrap();
+    assert!(snd.reset(ntex_h2::frame::Reason::CANCEL));
+
+    // the server drops the answer, the connection still works
+    let (_, data, trailers) = call(&client, None, message(0, b"x")).await;
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+    assert_eq!(data, message(0, b"x"));
 }
 
 #[cfg(feature = "compression")]

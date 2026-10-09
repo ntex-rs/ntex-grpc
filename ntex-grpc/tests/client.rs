@@ -1,11 +1,12 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
+use ntex::connect::{Connect, ConnectError};
 use ntex::io::Io;
 use ntex::service::{Pipeline, cfg::SharedCfg, fn_service};
 use ntex::testing::IoTest;
 use ntex_bytes::{ByteString, Bytes};
 use ntex_error::Error;
-use ntex_grpc::client::{ClientError, Request, Response};
+use ntex_grpc::client::{Client as GrpcClient, ClientError, Request, Response};
 use ntex_grpc::{GrpcStatus, HashMap, MethodDef, google_types::BytesValue};
 use ntex_grpc::{decode_binary_header, encode_binary_header};
 use ntex_h2::{self as h2, client::SimpleClient, frame::Reason, frame::StreamId};
@@ -64,6 +65,20 @@ method!(BigError, "/test.Svc/BigError");
 method!(BigHtml, "/test.Svc/BigHtml");
 method!(BigGrpc, "/test.Svc/BigGrpc");
 method!(LimitError, "/test.Svc/LimitError");
+method!(TrailersOnly, "/test.Svc/TrailersOnly");
+method!(DeadlineTrailers, "/test.Svc/DeadlineTrailers");
+method!(BadLength, "/test.Svc/BadLength");
+method!(BadContentLength, "/test.Svc/BadContentLength");
+
+/// Replies with a message that is not a valid `BytesValue`.
+struct BadMessage;
+
+impl MethodDef for BadMessage {
+    const NAME: &'static str = "BadMessage";
+    const PATH: ByteString = ByteString::from_static("/test.Svc/BadMessage");
+    type Input = ();
+    type Output = BytesValue;
+}
 
 /// Replies with a message, takes an input.
 struct Upload;
@@ -137,6 +152,12 @@ fn client() -> SimpleClient {
 ///
 /// Also returns the reasons of streams reset by the client.
 fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
+    let (io, resets) = connect();
+    (SimpleClient::new(io, false, "localhost".into()), resets)
+}
+
+/// Spawns the test server, returns the client side of the connection.
+fn connect() -> (Io, Rc<RefCell<Vec<Reason>>>) {
     let (cli, srv) = IoTest::create();
     cli.remote_buffer_cap(64 * 1024 * 1024);
     srv.remote_buffer_cap(64 * 1024 * 1024);
@@ -567,6 +588,33 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
                         }
                         // never replies
                         "/test.Svc/Silent" => {}
+                        // headers only, with a grpc content-type but no status
+                        "/test.Svc/TrailersOnly" => {
+                            stream
+                                .send_response(StatusCode::OK, grpc_headers(), true)
+                                .unwrap();
+                        }
+                        // the deadline status arrives with the trailers
+                        "/test.Svc/DeadlineTrailers" => {
+                            let mut trailers = status_ok();
+                            trailers.insert(GRPC_STATUS, HeaderValue::from_static("4"));
+                            trailers.insert(GRPC_MESSAGE, HeaderValue::from_static("too%20slow"));
+                            reply(&stream, grpc_headers(), trailers).await;
+                        }
+                        // the message is shorter than its length prefix says
+                        "/test.Svc/BadLength" => {
+                            reply_with(&stream, grpc_headers(), b"\0\0\0\0\x03ab").await;
+                        }
+                        // a message that is not a valid protobuf `BytesValue`
+                        "/test.Svc/BadMessage" => {
+                            reply_with(&stream, grpc_headers(), b"\0\0\0\0\x01\xff").await;
+                        }
+                        // content-length on a reply without a body
+                        "/test.Svc/BadContentLength" => {
+                            let mut hdrs = grpc_headers();
+                            hdrs.insert(header::CONTENT_LENGTH, HeaderValue::from_static("100"));
+                            stream.send_response(StatusCode::OK, hdrs, true).unwrap();
+                        }
                         _ => panic!("unexpected request {path}"),
                     }
                 }
@@ -588,7 +636,16 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
     });
 
     let io = Io::new(cli, SharedCfg::new("CLI").build());
-    (SimpleClient::new(io, false, "localhost".into()), resets)
+    (io, resets)
+}
+
+/// A connection pool that opens connections to the test server.
+fn pool() -> h2::client::Client {
+    h2::client::Client::builder("localhost:9999")
+        .connector(fn_service(async |_: Connect<&'static str>| {
+            Ok::<_, Error<ConnectError>>(connect().0)
+        }))
+        .build(SharedCfg::new("POOL").build())
 }
 
 /// Sends response headers, the body and an OK status.
@@ -1314,6 +1371,116 @@ async fn reserved_headers() {
     #[cfg(feature = "compression")]
     assert_eq!(get_all("grpc-accept-encoding"), ["gzip", "gzip,zstd"]);
     assert_eq!(get_all("x-a"), ["1"]);
+}
+
+#[ntex::test]
+async fn trailers_only_response() {
+    let client = client();
+    let err = send::<TrailersOnly>(&client).await.unwrap_err();
+    let ClientError::UnexpectedEof(status, hdrs) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*status, Some(StatusCode::OK));
+    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
+
+    // the connection stays usable
+    assert_eq!(send::<Message>(&client).await.unwrap().res_size, 5);
+}
+
+#[ntex::test]
+async fn deadline_in_trailers() {
+    let client = client();
+    let err = send::<DeadlineTrailers>(&client).await.unwrap_err();
+    let ClientError::DeadlineExceeded(hdrs) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(hdrs.get(GRPC_STATUS).unwrap(), "4");
+    assert_eq!(err.grpc_message().as_deref(), Some("too slow"));
+}
+
+#[ntex::test]
+async fn truncated_message() {
+    let client = client();
+    let err = send::<BadLength>(&client).await.unwrap_err();
+    let ClientError::UnexpectedEof(status, hdrs) = &*err else {
+        panic!("{err:?}");
+    };
+    // the message is incomplete, so the http status is not reported
+    assert!(status.is_none());
+    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
+}
+
+#[ntex::test]
+async fn decode_error() {
+    let client = client();
+    let err = Request::<_, BadMessage>::new(&client, &())
+        .send()
+        .await
+        .unwrap_err();
+    assert!(matches!(*err, ClientError::Decode(_)), "{err:?}");
+    assert!(err.grpc_message().is_none());
+
+    // the connection stays usable
+    assert_eq!(send::<Message>(&client).await.unwrap().res_size, 5);
+}
+
+#[ntex::test]
+async fn stream_protocol_error() {
+    let client = client();
+    let err = send::<BadContentLength>(&client).await.unwrap_err();
+    let ClientError::Stream(err) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(
+        err.to_string(),
+        "Payload length does not match content-length header"
+    );
+}
+
+#[ntex::test]
+async fn pooled_client() {
+    let pool = pool();
+    let res = Request::<_, Message>::new(&pool, &()).send().await.unwrap();
+    assert_eq!(res.res_size, 5);
+    assert_eq!(res.headers().get(X_TEST).unwrap(), "headers");
+
+    // the pool keeps the connection, so the same server answers again
+    let err = Request::<_, Deadline>::new(&pool, &())
+        .send()
+        .await
+        .unwrap_err();
+    assert!(matches!(*err, ClientError::DeadlineExceeded(_)), "{err:?}");
+
+    // the grpc client is a thin wrapper over the pool
+    let client = GrpcClient::new(pool.clone());
+    let res = Request::<_, Message>::new(&client, &())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.res_size, 5);
+    // all the calls went through the one pooled connection
+    assert_eq!(client.get_ref().stat_total_connections(), 1);
+    assert_eq!(client.get_ref().stat_connect_errors(), 0);
+
+    // the timeout covers waiting for a connection
+    let mut req = Request::<_, Silent>::new(&client, &());
+    req.timeout(Duration::from_millis(100));
+    let err = req.send().await.unwrap_err();
+    assert!(matches!(*err, ClientError::DeadlineExceeded(_)), "{err:?}");
+}
+
+#[ntex::test]
+async fn pool_connect_error() {
+    let pool = h2::client::Client::builder("localhost:9999")
+        .connector(fn_service(async |_: Connect<&'static str>| {
+            Err::<Io, _>(Error::from(ConnectError::NoRecords))
+        }))
+        .build(SharedCfg::new("POOL").build());
+    let err = Request::<_, Message>::new(&pool, &())
+        .send()
+        .await
+        .unwrap_err();
+    assert!(matches!(*err, ClientError::Client(_)), "{err:?}");
 }
 
 #[cfg(feature = "compression")]

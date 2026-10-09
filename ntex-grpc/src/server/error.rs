@@ -66,3 +66,66 @@ impl<T, E: Into<T>> MethodResult<T> for Result<T, E> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ntex_http::HeaderName;
+
+    use super::*;
+
+    #[test]
+    fn server_error() {
+        let err = ServerError::new(GrpcStatus::NotFound, HeaderValue::from_static("nope"), None);
+        assert_eq!(err.status, GrpcStatus::NotFound);
+        assert_eq!(err.message, HeaderValue::from_static("nope"));
+        assert!(err.headers.is_empty());
+
+        let text = err.to_string();
+        assert!(text.contains("NotFound"), "{text}");
+        assert!(text.contains("nope"), "{text}");
+        assert!(format!("{err:?}").contains("NotFound"));
+    }
+
+    #[test]
+    fn server_error_with_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-test"),
+            HeaderValue::from_static("1"),
+        );
+
+        let err = ServerError::new(
+            GrpcStatus::Internal,
+            HeaderValue::from_static("boom"),
+            Some(headers),
+        );
+        let err = err.clone();
+        assert_eq!(err.status, GrpcStatus::Internal);
+        assert_eq!(
+            err.headers.get("x-test").unwrap(),
+            &HeaderValue::from_static("1")
+        );
+    }
+
+    #[test]
+    fn from_decode_error() {
+        let err = ServerError::from(DecodeError::new("bad data"));
+        assert_eq!(err.status, GrpcStatus::InvalidArgument);
+        assert_eq!(
+            err.message,
+            HeaderValue::from_static("Cannot decode grpc message")
+        );
+        assert!(err.headers.is_empty());
+    }
+
+    #[test]
+    fn method_result_conversion() {
+        assert_eq!(<u32 as MethodResult<u32>>::into(5), 5);
+
+        let ok: Result<u32, u8> = Ok(7);
+        assert_eq!(<Result<u32, u8> as MethodResult<u32>>::into(ok), 7);
+
+        let err: Result<u32, u8> = Err(3);
+        assert_eq!(<Result<u32, u8> as MethodResult<u32>>::into(err), 3);
+    }
+}

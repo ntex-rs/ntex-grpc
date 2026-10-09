@@ -166,4 +166,68 @@ mod tests {
         assert_eq!(st, GrpcStatus::AlreadyExists);
         assert_eq!(st.signature(), "grpc-status-AlreadyExists");
     }
+
+    #[test]
+    fn status_codes() {
+        let all = [
+            (GrpcStatus::Ok, 0_u8, "Ok"),
+            (GrpcStatus::Cancelled, 1, "Cancelled"),
+            (GrpcStatus::Unknown, 2, "Unknown"),
+            (GrpcStatus::InvalidArgument, 3, "InvalidArgument"),
+            (GrpcStatus::DeadlineExceeded, 4, "DeadlineExceeded"),
+            (GrpcStatus::NotFound, 5, "NotFound"),
+            (GrpcStatus::AlreadyExists, 6, "AlreadyExists"),
+            (GrpcStatus::PermissionDenied, 7, "PermissionDenied"),
+            (GrpcStatus::ResourceExhausted, 8, "ResourceExhausted"),
+            (GrpcStatus::FailedPrecondition, 9, "FailedPrecondition"),
+            (GrpcStatus::Aborted, 10, "Aborted"),
+            (GrpcStatus::OutOfRange, 11, "OutOfRange"),
+            (GrpcStatus::Unimplemented, 12, "Unimplemented"),
+            (GrpcStatus::Internal, 13, "Internal"),
+            (GrpcStatus::Unavailable, 14, "Unavailable"),
+            (GrpcStatus::DataLoss, 15, "DataLoss"),
+            (GrpcStatus::Unauthenticated, 16, "Unauthenticated"),
+        ];
+
+        for (status, code, name) in all {
+            assert_eq!(status.code(), code);
+            assert_eq!(status.as_str(), name);
+            assert_eq!(status.signature(), format!("grpc-status-{name}"));
+            assert_eq!(status.code_str(), code.to_string());
+            assert_eq!(GrpcStatus::try_from(code).unwrap(), status);
+            assert_eq!(u8::from(status), code);
+            assert_eq!(
+                HeaderValue::from(status).as_ref(),
+                code.to_string().as_bytes()
+            );
+        }
+
+        assert!(GrpcStatus::try_from(17).is_err());
+        assert!(GrpcStatus::try_from(u8::MAX).is_err());
+    }
+
+    #[test]
+    fn status_from_reason() {
+        let cases = [
+            (Reason::NO_ERROR, GrpcStatus::Internal),
+            (Reason::PROTOCOL_ERROR, GrpcStatus::Internal),
+            (Reason::INTERNAL_ERROR, GrpcStatus::Internal),
+            (Reason::FLOW_CONTROL_ERROR, GrpcStatus::Internal),
+            (Reason::SETTINGS_TIMEOUT, GrpcStatus::Internal),
+            (Reason::FRAME_SIZE_ERROR, GrpcStatus::Internal),
+            (Reason::COMPRESSION_ERROR, GrpcStatus::Internal),
+            (Reason::CONNECT_ERROR, GrpcStatus::Internal),
+            (Reason::REFUSED_STREAM, GrpcStatus::Unavailable),
+            (Reason::CANCEL, GrpcStatus::Cancelled),
+            (Reason::ENHANCE_YOUR_CALM, GrpcStatus::ResourceExhausted),
+            (Reason::INADEQUATE_SECURITY, GrpcStatus::PermissionDenied),
+            (Reason::STREAM_CLOSED, GrpcStatus::Unknown),
+            (Reason::HTTP_1_1_REQUIRED, GrpcStatus::Unknown),
+            (Reason::from(0xff_u32), GrpcStatus::Unknown),
+        ];
+
+        for (reason, status) in cases {
+            assert_eq!(GrpcStatus::from(reason), status, "{reason:?}");
+        }
+    }
 }

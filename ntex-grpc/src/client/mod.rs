@@ -240,3 +240,76 @@ impl ErrorDiagnostic for ClientError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ntex_http::HeaderValue;
+
+    use super::*;
+
+    #[test]
+    fn error_clone() {
+        let mut hdrs = HeaderMap::new();
+        hdrs.insert(consts::GRPC_MESSAGE, HeaderValue::from_static("a%20b"));
+
+        let errors = [
+            (
+                ClientError::Client(client::ClientError::HandshakeTimeout),
+                "h2-client-HandshakeTimeout",
+            ),
+            (
+                ClientError::Http(HeaderValue::from_str("\n").unwrap_err().into()),
+                "grpc-Http",
+            ),
+            (ClientError::Decode(DecodeError::new("bad")), "grpc-Decode"),
+            (
+                ClientError::Operation(OperationError::Disconnected),
+                "h2-oper-Disconnected",
+            ),
+            (ClientError::Stream(StreamError::Closed), "h2-stream-Closed"),
+            (
+                ClientError::Response(
+                    Some(StatusCode::BAD_GATEWAY),
+                    hdrs.clone(),
+                    Bytes::from_static(b"body"),
+                ),
+                "grpc-Response",
+            ),
+            (
+                ClientError::UnexpectedEof(None, hdrs.clone()),
+                "grpc-UnexpectedEof",
+            ),
+            (
+                ClientError::DeadlineExceeded(hdrs.clone()),
+                "grpc-BackendCallTimedout",
+            ),
+            (
+                ClientError::GrpcStatus(GrpcStatus::NotFound, hdrs.clone(), None),
+                "grpc-status-NotFound",
+            ),
+        ];
+
+        for (err, signature) in errors {
+            assert_eq!(err.signature(), signature);
+            let copy = err.clone();
+            assert_eq!(copy.signature(), signature);
+            assert_eq!(format!("{copy:?}"), format!("{err:?}"));
+            assert_eq!(copy.grpc_message(), err.grpc_message());
+        }
+
+        // only these two carry a message
+        assert_eq!(
+            ClientError::DeadlineExceeded(hdrs.clone()).grpc_message(),
+            Some(Cow::Borrowed("a b"))
+        );
+        assert_eq!(
+            ClientError::GrpcStatus(GrpcStatus::Internal, hdrs.clone(), None).grpc_message(),
+            Some(Cow::Borrowed("a b"))
+        );
+        assert!(
+            ClientError::UnexpectedEof(None, hdrs)
+                .grpc_message()
+                .is_none()
+        );
+    }
+}

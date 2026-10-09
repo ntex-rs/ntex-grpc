@@ -758,4 +758,353 @@ mod tests {
         assert_eq!(NativeType::encoded_len(&v, 5), 8);
         assert_eq!(buf.len(), 8);
     }
+
+    fn encode<T: NativeType>(value: &T, tag: u32, default: DefaultValue<&T>) -> Bytes {
+        let mut buf = BytePages::default();
+        value.serialize(tag, default, &mut buf);
+        buf.freeze()
+    }
+
+    /// Serializes with no default, checks the bytes and the length, then
+    /// reads the value back.
+    fn roundtrip<T: NativeType>(value: &T, tag: u32, expected: &[u8]) {
+        let buf = encode(value, tag, DefaultValue::Unknown);
+        assert_eq!(buf.as_ref(), expected, "{value:?}");
+        assert_eq!(
+            value.serialized_len(tag, DefaultValue::Unknown),
+            expected.len(),
+            "{value:?}"
+        );
+
+        let mut src = buf;
+        let (decoded_tag, wire_type) = encoding::decode_key(&mut src).unwrap();
+        assert_eq!(decoded_tag, tag);
+        assert_eq!(
+            &T::deserialize_default(decoded_tag, wire_type, &mut src).unwrap(),
+            value
+        );
+        assert!(src.is_empty(), "{value:?}");
+    }
+
+    #[test]
+    fn varint_roundtrip() {
+        let mut max = vec![0x08_u8];
+        max.extend_from_slice(&[0xff; 9]);
+        max.push(0x01);
+
+        roundtrip(&true, 1, &[0x08, 0x01]);
+        roundtrip(&false, 1, &[0x08, 0x00]);
+        roundtrip(&150_i32, 2, &[0x10, 0x96, 0x01]);
+        roundtrip(&-1_i32, 1, &max);
+        roundtrip(&150_i64, 1, &[0x08, 0x96, 0x01]);
+        roundtrip(&-1_i64, 1, &max);
+        roundtrip(&u32::MAX, 1, &[0x08, 0xff, 0xff, 0xff, 0xff, 0x0f]);
+        roundtrip(&u64::MAX, 1, &max);
+        roundtrip(&0_u64, 16, &[0x80, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn bool_merges_any_non_zero_varint() {
+        let mut value = false;
+        value.merge(&mut Bytes::from_static(&[0x02])).unwrap();
+        assert!(value);
+        assert_eq!(NativeType::value_len(&true), 1);
+    }
+
+    #[test]
+    fn length_delimited_roundtrip() {
+        roundtrip(
+            &Bytes::from_static(b"abc"),
+            1,
+            &[0x0a, 0x03, b'a', b'b', b'c'],
+        );
+        roundtrip(&"abc".to_string(), 1, &[0x0a, 0x03, b'a', b'b', b'c']);
+        roundtrip(&ByteString::from("abc"), 1, &[0x0a, 0x03, b'a', b'b', b'c']);
+        roundtrip(&Arc::<str>::from("abc"), 1, &[0x0a, 0x03, b'a', b'b', b'c']);
+        roundtrip(&vec![1_u8, 2, 3], 1, &[0x0a, 0x03, 1, 2, 3]);
+    }
+
+    #[test]
+    fn fixed_width_roundtrip() {
+        // 64 bit fields carry no length prefix
+        roundtrip(&1.5_f64, 1, &[0x09, 0, 0, 0, 0, 0, 0, 0xf8, 0x3f]);
+        assert_eq!(NativeType::value_len(&1.5_f64), 8);
+
+        // 32 bit fields are written with a length prefix, see `encode_type`
+        let f32_bytes = [0x0d, 0x04, 0, 0, 0xc0, 0x3f];
+        let buf = encode(&1.5_f32, 1, DefaultValue::Unknown);
+        assert_eq!(buf.as_ref(), &f32_bytes);
+        assert_eq!(NativeType::value_len(&1.5_f32), 4);
+
+        let mut src = buf;
+        let (tag, wire_type) = encoding::decode_key(&mut src).unwrap();
+        assert_eq!((tag, wire_type), (1, WireType::ThirtyTwoBit));
+        assert_eq!(
+            f32::deserialize_default(tag, wire_type, &mut src)
+                .unwrap()
+                .to_bits(),
+            1.5_f32.to_bits()
+        );
+        assert!(src.is_empty());
+    }
+
+    #[test]
+    fn default_value_handling() {
+        // `Default` skips the type default
+        assert!(encode(&0_u32, 1, DefaultValue::Default).is_empty());
+        assert_eq!(0_u32.serialized_len(1, DefaultValue::Default), 0);
+        assert_eq!(
+            encode(&1_u32, 1, DefaultValue::Default).as_ref(),
+            &[0x08, 0x01]
+        );
+        assert_eq!(1_u32.serialized_len(1, DefaultValue::Default), 2);
+
+        // `Value` skips an explicit default
+        assert!(encode(&7_u32, 1, DefaultValue::Value(&7)).is_empty());
+        assert_eq!(7_u32.serialized_len(1, DefaultValue::Value(&7)), 0);
+        assert_eq!(
+            encode(&8_u32, 1, DefaultValue::Value(&7)).as_ref(),
+            &[0x08, 0x08]
+        );
+        assert_eq!(8_u32.serialized_len(1, DefaultValue::Value(&7)), 2);
+
+        // `Unknown` always writes
+        assert_eq!(
+            encode(&0_u32, 1, DefaultValue::Unknown).as_ref(),
+            &[0x08, 0x00]
+        );
+        assert_eq!(0_u32.serialized_len(1, DefaultValue::Unknown), 2);
+    }
+
+    #[test]
+    fn is_default_values() {
+        assert!(0_i32.is_default() && !1_i32.is_default());
+        assert!(0_i64.is_default() && 0_u32.is_default() && 0_u64.is_default());
+        assert!(!true.is_default() && false.is_default());
+        assert!(0_f32.is_default() && !1_f32.is_default());
+        assert!(0_f64.is_default() && !1_f64.is_default());
+        assert!(String::new().is_default() && !"a".to_string().is_default());
+        assert!(Bytes::new().is_default());
+        assert!(ByteString::new().is_default());
+        assert!(Arc::<str>::from("").is_default());
+        assert!(Vec::<u8>::new().is_default());
+        assert!(Vec::<u32>::new().is_default());
+        assert!(Option::<u32>::None.is_default() && !Some(0_u32).is_default());
+        assert!(HashMap::<String, u32>::default().is_default());
+        assert!(HashMapBase::<String, u32>::default().is_default());
+        // messages have no default, they are always written
+        assert!(!NativeType::is_default(&TestMessage::default()));
+    }
+
+    #[test]
+    fn option_field() {
+        let none: Option<u32> = None;
+        assert!(encode(&none, 1, DefaultValue::Default).is_empty());
+        assert_eq!(none.serialized_len(1, DefaultValue::Default), 0);
+        assert_eq!(NativeType::encoded_len(&none, 1), 0);
+        // `Option` uses the default `value_len` and writes nothing by itself
+        assert_eq!(NativeType::value_len(&none), 0);
+        let mut buf = BytePages::default();
+        none.encode_value(&mut buf);
+        assert!(buf.is_empty());
+
+        // `Some` of a default value is still written
+        let some = Some(0_u32);
+        assert_eq!(
+            encode(&some, 1, DefaultValue::Default).as_ref(),
+            &[0x08, 0x00]
+        );
+        assert_eq!(some.serialized_len(1, DefaultValue::Default), 2);
+        assert_eq!(NativeType::encoded_len(&some, 1), 2);
+
+        roundtrip(&Some(150_u32), 1, &[0x08, 0x96, 0x01]);
+        roundtrip(&Some(ByteString::from("hi")), 2, &[0x12, 0x02, b'h', b'i']);
+    }
+
+    #[test]
+    fn packed_varint_field() {
+        let v: Vec<u32> = vec![1, 300, 70000];
+        let buf = encode(&v, 5, DefaultValue::Default);
+        assert_eq!(
+            buf.as_ref(),
+            &[0x2a, 0x06, 0x01, 0xac, 0x02, 0xf0, 0xa2, 0x04]
+        );
+
+        let mut src = buf;
+        let (tag, wire_type) = encoding::decode_key(&mut src).unwrap();
+        assert_eq!((tag, wire_type), (5, WireType::LengthDelimited));
+        assert_eq!(
+            Vec::<u32>::deserialize_default(tag, wire_type, &mut src).unwrap(),
+            v
+        );
+        assert!(src.is_empty());
+
+        // an empty repeated field is left out
+        assert!(encode(&Vec::<u32>::new(), 5, DefaultValue::Default).is_empty());
+        assert_eq!(
+            Vec::<u32>::new().serialized_len(5, DefaultValue::Default),
+            0
+        );
+
+        // truncated packed payload
+        let mut src = Bytes::from_static(&[0x05, 0x01]);
+        assert!(Vec::<u32>::deserialize_default(5, WireType::LengthDelimited, &mut src).is_err());
+    }
+
+    #[test]
+    fn repeated_length_delimited_field() {
+        let v = vec!["a".to_string(), "bb".to_string()];
+        let buf = encode(&v, 1, DefaultValue::Default);
+        assert_eq!(buf.as_ref(), &[0x0a, 0x01, b'a', 0x0a, 0x02, b'b', b'b']);
+        assert_eq!(NativeType::encoded_len(&v, 1), buf.len());
+
+        let mut src = buf;
+        let mut out: Vec<String> = Vec::new();
+        while !src.is_empty() {
+            let (tag, wire_type) = encoding::decode_key(&mut src).unwrap();
+            out.deserialize(tag, wire_type, &mut src).unwrap();
+        }
+        assert_eq!(out, v);
+    }
+
+    #[test]
+    fn map_field() {
+        let mut map: HashMap<String, u32> = HashMap::default();
+        map.insert("a".to_string(), 1);
+
+        let buf = encode(&map, 1, DefaultValue::Default);
+        assert_eq!(buf.as_ref(), &[0x0a, 0x05, 0x0a, 0x01, b'a', 0x10, 0x01]);
+        assert_eq!(NativeType::encoded_len(&map, 1), buf.len());
+
+        let mut src = buf;
+        let (tag, wire_type) = encoding::decode_key(&mut src).unwrap();
+        let out = HashMap::<String, u32>::deserialize_default(tag, wire_type, &mut src).unwrap();
+        assert_eq!(out, map);
+        assert!(src.is_empty());
+
+        // the ntex hash map behaves the same
+        let mut map: HashMapBase<String, u32> = HashMapBase::default();
+        map.insert("a".to_string(), 1);
+        let buf = encode(&map, 1, DefaultValue::Default);
+        assert_eq!(buf.as_ref(), &[0x0a, 0x05, 0x0a, 0x01, b'a', 0x10, 0x01]);
+        assert_eq!(NativeType::encoded_len(&map, 1), buf.len());
+
+        let mut src = buf;
+        let (tag, wire_type) = encoding::decode_key(&mut src).unwrap();
+        let out =
+            HashMapBase::<String, u32>::deserialize_default(tag, wire_type, &mut src).unwrap();
+        assert_eq!(out, map);
+    }
+
+    #[test]
+    fn map_field_errors() {
+        type Map = HashMap<String, u32>;
+
+        // maps are length delimited
+        let mut src = Bytes::from_static(&[0x01]);
+        let err = Map::deserialize_default(1, WireType::Varint, &mut src).unwrap_err();
+        assert!(err.to_string().contains("invalid wire type"));
+
+        // entry longer than the buffer
+        let mut src = Bytes::from_static(&[0x05, 0x01]);
+        let err = Map::deserialize_default(1, WireType::LengthDelimited, &mut src).unwrap_err();
+        assert!(err.to_string().contains("Not enough data for HashMap"));
+
+        // only tags 1 and 2 are valid inside an entry
+        let mut src = Bytes::from_static(&[0x02, 0x18, 0x01]);
+        let err = Map::deserialize_default(1, WireType::LengthDelimited, &mut src).unwrap_err();
+        assert!(err.to_string().contains("Map deserialization error"));
+    }
+
+    #[test]
+    fn deserialize_errors() {
+        // wrong wire type
+        let mut src = Bytes::from_static(&[0x01]);
+        let err = u32::deserialize_default(1, WireType::LengthDelimited, &mut src).unwrap_err();
+        assert!(err.to_string().contains("invalid wire type"));
+
+        // length delimited field longer than the buffer
+        let mut src = Bytes::from_static(&[0x05, b'a']);
+        let err = String::deserialize_default(1, WireType::LengthDelimited, &mut src).unwrap_err();
+        assert!(err.to_string().contains("Not enough data, message size 5"));
+
+        // truncated varint
+        let mut src = Bytes::from_static(&[0x80]);
+        assert!(u32::deserialize_default(1, WireType::Varint, &mut src).is_err());
+
+        // not utf-8
+        for res in [
+            String::deserialize_default(
+                1,
+                WireType::LengthDelimited,
+                &mut Bytes::from_static(&[0x01, 0xff]),
+            )
+            .err(),
+            ByteString::deserialize_default(
+                1,
+                WireType::LengthDelimited,
+                &mut Bytes::from_static(&[0x01, 0xff]),
+            )
+            .err(),
+            <Arc<str>>::deserialize_default(
+                1,
+                WireType::LengthDelimited,
+                &mut Bytes::from_static(&[0x01, 0xff]),
+            )
+            .err(),
+        ] {
+            assert!(res.unwrap().to_string().contains("not UTF-8 encoded"));
+        }
+
+        // fixed width fields need all their bytes
+        let mut value = 0_f32;
+        assert!(value.merge(&mut Bytes::from_static(&[1, 2, 3])).is_err());
+        let mut value = 0_f64;
+        assert!(value.merge(&mut Bytes::from_static(&[1, 2, 3])).is_err());
+    }
+
+    #[test]
+    fn merge_is_not_supported_for_containers() {
+        let mut opt: Option<u32> = None;
+        assert!(opt.merge(&mut Bytes::new()).is_err());
+
+        let mut vec: Vec<u32> = Vec::new();
+        assert!(vec.merge(&mut Bytes::new()).is_err());
+
+        let mut map: HashMap<String, u32> = HashMap::default();
+        assert!(map.merge(&mut Bytes::new()).is_err());
+
+        let mut map: HashMapBase<String, u32> = HashMapBase::default();
+        assert!(map.merge(&mut Bytes::new()).is_err());
+
+        // containers write nothing through `encode_value`
+        let mut buf = BytePages::default();
+        Vec::<u32>::new().encode_value(&mut buf);
+        HashMap::<String, u32>::default().encode_value(&mut buf);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn unit_message() {
+        assert_eq!(Message::encoded_len(&()), 0);
+        let mut buf = BytePages::default();
+        Message::write(&(), &mut buf);
+        assert!(buf.is_empty());
+        <()>::read(&mut Bytes::from_static(b"junk")).unwrap();
+    }
+
+    #[test]
+    fn message_skips_unknown_fields() {
+        // field 9 (unknown), field 3 (bool) = true, field 4 (optional string)
+        let mut src = Bytes::from_static(&[0x48, 0x01, 0x18, 0x01, 0x22, 0x02, b'h', b'i']);
+        let msg = TestMessage::read(&mut src).unwrap();
+        assert!(msg.b);
+        assert_eq!(msg.opt.as_deref(), Some("hi"));
+        assert_eq!(Message::encoded_len(&msg), 6);
+
+        let mut buf = BytePages::default();
+        msg.write(&mut buf);
+        assert_eq!(buf.len(), 6);
+        assert_eq!(TestMessage::read(&mut buf.freeze()).unwrap(), msg);
+    }
 }

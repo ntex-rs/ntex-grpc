@@ -13,6 +13,10 @@
 * Repeated scalar fields of `proto2` files and fields with `[packed = false]`
   are written unpacked
 
+* Singular message fields are generated as `Option<T>` to track presence,
+  unset fields are no longer written as empty messages. This is a breaking
+  change for code that uses generated structs
+
 * Fix multi-line service and method comments being joined into one doc line
 
 * Fence code examples from proto comments, so rustdoc does not run them as Rust doctests

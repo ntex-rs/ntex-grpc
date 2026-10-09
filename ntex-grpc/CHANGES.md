@@ -2,6 +2,9 @@
 
 ## [3.3.0] - Unreleased
 
+* Server no longer panics on a `grpc-timeout` that ends with a multi-byte
+  UTF-8 character, it fails the call with `INVALID_ARGUMENT`
+
 * Server rejects requests whose method is not `POST` with HTTP status 405
   and `INTERNAL`
 

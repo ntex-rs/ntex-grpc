@@ -13,6 +13,9 @@ mod timestamp;
 mod timestamp_impl;
 mod wrappers;
 
+#[cfg(test)]
+mod tests;
+
 pub use self::duration::Duration;
 pub use self::duration_impl::{NegativeDurationError, OutOfRangeDurationError};
 pub use self::timestamp::Timestamp;

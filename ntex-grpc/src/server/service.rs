@@ -622,4 +622,50 @@ mod tests {
             assert_eq!((&*s, &*n), (service, name), "{path}");
         }
     }
+
+    #[test]
+    fn grpc_timeout() {
+        for (val, millis) in [
+            ("1H", 60 * 60 * 1000),
+            ("2M", 2 * 60 * 1000),
+            ("3S", 3000),
+            ("4m", 4),
+            ("1500u", 1),
+            ("999u", 0),
+            ("2500000n", 2),
+            ("0S", 0),
+            // the largest value fits in a u32 of millis
+            ("99999999H", u32::MAX),
+            ("99999999M", u32::MAX),
+            ("99999999S", u32::MAX),
+            ("99999999m", 99_999_999),
+        ] {
+            let timeout = try_parse_grpc_timeout(&HeaderValue::from_static(val));
+            assert_eq!(timeout, Ok(Millis(millis)), "{val}");
+        }
+
+        for val in [
+            // no unit, no value
+            "",
+            "S",
+            "1",
+            "x",
+            // more than 8 digits
+            "123456789S", // not a number
+            "abcS",
+            "-1S",
+            "1.5S",
+            " 1S", // unknown unit
+            "1X",
+            "1s",
+            "1h",
+        ] {
+            let timeout = try_parse_grpc_timeout(&HeaderValue::from_static(val));
+            assert_eq!(timeout, Err(()), "{val}");
+        }
+
+        // not utf-8
+        let val = HeaderValue::from_bytes(b"\xff1S").unwrap();
+        assert_eq!(try_parse_grpc_timeout(&val), Err(()));
+    }
 }

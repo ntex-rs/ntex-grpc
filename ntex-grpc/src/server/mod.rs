@@ -155,3 +155,91 @@ impl<T> From<T> for Response<T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pages(data: &[u8]) -> BytePages {
+        let mut buf = BytePages::default();
+        buf.extend_from_slice(data);
+        buf
+    }
+
+    #[test]
+    fn server_response() {
+        let res = ServerResponse::new(pages(b"hi"));
+        assert_eq!(res.payload.len(), 2);
+        assert!(res.headers.is_empty());
+
+        let res = ServerResponse::with_headers(
+            pages(b"hi"),
+            vec![(
+                HeaderName::from_static("x-a"),
+                HeaderValue::from_static("1"),
+            )],
+        );
+        assert_eq!(res.headers.len(), 1);
+        assert_eq!(res.headers[0].1, HeaderValue::from_static("1"));
+        assert!(format!("{res:?}").contains("ServerResponse"));
+    }
+
+    #[test]
+    fn server_request_debug() {
+        let req = ServerRequest {
+            name: ByteString::from_static("SayHello"),
+            payload: Bytes::from_static(b"x"),
+            headers: HeaderMap::new(),
+        };
+        assert!(format!("{req:?}").contains("SayHello"));
+    }
+
+    fn request(message: u32) -> Request<u32> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-a"),
+            HeaderValue::from_static("1"),
+        );
+        Request {
+            name: ByteString::from_static("SayHello"),
+            headers,
+            message,
+        }
+    }
+
+    #[test]
+    fn from_request_message() {
+        // a method that only needs the message gets the message
+        assert_eq!(<u32 as FromRequest<u32>>::from(request(5)), 5);
+    }
+
+    #[test]
+    fn from_request_full() {
+        let req = <Request<u32> as FromRequest<u32>>::from(request(6));
+        assert_eq!(req.name, "SayHello");
+        assert_eq!(
+            req.headers.get("x-a").unwrap(),
+            &HeaderValue::from_static("1")
+        );
+        assert_eq!(*req, 6);
+        assert_eq!(req.into_inner(), 6);
+    }
+
+    #[test]
+    fn request_deref_mut() {
+        let mut req = request(7);
+        *req = 8;
+        assert_eq!(req.message, 8);
+    }
+
+    #[test]
+    fn response_wrapper() {
+        let res = Response::new(1_u32);
+        assert_eq!(res.message, 1);
+        assert!(res.headers.is_empty());
+
+        let res = <Response<u32> as From<u32>>::from(2_u32);
+        assert_eq!(res.message, 2);
+        assert!(res.headers.is_empty());
+    }
+}

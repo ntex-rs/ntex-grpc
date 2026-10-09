@@ -349,3 +349,252 @@ impl fmt::Display for DecodeError {
 }
 
 impl std::error::Error for DecodeError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encode(value: u64) -> Bytes {
+        let mut buf = BytePages::default();
+        encode_varint(value, &mut buf);
+        buf.freeze()
+    }
+
+    #[test]
+    fn varint_roundtrip() {
+        let cases: [(u64, usize); 18] = [
+            (0, 1),
+            (1, 1),
+            (0x7f, 1),
+            (0x80, 2),
+            (300, 2),
+            (0x3fff, 2),
+            (0x4000, 3),
+            (0x1f_ffff, 3),
+            (0x20_0000, 4),
+            (0x0fff_ffff, 4),
+            (0x1000_0000, 5),
+            (u64::from(u32::MAX), 5),
+            (1 << 35, 6),
+            (1 << 42, 7),
+            (1 << 49, 8),
+            (1 << 56, 9),
+            (1 << 63, 10),
+            (u64::MAX, 10),
+        ];
+
+        for (value, len) in cases {
+            let bytes = encode(value);
+            assert_eq!(bytes.len(), len, "{value}");
+            assert_eq!(encoded_len_varint(value), len, "{value}");
+
+            let mut buf = bytes.clone();
+            assert_eq!(decode_varint(&mut buf).unwrap(), value);
+            assert!(buf.is_empty());
+
+            // the unrolled slice decoder returns the same value and width
+            assert_eq!(decode_varint_slice(&bytes).unwrap(), (value, len));
+        }
+    }
+
+    #[test]
+    fn varint_decode_errors() {
+        // empty buffer
+        assert!(decode_varint(&mut Bytes::new()).is_err());
+
+        // last byte overflows u64, slice path
+        let mut overflow = vec![0xff_u8; 9];
+        overflow.push(0x02);
+        assert!(decode_varint(&mut Bytes::from(overflow.clone())).is_err());
+        assert!(decode_varint_slice(&overflow).is_err());
+
+        // more than 10 continuation bytes, slice path
+        assert!(decode_varint(&mut Bytes::from(vec![0xff_u8; 11])).is_err());
+
+        // truncated varint, slow path
+        assert!(decode_varint(&mut Bytes::from_static(&[0x80])).is_err());
+        assert!(decode_varint(&mut Bytes::from(vec![0xff_u8; 10])).is_err());
+    }
+
+    #[test]
+    fn varint_slow_path_stops_at_terminator() {
+        // trailing continuation byte forces the slow path, the value still ends early
+        let mut buf = Bytes::from_static(&[0x80, 0x01, 0x80]);
+        assert_eq!(decode_varint(&mut buf).unwrap(), 128);
+        assert_eq!(buf, Bytes::from_static(&[0x80]));
+    }
+
+    #[test]
+    fn wire_type_from_u64() {
+        let all = [
+            WireType::Varint,
+            WireType::SixtyFourBit,
+            WireType::LengthDelimited,
+            WireType::StartGroup,
+            WireType::EndGroup,
+            WireType::ThirtyTwoBit,
+        ];
+        for (value, wire_type) in all.iter().enumerate() {
+            assert_eq!(WireType::try_from(value as u64).unwrap(), *wire_type);
+        }
+
+        let err = WireType::try_from(6).unwrap_err();
+        assert!(err.to_string().contains("invalid wire type value: 6"));
+        assert!(WireType::try_from(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn key_roundtrip() {
+        let cases = [
+            (1_u32, WireType::Varint),
+            (2, WireType::SixtyFourBit),
+            (3, WireType::LengthDelimited),
+            (4, WireType::StartGroup),
+            (5, WireType::EndGroup),
+            (16, WireType::ThirtyTwoBit),
+            (2047, WireType::Varint),
+            (MAX_TAG, WireType::LengthDelimited),
+        ];
+
+        for (tag, wire_type) in cases {
+            let mut buf = BytePages::default();
+            encode_key(tag, wire_type, &mut buf);
+            let bytes = buf.freeze();
+            assert_eq!(bytes.len(), key_len(tag), "{tag}");
+
+            let mut src = bytes;
+            assert_eq!(decode_key(&mut src).unwrap(), (tag, wire_type));
+            assert!(src.is_empty());
+        }
+    }
+
+    #[test]
+    fn key_decode_errors() {
+        // key does not fit into u32
+        let err = decode_key(&mut encode(u64::from(u32::MAX) + 1)).unwrap_err();
+        assert!(err.to_string().contains("invalid key value"));
+
+        // wire types 6 and 7 do not exist
+        for wire_type in [6_u64, 7] {
+            let err = decode_key(&mut encode((8 << 3) | wire_type)).unwrap_err();
+            assert!(err.to_string().contains("invalid wire type value"));
+        }
+
+        // tag 0 is reserved
+        let err = decode_key(&mut Bytes::from_static(&[0x02])).unwrap_err();
+        assert!(err.to_string().contains("invalid tag value: 0"));
+
+        assert!(decode_key(&mut Bytes::new()).is_err());
+    }
+
+    #[test]
+    fn check_wire_type_mismatch() {
+        assert!(check_wire_type(WireType::Varint, WireType::Varint).is_ok());
+
+        let err = check_wire_type(WireType::Varint, WireType::LengthDelimited).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "failed to decode Protobuf message: invalid wire type: LengthDelimited (expected Varint)"
+        );
+    }
+
+    #[test]
+    fn skip_simple_fields() {
+        let cases: [(WireType, &[u8]); 4] = [
+            (WireType::Varint, &[0x96, 0x01]),
+            (WireType::ThirtyTwoBit, &[1, 2, 3, 4]),
+            (WireType::SixtyFourBit, &[1, 2, 3, 4, 5, 6, 7, 8]),
+            (WireType::LengthDelimited, &[0x03, b'a', b'b', b'c']),
+        ];
+
+        for (wire_type, data) in cases {
+            let mut src = BytePages::default();
+            src.extend_from_slice(data);
+            src.extend_from_slice(&[0xff]);
+            let mut buf = src.freeze();
+
+            skip_field(wire_type, 1, &mut buf).unwrap();
+            assert_eq!(buf, Bytes::from_static(&[0xff]), "{wire_type:?}");
+        }
+    }
+
+    #[test]
+    fn skip_group_field() {
+        // group 3 { field 1 varint; group 2 { field 1 varint } }
+        let mut buf = BytePages::default();
+        encode_key(1, WireType::Varint, &mut buf);
+        encode_varint(1, &mut buf);
+        encode_key(2, WireType::StartGroup, &mut buf);
+        encode_key(1, WireType::Varint, &mut buf);
+        encode_varint(7, &mut buf);
+        encode_key(2, WireType::EndGroup, &mut buf);
+        encode_key(3, WireType::EndGroup, &mut buf);
+        buf.extend_from_slice(&[0xff]);
+
+        let mut buf = buf.freeze();
+        skip_field(WireType::StartGroup, 3, &mut buf).unwrap();
+        assert_eq!(buf, Bytes::from_static(&[0xff]));
+    }
+
+    #[test]
+    fn skip_field_errors() {
+        // end group tag does not match the group being skipped
+        let mut buf = BytePages::default();
+        encode_key(4, WireType::EndGroup, &mut buf);
+        let err = skip_field(WireType::StartGroup, 3, &mut buf.freeze()).unwrap_err();
+        assert!(err.to_string().contains("unexpected end group tag"));
+
+        // a bare end group is always an error
+        let err = skip_field(WireType::EndGroup, 1, &mut Bytes::new()).unwrap_err();
+        assert!(err.to_string().contains("unexpected end group tag"));
+
+        // length delimited field longer than the buffer
+        let mut buf = Bytes::from_static(&[0x05, 1, 2]);
+        let err = skip_field(WireType::LengthDelimited, 1, &mut buf).unwrap_err();
+        assert!(err.to_string().contains("Not enough data"));
+
+        // truncated group
+        let mut buf = Bytes::from_static(&[0x08]);
+        assert!(skip_field(WireType::StartGroup, 3, &mut buf).is_err());
+    }
+
+    #[test]
+    fn decode_error_stack() {
+        let err = DecodeError::new("boom");
+        assert_eq!(err.to_string(), "failed to decode Protobuf message: boom");
+
+        // the error is not shared, the stack is pushed in place
+        let err = err.push("Msg", "field");
+        assert_eq!(
+            err.to_string(),
+            "failed to decode Protobuf message: Msg.field: boom"
+        );
+
+        // the error is shared, push has to clone the inner state
+        let shared = err.clone();
+        let err = err.push("Outer", "inner");
+        assert_eq!(
+            err.to_string(),
+            "failed to decode Protobuf message: Msg.field: Outer.inner: boom"
+        );
+        assert_eq!(
+            shared.to_string(),
+            "failed to decode Protobuf message: Msg.field: boom"
+        );
+        assert_ne!(err, shared);
+        assert_eq!(shared, shared.clone());
+
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("DecodeError"));
+        assert!(dbg.contains("boom"));
+        assert!(dbg.contains("Outer"));
+    }
+
+    #[test]
+    fn decode_error_incomplete() {
+        assert_eq!(
+            DecodeError::incomplete().to_string(),
+            "failed to decode Protobuf message: Not enough data"
+        );
+    }
+}

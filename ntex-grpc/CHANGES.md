@@ -1,6 +1,6 @@
 # Changes
 
-## [3.2.0] - Unreleased
+## [3.2.1] - Unreleased
 
 * The length of a packed repeated field sums its values once
 
@@ -11,6 +11,8 @@
 * The length prefix of a server response and of a compressed request is put
   in front of the message as a page of its own, the end of the message is no
   longer copied into a new buffer
+
+## [3.2.0] - 2026-10-09
 
 * Simplify message compression: compression errors reach the client and
   server as a gRPC status, the same way as decompression errors

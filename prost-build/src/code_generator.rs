@@ -319,6 +319,8 @@ impl CodeGenerator<'_> {
         let mut encoded_len = String::new();
         let mut default = String::new();
         let mut accessors = String::new();
+        let mut required = String::new();
+        let mut required_num = 0;
 
         self.depth += 1;
         self.path.push(2);
@@ -360,10 +362,29 @@ impl CodeGenerator<'_> {
             write.push_str(&format!(
                 "{ops}serialize(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::{skip}, dst);",
             ));
-            read.push_str(&format!(
-                "{field_no} => {ops}deserialize(&mut self.{field_name}, tag, wire_type, src)
+            if field.label() == Label::Required {
+                // a required field missing from the input fails decoding
+                let idx = required_num;
+                required_num += 1;
+                read.push_str(&format!(
+                    "{field_no} => {{
+                        {ops}deserialize(&mut self.{field_name}, tag, wire_type, src)
+                            .map_err(|err| err.push(STRUCT_NAME, \"{field_name}\"))?;
+                        required[{idx}] = true;
+                    }}",
+                ));
+                required.push_str(&format!(
+                    "if !required[{idx}] {{
+                        return Err(::ntex_grpc::DecodeError::new(\"required field is missing\")
+                            .push(STRUCT_NAME, \"{field_name}\"));
+                    }}",
+                ));
+            } else {
+                read.push_str(&format!(
+                    "{field_no} => {ops}deserialize(&mut self.{field_name}, tag, wire_type, src)
                     .map_err(|err| err.push(STRUCT_NAME, \"{field_name}\"))?,",
-            ));
+                ));
+            }
             encoded_len.push_str(&format!(
                 " + {ops}serialized_len(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::{skip})",
             ));
@@ -447,6 +468,24 @@ impl CodeGenerator<'_> {
             "::ntex_grpc::encoding::skip_field(wire_type, tag, src)?;".to_string()
         };
 
+        let (required_init, required) = if required_num > 0 {
+            (
+                // only a message decoded from scratch must hold every required
+                // field, a merge into decoded data may update a part of it
+                format!(
+                    "let mut required = [false; {required_num}];
+                     let check = *self == <Self as ::core::default::Default>::default();
+                     "
+                ),
+                format!(
+                    "if check {{ {required} }}
+                     "
+                ),
+            )
+        } else {
+            (String::new(), String::new())
+        };
+
         self.priv_buf.push_str(&format!(
             "#[inline]
              fn read(src: &mut ::ntex_grpc::Bytes) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {{
@@ -458,11 +497,11 @@ impl CodeGenerator<'_> {
              #[inline]
              fn merge_from(&mut self, src: &mut ::ntex_grpc::Bytes) -> ::std::result::Result<(), ::ntex_grpc::DecodeError> {{
                  const STRUCT_NAME: &str = \"{}\";
-                 while !src.is_empty() {{
+                 {required_init}while !src.is_empty() {{
                     let (tag, wire_type) = ::ntex_grpc::encoding::decode_key(src)?;
                     {read}
                  }}
-                 Ok(())
+                 {required}Ok(())
              }}\n\n",
             to_upper_camel(&message_name)
         ));
@@ -1790,5 +1829,61 @@ mod tests {
         let mut boxed: Vec<_> = boxed.into_iter().collect();
         boxed.sort();
         assert_eq!(boxed, expected);
+    }
+
+    fn generate(syntax: &str, label: Label) -> String {
+        let scalar = |name: &str, number, label| {
+            let mut f = FieldDescriptorProto {
+                name: Some(name.to_string()),
+                number: Some(number),
+                ..Default::default()
+            };
+            f.set_type(Type::Int32);
+            f.set_label(label);
+            f
+        };
+        let file = FileDescriptorProto {
+            name: Some("test.proto".to_string()),
+            package: Some("pkg".to_string()),
+            syntax: Some(syntax.to_string()),
+            message_type: vec![message(
+                "Msg",
+                vec![scalar("a", 1, label), scalar("b", 2, Label::Optional)],
+                vec![],
+            )],
+            source_code_info: Some(SourceCodeInfo {
+                location: [vec![4, 0], vec![4, 0, 2, 0], vec![4, 0, 2, 1]]
+                    .into_iter()
+                    .map(|path| Location {
+                        path,
+                        ..Default::default()
+                    })
+                    .collect(),
+            }),
+            ..Default::default()
+        };
+        let mut buf = String::new();
+        CodeGenerator::generate(
+            &mut Config::new(),
+            &ExternPaths::new(&[], false).unwrap(),
+            &EnumValues::new(),
+            file,
+            &mut buf,
+        );
+        buf
+    }
+
+    #[test]
+    fn test_required_check() {
+        let code = generate("proto2", Label::Required);
+        assert!(code.contains("let mut required = [false; 1];"));
+        assert!(code.contains("required[0] = true;"));
+        assert!(code.contains(".push(STRUCT_NAME, \"a\"));"));
+        assert!(!code.contains(".push(STRUCT_NAME, \"b\"));"));
+
+        let code = generate("proto2", Label::Optional);
+        assert!(!code.contains("required"));
+        let code = generate("proto3", Label::Optional);
+        assert!(!code.contains("required"));
     }
 }

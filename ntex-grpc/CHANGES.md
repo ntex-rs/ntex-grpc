@@ -2,6 +2,10 @@
 
 ## [3.3.0] - Unreleased
 
+* Decoding fails with "required field is missing" when a proto2 required
+  field is absent, it was accepted with the default value. Merging into a
+  message that already holds data does not check
+
 * Codegen honors proto2 `default` values, they were ignored. Required
   fields start at their default, the first value for enums, and are always
   written. Optional fields with a default get an accessor that returns it

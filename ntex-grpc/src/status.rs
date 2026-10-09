@@ -136,22 +136,18 @@ gen_error_code! {
     }
 }
 
+/// Maps an HTTP/2 `RST_STREAM` code to a status, as the gRPC spec says.
+///
+/// Codes the spec does not list, including unknown ones, map to
+/// [`GrpcStatus::Internal`].
 impl From<Reason> for GrpcStatus {
     fn from(reason: Reason) -> GrpcStatus {
         match reason {
-            Reason::NO_ERROR
-            | Reason::PROTOCOL_ERROR
-            | Reason::INTERNAL_ERROR
-            | Reason::FLOW_CONTROL_ERROR
-            | Reason::SETTINGS_TIMEOUT
-            | Reason::FRAME_SIZE_ERROR
-            | Reason::COMPRESSION_ERROR
-            | Reason::CONNECT_ERROR => GrpcStatus::Internal,
             Reason::REFUSED_STREAM => GrpcStatus::Unavailable,
             Reason::CANCEL => GrpcStatus::Cancelled,
             Reason::ENHANCE_YOUR_CALM => GrpcStatus::ResourceExhausted,
             Reason::INADEQUATE_SECURITY => GrpcStatus::PermissionDenied,
-            _ => GrpcStatus::Unknown,
+            _ => GrpcStatus::Internal,
         }
     }
 }
@@ -221,9 +217,9 @@ mod tests {
             (Reason::CANCEL, GrpcStatus::Cancelled),
             (Reason::ENHANCE_YOUR_CALM, GrpcStatus::ResourceExhausted),
             (Reason::INADEQUATE_SECURITY, GrpcStatus::PermissionDenied),
-            (Reason::STREAM_CLOSED, GrpcStatus::Unknown),
-            (Reason::HTTP_1_1_REQUIRED, GrpcStatus::Unknown),
-            (Reason::from(0xff_u32), GrpcStatus::Unknown),
+            (Reason::STREAM_CLOSED, GrpcStatus::Internal),
+            (Reason::HTTP_1_1_REQUIRED, GrpcStatus::Internal),
+            (Reason::from(0xff_u32), GrpcStatus::Internal),
         ];
 
         for (reason, status) in cases {

@@ -70,7 +70,13 @@ async fn handle(req: ServerRequest) -> Result<ServerResponse, ServerError> {
                 .unwrap_or_else(|| HeaderValue::from_static("none"));
             Ok(ServerResponse::with_headers(
                 payload,
-                vec![(X_TEST, val), (X_EXTRA, HeaderValue::from_static("1"))],
+                vec![
+                    (X_TEST, val),
+                    (X_EXTRA, HeaderValue::from_static("1")),
+                    // ignored, the call succeeded
+                    (GRPC_STATUS, HeaderValue::from_static("13")),
+                    (GRPC_MESSAGE, HeaderValue::from_static("ignored")),
+                ],
             ))
         }
         _ => Ok(ServerResponse::new(payload)),
@@ -486,7 +492,12 @@ async fn response_headers() {
         call_to(&client, "/test.Svc/Trailers", hdrs, message(0, b"body")).await;
     assert_eq!(data, message(0, b"body"));
     // the status comes first, then the headers of the response
-    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+    assert_eq!(
+        trailers.get_all(GRPC_STATUS).collect::<Vec<_>>(),
+        ["0"],
+        "{trailers:?}"
+    );
+    assert!(trailers.get(GRPC_MESSAGE).is_none());
     assert_eq!(trailers.get(X_TEST).unwrap(), "from-headers");
     assert_eq!(trailers.get(X_EXTRA).unwrap(), "1");
 }

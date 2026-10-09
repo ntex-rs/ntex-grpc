@@ -14,6 +14,7 @@
 //! Only unary calls are supported, streaming methods are not generated.
 #![deny(clippy::pedantic)]
 #![allow(
+    clippy::assert_is_empty,
     clippy::cast_possible_truncation,
     clippy::missing_errors_doc,
     clippy::missing_fields_in_debug,

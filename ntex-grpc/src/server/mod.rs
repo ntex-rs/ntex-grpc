@@ -31,7 +31,8 @@ pub struct ServerRequest {
 pub struct ServerResponse {
     /// The encoded reply message, the server adds the message prefix.
     pub payload: BytePages,
-    /// Extra trailers, sent after `grpc-status`.
+    /// Extra trailers, sent after `grpc-status`. `grpc-status` and
+    /// `grpc-message` are ignored, the status is `OK`.
     pub headers: Vec<(HeaderName, HeaderValue)>,
 }
 
@@ -133,7 +134,8 @@ impl<T> ops::DerefMut for Request<T> {
 pub struct Response<T> {
     /// The reply message.
     pub message: T,
-    /// Extra trailers, sent after `grpc-status`.
+    /// Extra trailers, sent after `grpc-status`. `grpc-status` and
+    /// `grpc-message` are ignored, the status is `OK`.
     pub headers: Vec<(HeaderName, HeaderValue)>,
 }
 

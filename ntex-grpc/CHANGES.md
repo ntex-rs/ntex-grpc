@@ -2,6 +2,9 @@
 
 ## [3.3.0] - Unreleased
 
+* Server ignores `grpc-status` and `grpc-message` in the extra trailers of
+  a successful response, they were sent along with `grpc-status: 0`
+
 * Add `decode_binary_header_values()`, decodes a `-bin` header value that
   holds several values joined with `,`
 

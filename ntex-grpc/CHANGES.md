@@ -2,6 +2,10 @@
 
 ## [3.2.0] - Unreleased
 
+* Server keeps the request path of an unfinished request instead of separate
+  service and method names, which makes the state of a request 24 bytes
+  smaller
+
 * Server sends an empty response message from a static buffer instead of
   allocating a page for its 5-byte prefix
 

@@ -131,8 +131,8 @@ struct PublishService<S: Service<(), ServerRequest>> {
 }
 
 struct Inflight {
-    name: ByteString,
-    service: ByteString,
+    /// The request path without the leading `/`, `service/method`.
+    path: ByteString,
     data: Data,
     headers: HeaderMap,
 }
@@ -222,14 +222,12 @@ where
                 pseudo,
                 eof,
             } => {
-                let mut path = pseudo.path.unwrap().split_off(1);
-                let srvname = if let Some(n) = path.find('/') {
-                    path.split_to(n)
-                } else {
+                let path = pseudo.path.unwrap().split_off(1);
+                if !path.contains('/') {
                     // not found
                     let _ = stream.send_response(StatusCode::NOT_FOUND, hdrs(), true);
                     return Ok(());
-                };
+                }
 
                 // stream eof, cannot do anything
                 if eof {
@@ -239,20 +237,12 @@ where
                     return Ok(());
                 }
 
-                let mut path = path.split_off(1);
-                let methodname = if let Some(n) = path.find('/') {
-                    path.split_to(n)
-                } else {
-                    path
-                };
-
                 let _ = self.streams.borrow_mut().insert(
                     stream.id(),
                     Inflight {
                         headers,
                         data: Data::Empty,
-                        name: methodname,
-                        service: srvname,
+                        path,
                     },
                 );
             }
@@ -299,15 +289,11 @@ where
                         }
                     };
 
-                    log::debug!(
-                        "{}: Call service {} method {}",
-                        self.cfg.tag(),
-                        inflight.service,
-                        inflight.name
-                    );
+                    let (service, name) = split_path(inflight.path);
+                    log::debug!("{}: Call service {service} method {name}", self.cfg.tag());
                     let req = ServerRequest {
                         payload: data,
-                        name: inflight.name,
+                        name,
                         headers: inflight.headers,
                     };
                     // the response is compressed like the request
@@ -425,6 +411,18 @@ where
     }
 }
 
+/// Splits `service/method` into the service and the method name, the method
+/// name ends at the next `/`. The path must contain a `/`.
+fn split_path(mut path: ByteString) -> (ByteString, ByteString) {
+    let n = path.find('/').unwrap_or(path.len());
+    let service = path.split_to(n);
+    let mut name = path.split_off(1);
+    if let Some(n) = name.find('/') {
+        name = name.split_to(n);
+    }
+    (service, name)
+}
+
 fn hdrs() -> HeaderMap {
     let mut hdrs = HeaderMap::default();
     hdrs.insert(CONTENT_TYPE, HDR_APP_GRPC);
@@ -484,4 +482,28 @@ fn try_parse_grpc_timeout(val: &HeaderValue) -> Result<Millis, ()> {
     };
 
     Ok(duration)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inflight_size() {
+        // a slot of the streams map holds the state of a request
+        assert!(size_of::<Inflight>() <= 96, "{}", size_of::<Inflight>());
+    }
+
+    #[test]
+    fn path() {
+        for (path, service, name) in [
+            ("test.Svc/Call", "test.Svc", "Call"),
+            ("test.Svc/Call/extra", "test.Svc", "Call"),
+            ("test.Svc/", "test.Svc", ""),
+            ("/Call", "", "Call"),
+        ] {
+            let (s, n) = split_path(ByteString::from_static(path));
+            assert_eq!((&*s, &*n), (service, name), "{path}");
+        }
+    }
 }

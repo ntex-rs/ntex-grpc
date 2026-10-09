@@ -169,6 +169,29 @@ impl Message for () {
     fn write(&self, _: &mut BytePages) {}
 }
 
+/// Boxed message, generated code uses it for recursive message fields
+impl<T: Message> Message for Box<T> {
+    #[inline]
+    fn read(src: &mut Bytes) -> Result<Self, DecodeError> {
+        T::read(src).map(Box::new)
+    }
+
+    #[inline]
+    fn merge_from(&mut self, src: &mut Bytes) -> Result<(), DecodeError> {
+        T::merge_from(self, src)
+    }
+
+    #[inline]
+    fn write(&self, dst: &mut BytePages) {
+        T::write(self, dst);
+    }
+
+    #[inline]
+    fn encoded_len(&self) -> usize {
+        T::encoded_len(self)
+    }
+}
+
 impl<T: Message + PartialEq> NativeType for T {
     const TYPE: WireType = WireType::LengthDelimited;
 
@@ -1133,6 +1156,74 @@ mod tests {
         let map = Map::deserialize_default(1, WireType::LengthDelimited, &mut src).unwrap();
         assert_eq!(map.get("a"), Some(&7));
         assert!(src.is_empty());
+    }
+
+    #[derive(Clone, PartialEq, Debug, Default)]
+    struct Node {
+        value: u32,
+        next: Option<Box<Node>>,
+    }
+
+    impl Message for Node {
+        fn read(src: &mut Bytes) -> Result<Self, DecodeError> {
+            let mut msg = Self::default();
+            msg.merge_from(src)?;
+            Ok(msg)
+        }
+
+        fn write(&self, dst: &mut BytePages) {
+            NativeType::serialize(&self.value, 1, DefaultValue::Default, dst);
+            NativeType::serialize(&self.next, 2, DefaultValue::Default, dst);
+        }
+
+        fn merge_from(&mut self, src: &mut Bytes) -> Result<(), DecodeError> {
+            while !src.is_empty() {
+                let (tag, wire_type) = encoding::decode_key(src)?;
+                match tag {
+                    1 => NativeType::deserialize(&mut self.value, tag, wire_type, src)?,
+                    2 => NativeType::deserialize(&mut self.next, tag, wire_type, src)?,
+                    _ => encoding::skip_field(wire_type, tag, src)?,
+                }
+            }
+            Ok(())
+        }
+
+        fn encoded_len(&self) -> usize {
+            NativeType::serialized_len(&self.value, 1, DefaultValue::Default)
+                + NativeType::serialized_len(&self.next, 2, DefaultValue::Default)
+        }
+    }
+
+    #[test]
+    fn boxed_message() {
+        let node = Node {
+            value: 1,
+            next: Some(Box::new(Node {
+                value: 2,
+                next: None,
+            })),
+        };
+        let mut buf = BytePages::default();
+        Message::write(&Box::new(node.clone()), &mut buf);
+        let mut src = buf.freeze();
+        assert_eq!(&src[..], &[0x08, 0x01, 0x12, 0x02, 0x08, 0x02]);
+        assert_eq!(Message::encoded_len(&node), src.len());
+
+        let decoded = <Box<Node> as Message>::read(&mut src).unwrap();
+        assert_eq!(*decoded, node);
+
+        // merging a boxed message merges the inner fields
+        let mut boxed = Box::new(Node {
+            value: 3,
+            next: None,
+        });
+        let mut src = Bytes::from_static(&[0x12, 0x02, 0x08, 0x05]);
+        Message::merge_from(&mut boxed, &mut src).unwrap();
+        assert_eq!(boxed.value, 3);
+        assert_eq!(boxed.next.as_ref().unwrap().value, 5);
+
+        let boxed: Box<Node> = Box::new(node.clone());
+        assert_eq!(Message::encoded_len(&boxed), Message::encoded_len(&node));
     }
 
     #[test]

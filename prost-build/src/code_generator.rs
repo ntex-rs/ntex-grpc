@@ -32,6 +32,73 @@ pub struct CodeGenerator<'a> {
     path: Vec<i32>,
     buf: &'a mut String,
     priv_buf: String,
+    /// Fields that are part of a message cycle and are stored in a `Box`,
+    /// `(message, field)` with message names without the leading dot
+    boxed: HashSet<(String, String)>,
+}
+
+/// Singular message fields that lead back to their own message, directly or
+/// through other messages. Such fields need a `Box`, otherwise the generated
+/// struct has infinite size. Proto imports cannot be cyclic, so a cycle never
+/// leaves the file.
+fn boxed_fields(package: &str, messages: &[DescriptorProto]) -> HashSet<(String, String)> {
+    fn collect(
+        prefix: &str,
+        messages: &[DescriptorProto],
+        edges: &mut HashMap<String, Vec<(String, String)>>,
+    ) {
+        for msg in messages {
+            let name = if prefix.is_empty() {
+                msg.name().to_string()
+            } else {
+                format!("{prefix}.{}", msg.name())
+            };
+            let fields = msg
+                .field
+                .iter()
+                .filter(|f| {
+                    f.label() != Label::Repeated
+                        && matches!(f.r#type(), Type::Message | Type::Group)
+                })
+                .map(|f| {
+                    let ty = f.type_name().trim_start_matches('.').to_string();
+                    (f.name().to_string(), ty)
+                })
+                .collect();
+            edges.insert(name.clone(), fields);
+            collect(&name, &msg.nested_type, edges);
+        }
+    }
+
+    fn reaches(
+        from: &str,
+        to: &str,
+        edges: &HashMap<String, Vec<(String, String)>>,
+        seen: &mut HashSet<String>,
+    ) -> bool {
+        if from == to {
+            return true;
+        }
+        if !seen.insert(from.to_string()) {
+            return false;
+        }
+        edges
+            .get(from)
+            .is_some_and(|fields| fields.iter().any(|(_, ty)| reaches(ty, to, edges, seen)))
+    }
+
+    let mut edges = HashMap::new();
+    collect(package, messages, &mut edges);
+
+    let mut boxed = HashSet::new();
+    for (msg, fields) in &edges {
+        for (field, ty) in fields {
+            if reaches(ty, msg, &edges, &mut HashSet::new()) {
+                boxed.insert((msg.clone(), field.clone()));
+            }
+        }
+    }
+    boxed
 }
 
 fn push_indent(buf: &mut String, depth: u8) {
@@ -75,7 +142,10 @@ impl CodeGenerator<'_> {
             Some(s) => panic!("unknown syntax: {s}"),
         };
 
+        let boxed = boxed_fields(file.package.as_deref().unwrap_or(""), &file.message_type);
+
         let mut code_gen = CodeGenerator {
+            boxed,
             name,
             config,
             source_info,
@@ -989,7 +1059,18 @@ impl CodeGenerator<'_> {
             tp.clone()
         } else {
             match field.r#type() {
-                Type::Group | Type::Message => self.resolve_ident(field.type_name()),
+                Type::Group | Type::Message => {
+                    let ty = self.resolve_ident(field.type_name());
+                    let key = (
+                        fq_message_name.trim_start_matches('.').to_string(),
+                        field.name().to_string(),
+                    );
+                    if self.boxed.contains(&key) {
+                        format!("::std::boxed::Box<{ty}>")
+                    } else {
+                        ty
+                    }
+                }
                 // enums are open, the field keeps values unknown to the generated enum
                 Type::Enum => "i32".to_string(),
                 _ => to_rust_type(field.r#type()),
@@ -1338,5 +1419,76 @@ mod tests {
         assert_eq!(strip_enum_prefix("Foo", "Foo"), "Foo");
         assert_eq!(strip_enum_prefix("Foo", "Bar"), "Bar");
         assert_eq!(strip_enum_prefix("Foo", "Foo1"), "Foo1");
+    }
+
+    fn field(name: &str, ty: &str, label: Label) -> FieldDescriptorProto {
+        let mut f = FieldDescriptorProto {
+            name: Some(name.to_string()),
+            type_name: Some(ty.to_string()),
+            ..Default::default()
+        };
+        f.set_type(Type::Message);
+        f.set_label(label);
+        f
+    }
+
+    fn message(
+        name: &str,
+        field: Vec<FieldDescriptorProto>,
+        nested_type: Vec<DescriptorProto>,
+    ) -> DescriptorProto {
+        DescriptorProto {
+            name: Some(name.to_string()),
+            field,
+            nested_type,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_boxed_fields() {
+        let messages = vec![
+            message(
+                "Tree",
+                vec![
+                    field("left", ".pkg.Tree", Label::Optional),
+                    field("children", ".pkg.Tree", Label::Repeated),
+                    field("leaf", ".pkg.Leaf", Label::Optional),
+                    field("inner", ".pkg.Tree.Inner", Label::Optional),
+                ],
+                vec![message(
+                    "Inner",
+                    vec![field("back", ".pkg.Tree", Label::Optional)],
+                    vec![],
+                )],
+            ),
+            message("Leaf", vec![], vec![]),
+            message(
+                "Ping",
+                vec![field("pong", ".pkg.Pong", Label::Optional)],
+                vec![],
+            ),
+            message(
+                "Pong",
+                vec![field("ping", ".pkg.Ping", Label::Optional)],
+                vec![],
+            ),
+        ];
+        let boxed = boxed_fields("pkg", &messages);
+
+        let mut expected: Vec<_> = [
+            ("pkg.Tree", "left"),
+            ("pkg.Tree", "inner"),
+            ("pkg.Tree.Inner", "back"),
+            ("pkg.Ping", "pong"),
+            ("pkg.Pong", "ping"),
+        ]
+        .iter()
+        .map(|(m, f)| (m.to_string(), f.to_string()))
+        .collect();
+        expected.sort();
+        let mut boxed: Vec<_> = boxed.into_iter().collect();
+        boxed.sort();
+        assert_eq!(boxed, expected);
     }
 }

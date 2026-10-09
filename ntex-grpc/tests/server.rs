@@ -23,6 +23,12 @@ fn client() -> SimpleClient {
 
 /// Like [`client`], with the server's limit of a request message.
 fn client_with(max_size: Option<usize>) -> SimpleClient {
+    client_limits(max_size, None)
+}
+
+/// Like [`client`], with the server's limits of a request and a response
+/// message.
+fn client_limits(max_size: Option<usize>, max_send_size: Option<usize>) -> SimpleClient {
     let (cli, srv) = IoTest::create();
     cli.remote_buffer_cap(64 * 1024 * 1024);
     srv.remote_buffer_cap(64 * 1024 * 1024);
@@ -36,6 +42,10 @@ fn client_with(max_size: Option<usize>) -> SimpleClient {
     }));
     let server = match max_size {
         Some(size) => server.max_message_size(size),
+        None => server,
+    };
+    let server = match max_send_size {
+        Some(size) => server.max_send_message_size(size),
         None => server,
     };
     let srv = Io::new(srv, SharedCfg::new("SRV").build());
@@ -231,6 +241,26 @@ async fn max_message_size() {
     assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "8");
 }
 
+#[ntex::test]
+async fn max_send_message_size() {
+    let client = client_limits(None, Some(100));
+    let (_, data, trailers) = call(&client, None, message(0, &[1; 100])).await;
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+    assert_eq!(data, message(0, &[1; 100]));
+
+    let (_, data, trailers) = call(&client, None, message(0, &[1; 101])).await;
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "8");
+    assert_eq!(
+        trailers.get(GRPC_MESSAGE).unwrap(),
+        "grpc: trying to send message larger than max (101 vs. 100)"
+    );
+    assert!(data.is_empty());
+
+    // the connection still works
+    let (_, _, trailers) = call(&client, None, message(0, &[1; 100])).await;
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+}
+
 /// Sends `parts` of a request body without ending it, returns the response
 /// status and message, and whether the stream is reset.
 async fn call_open(client: &SimpleClient, parts: &[&[u8]]) -> (String, String, bool) {
@@ -357,6 +387,37 @@ mod compression {
                 x.to_le_bytes()[0]
             })
             .collect()
+    }
+
+    #[ntex::test]
+    async fn max_send_message_size() {
+        let client = client_limits(None, Some(100));
+        for enc in ENCODINGS {
+            // the compressed response is under the limit
+            let (_, data, trailers) = call(
+                &client,
+                Some(enc),
+                message(1, &compress(enc, &[b'a'; 1000])),
+            )
+            .await;
+            assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0", "{trailers:?}");
+            assert_eq!(data[0], 1);
+            assert!(data.len() <= 105);
+
+            let input = random(1000);
+            let (_, data, trailers) =
+                call(&client, Some(enc), message(1, &compress(enc, &input))).await;
+            assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "8", "{trailers:?}");
+            assert!(
+                trailers
+                    .get(GRPC_MESSAGE)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("grpc: trying to send message larger than max (")
+            );
+            assert!(data.is_empty());
+        }
     }
 
     #[ntex::test]

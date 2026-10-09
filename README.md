@@ -257,7 +257,8 @@ either encoding.
   are sent uncompressed.
 * Size limits apply after decompression. `max_message_size()` on the request
   and on `GrpcServer` covers the decompressed message, and a larger one fails
-  with `RESOURCE_EXHAUSTED`.
+  with `RESOURCE_EXHAUSTED`. `max_send_message_size()` covers the message as
+  it is sent, after compression.
 * Large messages are compressed and decompressed on the runtime's blocking
   thread pool, so they don't hold up the worker thread.
 * A server that doesn't support the encoding fails the call with

@@ -521,7 +521,7 @@ macro_rules! hashmap {
                     match tag {
                         1 => NativeType::deserialize(&mut key, 1, wire_type, &mut buf)?,
                         2 => NativeType::deserialize(&mut val, 2, wire_type, &mut buf)?,
-                        _ => return Err(DecodeError::new("Map deserialization error")),
+                        _ => encoding::skip_field(wire_type, tag, &mut buf)?,
                     }
                 }
                 self.insert(key, val);
@@ -1104,10 +1104,22 @@ mod tests {
         let err = Map::deserialize_default(1, WireType::LengthDelimited, &mut src).unwrap_err();
         assert!(err.to_string().contains("Not enough data for HashMap"));
 
-        // only tags 1 and 2 are valid inside an entry
-        let mut src = Bytes::from_static(&[0x02, 0x18, 0x01]);
+        // malformed unknown field inside an entry
+        let mut src = Bytes::from_static(&[0x01, 0x1c]);
         let err = Map::deserialize_default(1, WireType::LengthDelimited, &mut src).unwrap_err();
-        assert!(err.to_string().contains("Map deserialization error"));
+        assert!(err.to_string().contains("unexpected end group tag"));
+    }
+
+    #[test]
+    fn map_entry_unknown_field() {
+        type Map = HashMap<String, u32>;
+
+        // unknown fields inside an entry are skipped
+        let mut src =
+            Bytes::from_static(&[0x09, 0x18, 0x63, 0x0a, 0x01, b'a', 0x10, 0x07, 0x20, 0x01]);
+        let map = Map::deserialize_default(1, WireType::LengthDelimited, &mut src).unwrap();
+        assert_eq!(map.get("a"), Some(&7));
+        assert!(src.is_empty());
     }
 
     #[test]

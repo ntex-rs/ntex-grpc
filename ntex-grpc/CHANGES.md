@@ -2,6 +2,9 @@
 
 ## [3.2.1] - Unreleased
 
+* Server sends the response uncompressed if the request's
+  `grpc-accept-encoding` does not list the request's encoding
+
 * Server rejects requests whose `content-type` is not `application/grpc`
   with HTTP status 415 and `INVALID_ARGUMENT`
 

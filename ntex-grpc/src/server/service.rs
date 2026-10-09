@@ -564,16 +564,18 @@ fn try_parse_grpc_timeout(val: &HeaderValue) -> Result<Millis, ()> {
     // the unit is the last byte, the value may not be ascii
     let (&timeout_unit, timeout_value) = val.as_bytes().split_last().ok_or(())?;
 
-    // gRPC spec specifies `TimeoutValue` will be at most 8 digits
+    // gRPC spec specifies `TimeoutValue` as 1 to 8 ascii digits, no sign.
     // Caping this at 8 digits also prevents integer overflow from ever occurring
-    if timeout_value.len() > 8 {
+    if timeout_value.is_empty()
+        || timeout_value.len() > 8
+        || !timeout_value.iter().all(u8::is_ascii_digit)
+    {
         return Err(());
     }
 
-    let timeout_value: u64 = std::str::from_utf8(timeout_value)
-        .map_err(|_| ())?
-        .parse()
-        .map_err(|_| ())?;
+    let timeout_value = timeout_value
+        .iter()
+        .fold(0u64, |acc, d| acc * 10 + u64::from(d - b'0'));
     let duration = match timeout_unit {
         // Hours
         b'H' => Millis(u32::try_from(timeout_value * MILLIS_IN_HOUR).unwrap_or(u32::MAX)),
@@ -743,6 +745,8 @@ mod tests {
             "123456789S", // not a number
             "abcS",
             "-1S",
+            "+1S",
+            "+S",
             "1.5S",
             " 1S", // unknown unit
             "1X",

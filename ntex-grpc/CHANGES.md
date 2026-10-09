@@ -2,6 +2,9 @@
 
 ## [3.2.1] - Unreleased
 
+* Add `types::FieldFormat` with `ZigZag`, `Native` and `Map` formats, used by
+  generated code for `sint32` and `sint64` fields
+
 * `float` fields are encoded as fixed32 without a length prefix, they were not
   readable by other protobuf implementations and `encoded_len()` was one byte
   short per field

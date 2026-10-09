@@ -224,26 +224,31 @@ impl CodeGenerator<'_> {
 
             self.path.push(idx as i32);
 
+            let map_entry = field
+                .type_name
+                .as_ref()
+                .and_then(|type_name| map_types.get(type_name));
+            let ops = match map_entry {
+                Some((key, value)) => self.map_ops(&fq_message_name, key, value),
+                None => self.field_ops(&fq_message_name, &field),
+            };
+
             has_fields = true;
             write.push_str(&format!(
-                "::ntex_grpc::NativeType::serialize(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::Default, dst);",
+                "{ops}serialize(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::Default, dst);",
             ));
             read.push_str(&format!(
-                "{field_no} => ::ntex_grpc::NativeType::deserialize(&mut msg.{field_name}, tag, wire_type, src)
+                "{field_no} => {ops}deserialize(&mut msg.{field_name}, tag, wire_type, src)
                     .map_err(|err| err.push(STRUCT_NAME, \"{field_name}\"))?,",
             ));
             encoded_len.push_str(&format!(
-                " + ::ntex_grpc::NativeType::serialized_len(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::Default)",
+                " + {ops}serialized_len(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::Default)",
             ));
             default.push_str(&format!(
                 "{field_name}: ::core::default::Default::default(),\n",
             ));
 
-            match field
-                .type_name
-                .as_ref()
-                .and_then(|type_name| map_types.get(type_name))
-            {
+            match map_entry {
                 Some((key, value)) => self.append_map_field(&fq_message_name, field, key, value),
                 None => self.append_field(&fq_message_name, field),
             }
@@ -535,14 +540,16 @@ impl CodeGenerator<'_> {
             let field_no = field.number();
             let field_name = to_upper_camel(field.name());
 
+            let ops = self.field_ops(fq_message_name, field);
+
             write.push_str(&format!(
-                "{name}::{field_name}(ref value) => ::ntex_grpc::NativeType::serialize(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown, dst),",
+                "{name}::{field_name}(ref value) => {ops}serialize(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown, dst),",
             ));
             read.push_str(&format!(
-                "{field_no} => {name}::{field_name}(::ntex_grpc::NativeType::deserialize_default({field_no}, wire_type, src)?),\n",
+                "{field_no} => {name}::{field_name}({ops}deserialize_default({field_no}, wire_type, src)?),\n",
             ));
             encoded_len.push_str(&format!(
-                "{name}::{field_name}(ref value) => ::ntex_grpc::NativeType::serialized_len(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown),",
+                "{name}::{field_name}(ref value) => {ops}serialized_len(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown),",
             ));
 
             self.path.push(*idx as i32);
@@ -956,6 +963,57 @@ impl CodeGenerator<'_> {
                 Type::Group | Type::Message | Type::Enum => self.resolve_ident(field.type_name()),
                 _ => to_rust_type(field.r#type()),
             }
+        }
+    }
+
+    /// Wire format of a field whose encoding differs from the `NativeType`
+    /// encoding of its Rust type. Fields with a type from `types_map` use
+    /// the `NativeType` impl of that type.
+    fn field_format(
+        &self,
+        field: &FieldDescriptorProto,
+        fq_message_name: &str,
+    ) -> Option<&'static str> {
+        if self
+            .config
+            .types_map
+            .get_first_field(fq_message_name, field.name())
+            .is_some()
+        {
+            return None;
+        }
+        match field.r#type() {
+            Type::Sint32 | Type::Sint64 => Some("::ntex_grpc::types::ZigZag"),
+            _ => None,
+        }
+    }
+
+    /// Path prefix of the encoding functions for a field
+    fn field_ops(&self, fq_message_name: &str, field: &FieldDescriptorProto) -> String {
+        match self.field_format(field, fq_message_name) {
+            Some(format) => format!("<{format} as ::ntex_grpc::types::FieldFormat<_>>::"),
+            None => "::ntex_grpc::NativeType::".to_string(),
+        }
+    }
+
+    /// Path prefix of the encoding functions for a map field
+    fn map_ops(
+        &self,
+        fq_message_name: &str,
+        key: &FieldDescriptorProto,
+        value: &FieldDescriptorProto,
+    ) -> String {
+        let key = self.field_format(key, fq_message_name);
+        let value = self.field_format(value, fq_message_name);
+        if key.is_none() && value.is_none() {
+            "::ntex_grpc::NativeType::".to_string()
+        } else {
+            let native = "::ntex_grpc::types::Native";
+            format!(
+                "<::ntex_grpc::types::Map<{}, {}> as ::ntex_grpc::types::FieldFormat<_>>::",
+                key.unwrap_or(native),
+                value.unwrap_or(native)
+            )
         }
     }
 

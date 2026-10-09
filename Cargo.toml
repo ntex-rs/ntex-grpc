@@ -15,21 +15,21 @@ ntex-grpc-derive = { path = "./ntex-grpc-derive" }
 ntex-prost-build = { path = "./prost-build" }
 
 [workspace.dependencies]
-ntex-grpc = "3.2.0"
+ntex-grpc = "3.3.0"
 ntex-grpc-derive = "3.1.0"
-ntex-grpc-codegen = "0.3.0"
-ntex-prost-build = "0.13.0"
+ntex-grpc-codegen = "0.4.0"
+ntex-prost-build = "0.14.0"
 
-ntex = "4.0.0"
-ntex-bytes = "1.10"
+ntex = "4.1.0"
+ntex-bytes = "1.11"
 ntex-error = "3.0"
-ntex-http = "2.0"
+ntex-http = "2.1"
 ntex-h2 = "4.2.0"
-ntex-io = "4.2.0"
-ntex-net = "4.2.0"
+ntex-io = "4.3.0"
+ntex-net = "4.3.0"
 ntex-rt = "4.1.0"
-ntex-util = "4.2.0"
-ntex-service = "5.1.0"
+ntex-util = "4.3.0"
+ntex-service = "5.2.0"
 
 base64 = "0.22"
 flate2 = "1.1.3"

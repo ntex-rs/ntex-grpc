@@ -59,9 +59,9 @@ impl RequestContext {
     /// Set the max duration the request is allowed to take.
     ///
     /// The duration is sent in the `grpc-timeout` header, formatted according
-    /// to [the spec] with the most precise unit that fits. Built-in transports
-    /// also stop waiting when it runs out and return
-    /// [`ClientError::DeadlineExceeded`](super::ClientError::DeadlineExceeded).
+    /// to [the spec] with the most precise unit that fits, rounded up and at
+    /// most `99999999H`. Built-in transports also stop waiting when it runs
+    /// out and return [`ClientError::DeadlineExceeded`](super::ClientError::DeadlineExceeded).
     /// A zero timeout fails the call without sending it.
     ///
     /// [the spec]: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
@@ -319,9 +319,9 @@ where
     /// Set the max duration the request is allowed to take.
     ///
     /// The duration is sent in the `grpc-timeout` header, formatted according
-    /// to [the spec] with the most precise unit that fits. Built-in transports
-    /// also stop waiting when it runs out and return
-    /// [`ClientError::DeadlineExceeded`](super::ClientError::DeadlineExceeded).
+    /// to [the spec] with the most precise unit that fits, rounded up and at
+    /// most `99999999H`. Built-in transports also stop waiting when it runs
+    /// out and return [`ClientError::DeadlineExceeded`](super::ClientError::DeadlineExceeded).
     /// A zero timeout fails the call without sending it.
     ///
     /// [the spec]: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
@@ -393,37 +393,28 @@ fn is_reserved(key: &HeaderName) -> bool {
 }
 
 fn duration_to_grpc_timeout(duration: time::Duration) -> String {
-    fn try_format<T: Into<u128>>(
-        duration: time::Duration,
-        unit: char,
-        convert: impl FnOnce(time::Duration) -> T,
-    ) -> Option<String> {
-        // The gRPC spec specifies that the timeout most be at most 8 digits. So this is the largest a
-        // value can be before we need to use a bigger unit.
-        let max_size: u128 = 99_999_999; // exactly 8 digits
+    // nanoseconds in each unit, from the most precise
+    const UNITS: [(char, u128); 6] = [
+        ('n', 1),
+        ('u', 1_000),
+        ('m', 1_000_000),
+        ('S', 1_000_000_000),
+        ('M', 60_000_000_000),
+        ('H', 3_600_000_000_000),
+    ];
+    // the spec allows at most 8 digits
+    const MAX_VALUE: u128 = 99_999_999;
 
-        let value = convert(duration).into();
-        if value > max_size {
-            None
-        } else {
-            Some(format!("{value}{unit}"))
+    let nanos = duration.as_nanos();
+    for (unit, size) in UNITS {
+        // rounded up, the server must not give up before the client does
+        let value = nanos.div_ceil(size);
+        if value <= MAX_VALUE {
+            return format!("{value}{unit}");
         }
     }
-
-    // pick the most precise unit that is less than or equal to 8 digits as per the gRPC spec
-    try_format(duration, 'n', |d| d.as_nanos())
-        .or_else(|| try_format(duration, 'u', |d| d.as_micros()))
-        .or_else(|| try_format(duration, 'm', |d| d.as_millis()))
-        .or_else(|| try_format(duration, 'S', |d| d.as_secs()))
-        .or_else(|| try_format(duration, 'M', |d| d.as_secs() / 60))
-        .or_else(|| {
-            try_format(duration, 'H', |d| {
-                let minutes = d.as_secs() / 60;
-                minutes / 60
-            })
-        })
-        // duration has to be more than 11_415 years for this to happen
-        .expect("duration is unrealistically large")
+    // more than 11,000 years
+    format!("{MAX_VALUE}H")
 }
 
 /// Successful reply to a call.
@@ -640,11 +631,26 @@ mod tests {
         // each unit is used once the smaller one needs more than 8 digits
         for (secs, expect) in [
             (100_000_u64, "100000S"),
-            (100_000_000, "1666666M"),
-            (6_000_000_000, "1666666H"),
+            (100_000_000, "1666667M"),
+            (6_000_000_000, "1666667H"),
         ] {
             let value = duration_to_grpc_timeout(time::Duration::from_secs(secs));
             assert_eq!(value, expect, "{secs}");
+        }
+
+        // a value that does not fit a unit is rounded up
+        for (duration, expect) in [
+            (time::Duration::new(100, 1), "100001m"),
+            (time::Duration::new(100_000, 1), "100001S"),
+            (time::Duration::from_hours(99_999_999), "99999999H"),
+            // larger values are capped
+            (
+                time::Duration::from_hours(99_999_999) + time::Duration::from_nanos(1),
+                "99999999H",
+            ),
+            (time::Duration::MAX, "99999999H"),
+        ] {
+            assert_eq!(duration_to_grpc_timeout(duration), expect, "{duration:?}");
         }
     }
 

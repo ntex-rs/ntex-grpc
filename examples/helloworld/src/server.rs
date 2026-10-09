@@ -28,13 +28,13 @@ impl GreeterServer {
         data3.insert("1".to_string().into(), 10u32);
         Ok(HelloReply {
             // data5: vec![helloworld::DocumentType::Namespace, helloworld::DocumentType::Quota],
-            data5: vec![helloworld::DocumentType::Namespace],
+            data5: vec![helloworld::DocumentType::Namespace.into()],
             message: format!("Hello {}!", req.name).into(),
             tag: 1,
             data1: vec![1, 2, 3],
             data2: vec!["1".to_string().into()],
             data3,
-            data4: helloworld::DocumentType::Namespace,
+            data4: helloworld::DocumentType::Namespace.into(),
             data6: vec![-234234234, 123412414, 45456],
         })
     }

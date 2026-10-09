@@ -20,20 +20,59 @@
 pub struct HelloRequest {
     pub name: ::ntex_grpc::ByteString,
     pub data1: Vec<i64>,
-    pub data2: Vec<DocumentType>,
+    pub data2: Vec<i32>,
+}
+
+impl HelloRequest {
+    /// Returns an iterator over the enum values of `data2`, unknown values are skipped.
+    pub fn data2(&self) -> impl ::std::iter::Iterator<Item = DocumentType> + '_ {
+        self.data2
+            .iter()
+            .filter_map(|value| DocumentType::from_i32(*value))
+    }
+
+    /// Appends an enum value to `data2`.
+    pub fn push_data2(&mut self, value: DocumentType) {
+        self.data2.push(value as i32);
+    }
 }
 
 ///  The response message containing the greetings
 #[derive(Clone, PartialEq, Debug)]
 pub struct HelloReply {
-    pub data5: Vec<DocumentType>,
+    pub data5: Vec<i32>,
     pub data6: Vec<i64>,
     pub message: ::ntex_grpc::ByteString,
     pub tag: u32,
     pub data1: Vec<u32>,
     pub data2: Vec<::ntex_grpc::ByteString>,
     pub data3: ::ntex_grpc::HashMap<::ntex_grpc::ByteString, u32>,
-    pub data4: DocumentType,
+    pub data4: i32,
+}
+
+impl HelloReply {
+    /// Returns an iterator over the enum values of `data5`, unknown values are skipped.
+    pub fn data5(&self) -> impl ::std::iter::Iterator<Item = DocumentType> + '_ {
+        self.data5
+            .iter()
+            .filter_map(|value| DocumentType::from_i32(*value))
+    }
+
+    /// Appends an enum value to `data5`.
+    pub fn push_data5(&mut self, value: DocumentType) {
+        self.data5.push(value as i32);
+    }
+
+    /// Returns the enum value of `data4`, or the default if the field has
+    /// an unknown value.
+    pub fn data4(&self) -> DocumentType {
+        DocumentType::from_i32(self.data4).unwrap_or_default()
+    }
+
+    /// Sets `data4` to the enum value.
+    pub fn set_data4(&mut self, value: DocumentType) {
+        self.data4 = value as i32;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -89,7 +128,7 @@ pub enum GreeterMethods {
     SayHello(GreeterSayHelloMethod),
 }
 
-/// The greeting service definition.
+///  The greeting service definition.
 #[derive(Debug, Clone)]
 pub struct GreeterClient<T>(T);
 
@@ -134,21 +173,34 @@ mod _priv_impl_helloworld {
         fn read(
             src: &mut ::ntex_grpc::Bytes,
         ) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {
-            const STRUCT_NAME: &str = "HelloRequest";
             let mut msg = Self::default();
+            ::ntex_grpc::Message::merge_from(&mut msg, src)?;
+            Ok(msg)
+        }
+
+        #[inline]
+        fn merge_from(
+            &mut self,
+            src: &mut ::ntex_grpc::Bytes,
+        ) -> ::std::result::Result<(), ::ntex_grpc::DecodeError> {
+            const STRUCT_NAME: &str = "HelloRequest";
             while !src.is_empty() {
                 let (tag, wire_type) = ::ntex_grpc::encoding::decode_key(src)?;
                 match tag {
-                    1 => ::ntex_grpc::NativeType::deserialize(&mut msg.name, tag, wire_type, src)
+                    1 => ::ntex_grpc::NativeType::deserialize(&mut self.name, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, "name"))?,
-                    2 => ::ntex_grpc::NativeType::deserialize(&mut msg.data1, tag, wire_type, src)
-                        .map_err(|err| err.push(STRUCT_NAME, "data1"))?,
-                    3 => ::ntex_grpc::NativeType::deserialize(&mut msg.data2, tag, wire_type, src)
-                        .map_err(|err| err.push(STRUCT_NAME, "data2"))?,
+                    2 => {
+                        ::ntex_grpc::NativeType::deserialize(&mut self.data1, tag, wire_type, src)
+                            .map_err(|err| err.push(STRUCT_NAME, "data1"))?
+                    }
+                    3 => {
+                        ::ntex_grpc::NativeType::deserialize(&mut self.data2, tag, wire_type, src)
+                            .map_err(|err| err.push(STRUCT_NAME, "data2"))?
+                    }
                     _ => ::ntex_grpc::encoding::skip_field(wire_type, tag, src)?,
                 }
             }
-            Ok(msg)
+            Ok(())
         }
 
         #[inline]
@@ -237,33 +289,57 @@ mod _priv_impl_helloworld {
         fn read(
             src: &mut ::ntex_grpc::Bytes,
         ) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {
-            const STRUCT_NAME: &str = "HelloReply";
             let mut msg = Self::default();
+            ::ntex_grpc::Message::merge_from(&mut msg, src)?;
+            Ok(msg)
+        }
+
+        #[inline]
+        fn merge_from(
+            &mut self,
+            src: &mut ::ntex_grpc::Bytes,
+        ) -> ::std::result::Result<(), ::ntex_grpc::DecodeError> {
+            const STRUCT_NAME: &str = "HelloReply";
             while !src.is_empty() {
                 let (tag, wire_type) = ::ntex_grpc::encoding::decode_key(src)?;
                 match tag {
-                    1 => ::ntex_grpc::NativeType::deserialize(&mut msg.data5, tag, wire_type, src)
-                        .map_err(|err| err.push(STRUCT_NAME, "data5"))?,
-                    2 => ::ntex_grpc::NativeType::deserialize(&mut msg.data6, tag, wire_type, src)
-                        .map_err(|err| err.push(STRUCT_NAME, "data6"))?,
-                    3 => {
-                        ::ntex_grpc::NativeType::deserialize(&mut msg.message, tag, wire_type, src)
-                            .map_err(|err| err.push(STRUCT_NAME, "message"))?
+                    1 => {
+                        ::ntex_grpc::NativeType::deserialize(&mut self.data5, tag, wire_type, src)
+                            .map_err(|err| err.push(STRUCT_NAME, "data5"))?
                     }
-                    4 => ::ntex_grpc::NativeType::deserialize(&mut msg.tag, tag, wire_type, src)
+                    2 => {
+                        ::ntex_grpc::NativeType::deserialize(&mut self.data6, tag, wire_type, src)
+                            .map_err(|err| err.push(STRUCT_NAME, "data6"))?
+                    }
+                    3 => ::ntex_grpc::NativeType::deserialize(
+                        &mut self.message,
+                        tag,
+                        wire_type,
+                        src,
+                    )
+                    .map_err(|err| err.push(STRUCT_NAME, "message"))?,
+                    4 => ::ntex_grpc::NativeType::deserialize(&mut self.tag, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, "tag"))?,
-                    5 => ::ntex_grpc::NativeType::deserialize(&mut msg.data1, tag, wire_type, src)
-                        .map_err(|err| err.push(STRUCT_NAME, "data1"))?,
-                    6 => ::ntex_grpc::NativeType::deserialize(&mut msg.data2, tag, wire_type, src)
-                        .map_err(|err| err.push(STRUCT_NAME, "data2"))?,
-                    7 => ::ntex_grpc::NativeType::deserialize(&mut msg.data3, tag, wire_type, src)
-                        .map_err(|err| err.push(STRUCT_NAME, "data3"))?,
-                    8 => ::ntex_grpc::NativeType::deserialize(&mut msg.data4, tag, wire_type, src)
-                        .map_err(|err| err.push(STRUCT_NAME, "data4"))?,
+                    5 => {
+                        ::ntex_grpc::NativeType::deserialize(&mut self.data1, tag, wire_type, src)
+                            .map_err(|err| err.push(STRUCT_NAME, "data1"))?
+                    }
+                    6 => {
+                        ::ntex_grpc::NativeType::deserialize(&mut self.data2, tag, wire_type, src)
+                            .map_err(|err| err.push(STRUCT_NAME, "data2"))?
+                    }
+                    7 => {
+                        ::ntex_grpc::NativeType::deserialize(&mut self.data3, tag, wire_type, src)
+                            .map_err(|err| err.push(STRUCT_NAME, "data3"))?
+                    }
+                    8 => {
+                        ::ntex_grpc::NativeType::deserialize(&mut self.data4, tag, wire_type, src)
+                            .map_err(|err| err.push(STRUCT_NAME, "data4"))?
+                    }
                     _ => ::ntex_grpc::encoding::skip_field(wire_type, tag, src)?,
                 }
             }
-            Ok(msg)
+            Ok(())
         }
 
         #[inline]
@@ -362,6 +438,13 @@ mod _priv_impl_helloworld {
         }
     }
 
+    impl ::std::convert::From<DocumentType> for i32 {
+        #[inline]
+        fn from(value: DocumentType) -> i32 {
+            value as i32
+        }
+    }
+
     impl ::ntex_grpc::ServiceDef for Greeter {
         const NAME: &'static str = "helloworld.Greeter";
         type Methods = GreeterMethods;
@@ -413,7 +496,7 @@ mod _priv_impl_helloworld {
     }
 
     impl<T: ::ntex_grpc::client::Transport<GreeterSayHelloMethod>> GreeterClient<T> {
-        /// Sends a greeting
+        ///  Sends a greeting
         pub fn say_hello<'a>(
             &'a self,
             req: &'a super::HelloRequest,

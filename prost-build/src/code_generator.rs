@@ -215,6 +215,7 @@ impl CodeGenerator<'_> {
         let mut read = String::new();
         let mut encoded_len = String::new();
         let mut default = String::new();
+        let mut accessors = String::new();
 
         self.depth += 1;
         self.path.push(2);
@@ -248,6 +249,7 @@ impl CodeGenerator<'_> {
                 "{field_name}: ::core::default::Default::default(),\n",
             ));
 
+            self.enum_accessors(&fq_message_name, &field, map_entry, &mut accessors);
             match map_entry {
                 Some((key, value)) => self.append_map_field(&fq_message_name, field, key, value),
                 None => self.append_field(&fq_message_name, field),
@@ -297,6 +299,14 @@ impl CodeGenerator<'_> {
         self.depth -= 1;
         self.push_indent();
         self.buf.push_str("}\n\n");
+
+        if !accessors.is_empty() {
+            self.push_indent();
+            self.buf.push_str(&format!(
+                "impl {} {{\n{accessors}}}\n\n",
+                to_upper_camel(&message_name)
+            ));
+        }
 
         // message impl =============================
         self.priv_buf.push_str(&format!(
@@ -863,13 +873,22 @@ impl CodeGenerator<'_> {
                 fn default() -> Self {{
                     {}::{}
                 }}
+            }}
+
+            impl ::std::convert::From<{}> for i32 {{
+                #[inline]
+                fn from(value: {}) -> i32 {{
+                    value as i32
+                }}
             }}\n\n",
             full_name,
             full_name,
             variant_mappings[0].generated_variant_name,
             full_name,
             full_name,
-            variant_mappings[0].generated_variant_name
+            variant_mappings[0].generated_variant_name,
+            full_name,
+            full_name,
         ));
     }
 
@@ -970,10 +989,90 @@ impl CodeGenerator<'_> {
             tp.clone()
         } else {
             match field.r#type() {
-                Type::Group | Type::Message | Type::Enum => self.resolve_ident(field.type_name()),
+                Type::Group | Type::Message => self.resolve_ident(field.type_name()),
+                // enums are open, the field keeps values unknown to the generated enum
+                Type::Enum => "i32".to_string(),
                 _ => to_rust_type(field.r#type()),
             }
         }
+    }
+
+    /// Typed accessors for an enum field, the field itself holds the raw `i32` value
+    fn enum_accessors(
+        &self,
+        fq_message_name: &str,
+        field: &FieldDescriptorProto,
+        map_entry: Option<&(FieldDescriptorProto, FieldDescriptorProto)>,
+        out: &mut String,
+    ) {
+        let (enum_field, key_ty) = match map_entry {
+            Some((key, value)) => (value, Some(self.resolve_type(key, fq_message_name))),
+            None => (field, None),
+        };
+        if enum_field.r#type() != Type::Enum
+            || self.resolve_type(enum_field, fq_message_name) != "i32"
+        {
+            return;
+        }
+
+        let ty = self.resolve_ident(enum_field.type_name());
+        let name = to_snake(field.name());
+        let base = name.trim_start_matches("r#");
+        let proto = field.name();
+
+        let code = if let Some(key_ty) = key_ty {
+            format!(
+                "/// Returns the enum value of `{proto}` for `key`, `None` if the key is
+                 /// missing or the value is unknown.
+                 pub fn get_{base}(&self, key: &{key_ty}) -> ::std::option::Option<{ty}> {{
+                     self.{name}.get(key).copied().and_then({ty}::from_i32)
+                 }}
+
+                 /// Inserts the enum value of `{proto}` for `key`, returns the previous value.
+                 pub fn insert_{base}(&mut self, key: {key_ty}, value: {ty}) -> ::std::option::Option<{ty}> {{
+                     self.{name}.insert(key, value as i32).and_then({ty}::from_i32)
+                 }}\n\n"
+            )
+        } else if field.label() == Label::Repeated {
+            format!(
+                "/// Returns an iterator over the enum values of `{proto}`, unknown values are skipped.
+                 pub fn {name}(&self) -> impl ::std::iter::Iterator<Item = {ty}> + '_ {{
+                     self.{name}.iter().filter_map(|value| {ty}::from_i32(*value))
+                 }}
+
+                 /// Appends an enum value to `{proto}`.
+                 pub fn push_{base}(&mut self, value: {ty}) {{
+                     self.{name}.push(value as i32);
+                 }}\n\n"
+            )
+        } else if self.optional(field) {
+            format!(
+                "/// Returns the enum value of `{proto}`, or the default if the field is
+                 /// unset or has an unknown value.
+                 pub fn {name}(&self) -> {ty} {{
+                     self.{name}.and_then({ty}::from_i32).unwrap_or_default()
+                 }}
+
+                 /// Sets `{proto}` to the enum value.
+                 pub fn set_{base}(&mut self, value: {ty}) {{
+                     self.{name} = ::std::option::Option::Some(value as i32);
+                 }}\n\n"
+            )
+        } else {
+            format!(
+                "/// Returns the enum value of `{proto}`, or the default if the field has
+                 /// an unknown value.
+                 pub fn {name}(&self) -> {ty} {{
+                     {ty}::from_i32(self.{name}).unwrap_or_default()
+                 }}
+
+                 /// Sets `{proto}` to the enum value.
+                 pub fn set_{base}(&mut self, value: {ty}) {{
+                     self.{name} = value as i32;
+                 }}\n\n"
+            )
+        };
+        out.push_str(&code);
     }
 
     /// Wire format of a field whose encoding differs from the `NativeType`

@@ -20,6 +20,11 @@
 * Generate `Message::merge_from()`, repeated occurrences of a message field or
   of the same oneof message variant are merged
 
+* Enum fields are generated as `i32`, values unknown to the generated enum are
+  preserved instead of being replaced by the default variant. Breaking change,
+  use the generated typed accessors (`field()`/`set_field()`, `push_field()`,
+  `get_field()`/`insert_field()` for maps) or `Enum::from_i32()` and `.into()`
+
 * Fix multi-line service and method comments being joined into one doc line
 
 * Fence code examples from proto comments, so rustdoc does not run them as Rust doctests

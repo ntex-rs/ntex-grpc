@@ -201,6 +201,8 @@ The server sends a gRPC status itself in these cases:
 * `NOT_FOUND` for an unknown method;
 * `UNIMPLEMENTED` for an rpc that has no `#[method]`;
 * `INVALID_ARGUMENT` if the request message doesn't decode;
+* `INVALID_ARGUMENT` with HTTP status 415 if the request `content-type` is not
+  `application/grpc`;
 * `DEADLINE_EXCEEDED` if the client's `grpc-timeout` runs out before the method
   finishes.
 

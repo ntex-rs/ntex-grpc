@@ -192,6 +192,14 @@ pub(crate) async fn read_message(
     }
 }
 
+/// `application/grpc`, optionally with a `+` or `;` suffix, in any case.
+pub(crate) fn is_grpc_content_type(ct: &[u8]) -> bool {
+    let prefix = b"application/grpc";
+    ct.len() >= prefix.len()
+        && ct[..prefix.len()].eq_ignore_ascii_case(prefix)
+        && matches!(ct.get(prefix.len()), None | Some(b'+' | b';'))
+}
+
 /// Builds a `grpc-message` of `prefix: value`.
 ///
 /// `grpc-message` is percent-encoded, so the value is only added if it is

@@ -385,7 +385,7 @@ fn is_grpc(status: Option<StatusCode>, hdrs: &HeaderMap) -> bool {
     status == Some(StatusCode::OK)
         && hdrs
             .get(header::CONTENT_TYPE)
-            .is_some_and(|val| is_grpc_content_type(val.as_bytes()))
+            .is_some_and(|val| utils::is_grpc_content_type(val.as_bytes()))
 }
 
 /// The largest message to buffer, the body of a response that is not a grpc
@@ -526,21 +526,13 @@ fn check_content_type(hdrs: &HeaderMap) -> Option<(GrpcStatus, HeaderValue)> {
             HeaderValue::from_static("Response has no content-type"),
         ));
     };
-    if is_grpc_content_type(val.as_bytes()) {
+    if utils::is_grpc_content_type(val.as_bytes()) {
         return None;
     }
     Some((
         GrpcStatus::Unknown,
         utils::grpc_message("Invalid content-type", val),
     ))
-}
-
-/// `application/grpc`, optionally with a `+` or `;` suffix, in any case.
-fn is_grpc_content_type(ct: &[u8]) -> bool {
-    let prefix = b"application/grpc";
-    ct.len() >= prefix.len()
-        && ct[..prefix.len()].eq_ignore_ascii_case(prefix)
-        && matches!(ct.get(prefix.len()), None | Some(b'+' | b';'))
 }
 
 /// Reads `grpc-status`, an unknown or invalid code is an error with the

@@ -6,6 +6,10 @@
   `int32` and `int64`. Generated code requires ntex-grpc 3.3.0, regenerate
   code for protos with `sint` fields
 
+* `fixed32`, `fixed64`, `sfixed32` and `sfixed64` fields use fixed width
+  encoding, they were encoded as varints. Regenerate code for protos with
+  `fixed` fields
+
 * Fix multi-line service and method comments being joined into one doc line
 
 * Fence code examples from proto comments, so rustdoc does not run them as Rust doctests

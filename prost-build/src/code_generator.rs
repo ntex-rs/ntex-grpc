@@ -984,6 +984,9 @@ impl CodeGenerator<'_> {
         }
         match field.r#type() {
             Type::Sint32 | Type::Sint64 => Some("::ntex_grpc::types::ZigZag"),
+            Type::Fixed32 | Type::Fixed64 | Type::Sfixed32 | Type::Sfixed64 => {
+                Some("::ntex_grpc::types::Fixed")
+            }
             _ => None,
         }
     }

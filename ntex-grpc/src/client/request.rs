@@ -149,7 +149,8 @@ impl RequestContext {
     ///
     /// Headers the client sets itself are ignored:
     /// `content-type`, `user-agent`, `te`, `grpc-encoding`,
-    /// `grpc-message-type`, `grpc-message`, `grpc-status` and `grpc-timeout`.
+    /// `grpc-accept-encoding`, `grpc-message-type`, `grpc-message`,
+    /// `grpc-status` and `grpc-timeout`.
     /// Use [`timeout()`](Self::timeout) for the timeout.
     pub fn header<K, V>(&mut self, key: K, value: V) -> &mut Self
     where
@@ -385,6 +386,7 @@ fn is_reserved(key: &HeaderName) -> bool {
             | "user-agent"
             | "te"
             | "grpc-encoding"
+            | "grpc-accept-encoding"
             | "grpc-message-type"
             | "grpc-message"
             | "grpc-status"
@@ -545,6 +547,7 @@ mod tests {
             "User-Agent",
             "te",
             "grpc-encoding",
+            "grpc-accept-encoding",
             "grpc-message-type",
             "grpc-message",
             "grpc-status",
@@ -560,10 +563,9 @@ mod tests {
         assert!(ctx.take_error().is_some());
 
         // not reserved
-        ctx.header("grpc-accept-encoding", "gzip")
-            .header("grpc-previous-rpc-attempts", "1")
+        ctx.header("grpc-previous-rpc-attempts", "1")
             .header("x-te", "1");
-        assert_eq!(ctx.headers().count(), 3);
+        assert_eq!(ctx.headers().count(), 2);
 
         ctx.timeout(time::Duration::from_secs(1));
         ctx.header("grpc-timeout", "1S");

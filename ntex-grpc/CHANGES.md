@@ -2,6 +2,9 @@
 
 ## [3.2.1] - Unreleased
 
+* Write `-0.0` values of `float` and `double` fields, only `+0.0` is the
+  default value
+
 * Skip unknown fields inside map entries, they failed decoding with
   "Map deserialization error"
 

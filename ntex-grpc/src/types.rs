@@ -642,7 +642,8 @@ macro_rules! fixed_width {
 
             #[inline]
             fn is_default(&self) -> bool {
-                *self == $default
+                // -0.0 is not the default value, it must be written
+                self.to_bits() == $default.to_bits()
             }
 
             #[inline]
@@ -850,6 +851,16 @@ mod tests {
         assert_eq!(NativeType::value_len(&1.5_f64), 8);
         assert_eq!(NativeType::value_len(&1.5_f32), 4);
 
+        // only +0.0 is the default value, -0.0 is written
+        assert!(encode(&0_f64, 1, DefaultValue::Default).is_empty());
+        assert!(encode(&0_f32, 1, DefaultValue::Default).is_empty());
+        let buf = encode(&-0_f64, 1, DefaultValue::Default);
+        assert_eq!(buf.as_ref(), &[0x09, 0, 0, 0, 0, 0, 0, 0, 0x80]);
+        assert_eq!((-0_f64).serialized_len(1, DefaultValue::Default), 9);
+        let buf = encode(&-0_f32, 1, DefaultValue::Default);
+        assert_eq!(buf.as_ref(), &[0x0d, 0, 0, 0, 0x80]);
+        assert_eq!((-0_f32).serialized_len(1, DefaultValue::Default), 5);
+
         // repeated fixed width fields are packed
         let v = vec![1.5_f32, -1.5];
         let expected = [0x0a, 0x08, 0, 0, 0xc0, 0x3f, 0, 0, 0xc0, 0xbf];
@@ -977,6 +988,8 @@ mod tests {
         assert!(!true.is_default() && false.is_default());
         assert!(0_f32.is_default() && !1_f32.is_default());
         assert!(0_f64.is_default() && !1_f64.is_default());
+        assert!(!(-0_f32).is_default() && !(-0_f64).is_default());
+        assert!(!f32::NAN.is_default() && !f64::NAN.is_default());
         assert!(String::new().is_default() && !"a".to_string().is_default());
         assert!(Bytes::new().is_default());
         assert!(ByteString::new().is_default());

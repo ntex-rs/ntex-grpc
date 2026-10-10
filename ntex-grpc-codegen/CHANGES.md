@@ -1,6 +1,11 @@
 # Changes
 
-## [0.4.0] - Unreleased
+## [0.4.1] - Unreleased
+
+* Add `--optional-messages` to generate singular message fields as `Option<T>`
+  to track presence, unset fields are not written as empty messages
+
+## [0.4.0] - 2026-10-10
 
 * Generate recursive message fields as `Option<Box<T>>`, recursive messages
   produced structs with infinite size
@@ -15,10 +20,6 @@
 
 * Repeated scalar fields of `proto2` files and fields with `[packed = false]`
   are written unpacked
-
-* Singular message fields are generated as `Option<T>` to track presence,
-  unset fields are no longer written as empty messages. This is a breaking
-  change for code that uses generated structs
 
 * Generate `Message::merge_from()`, repeated occurrences of a message field or
   of the same oneof message variant are merged

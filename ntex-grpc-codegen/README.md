@@ -23,6 +23,9 @@ Options:
 * `--well-known-types`: generate the `google.protobuf` types instead of using
   the ones from `ntex_grpc::google_types`.
 * `--rustfmt-path FILE`: rustfmt config used to format the output.
+* `--optional-messages`: generate singular message fields as `Option<T>`, so an
+  unset field is `None` and is not encoded. By default they are plain values,
+  always encoded, and a missing field decodes as the default.
 
 See the [ntex-grpc README](https://github.com/ntex-rs/ntex-grpc#readme) for
 how to use the generated code.

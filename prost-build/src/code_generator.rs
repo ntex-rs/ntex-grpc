@@ -586,7 +586,7 @@ impl CodeGenerator<'_> {
 
     fn append_field(&mut self, fq_message_name: &str, field: FieldDescriptorProto) {
         let repeated = field.label == Some(Label::Repeated as i32);
-        let optional = self.optional(&field);
+        let optional = self.optional(fq_message_name, &field);
         let ty = self.resolve_type(&field, fq_message_name);
 
         debug!("    field: {:?}, type: {:?}", field.name(), ty);
@@ -1218,7 +1218,7 @@ impl CodeGenerator<'_> {
                      self.{name}.push(value as i32);
                  }}\n\n"
             )
-        } else if self.optional(field) {
+        } else if self.optional(fq_message_name, field) {
             let default = match self.enum_default_variant(field) {
                 Some(variant) => format!("unwrap_or({ty}::{variant})"),
                 None => "unwrap_or_default()".to_string(),
@@ -1376,7 +1376,7 @@ impl CodeGenerator<'_> {
         if field.default_value.is_none()
             || field.r#type() == Type::Enum
             || field.label() == Label::Repeated
-            || !self.optional(field)
+            || !self.optional(fq_message_name, field)
         {
             return;
         }
@@ -1515,7 +1515,7 @@ impl CodeGenerator<'_> {
             .join("::")
     }
 
-    fn optional(&self, field: &FieldDescriptorProto) -> bool {
+    fn optional(&self, fq_message_name: &str, field: &FieldDescriptorProto) -> bool {
         if field.proto3_optional.unwrap_or(false) {
             return true;
         }
@@ -1525,7 +1525,14 @@ impl CodeGenerator<'_> {
         }
 
         match field.r#type() {
-            Type::Message => true,
+            // recursive fields are always optional, their `Default` would never end
+            Type::Message => {
+                self.config.optional_messages
+                    || self.boxed.contains(&(
+                        fq_message_name.trim_start_matches('.').to_string(),
+                        field.name().to_string(),
+                    ))
+            }
             _ => self.syntax == Syntax::Proto2,
         }
     }

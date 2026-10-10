@@ -2,6 +2,8 @@
 
 ## [0.4.1] - Unreleased
 
+* Fix "irrefutable `if let` pattern" error for single variant "oneof" fields
+
 * Add `--optional-messages` to generate singular message fields as `Option<T>`
   to track presence, unset fields are not written as empty messages
 

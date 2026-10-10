@@ -711,13 +711,23 @@ impl CodeGenerator<'_> {
             write.push_str(&format!(
                 "{name}::{field_name}(ref value) => {ops}serialize(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown, dst),",
             ));
-            read.push_str(&format!(
-                "{field_no} => if let {name}::{field_name}(ref mut value) = *self {{
-                    {ops}deserialize(value, {field_no}, wire_type, src)?;
-                }} else {{
-                    *self = {name}::{field_name}({ops}deserialize_default({field_no}, wire_type, src)?);
-                }},\n",
-            ));
+            if fields.len() == 1 {
+                // single variant oneof, pattern is irrefutable
+                read.push_str(&format!(
+                    "{field_no} => {{
+                        let {name}::{field_name}(ref mut value) = *self;
+                        {ops}deserialize(value, {field_no}, wire_type, src)?;
+                    }},\n",
+                ));
+            } else {
+                read.push_str(&format!(
+                    "{field_no} => if let {name}::{field_name}(ref mut value) = *self {{
+                        {ops}deserialize(value, {field_no}, wire_type, src)?;
+                    }} else {{
+                        *self = {name}::{field_name}({ops}deserialize_default({field_no}, wire_type, src)?);
+                    }},\n",
+                ));
+            }
             encoded_len.push_str(&format!(
                 "{name}::{field_name}(ref value) => {ops}serialized_len(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown),",
             ));

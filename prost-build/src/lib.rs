@@ -211,6 +211,7 @@ pub struct Config {
     prost_types: bool,
     strip_enum_prefix: bool,
     optional_messages: bool,
+    open_enums: bool,
     out_dir: Option<PathBuf>,
     extern_paths: Vec<(String, String)>,
     default_package_filename: String,
@@ -589,6 +590,17 @@ impl Config {
         self
     }
 
+    /// Configures the code generator to generate enum fields as `i32`.
+    ///
+    /// By default an enum field has the generated enum type, and a value unknown to the
+    /// generated enum is decoded as the default variant. With this option the field
+    /// keeps the raw value, typed accessors (`field()`/`set_field()`, `push_field()`,
+    /// `get_field()`/`insert_field()` for maps) convert it to the generated enum.
+    pub fn open_enums(&mut self, enabled: bool) -> &mut Self {
+        self.open_enums = enabled;
+        self
+    }
+
     /// Configures the output directory where generated Rust files will be written.
     ///
     /// If unset, defaults to the `OUT_DIR` environment variable. `OUT_DIR` is set by Cargo when
@@ -945,6 +957,7 @@ impl default::Default for Config {
             prost_types: true,
             strip_enum_prefix: true,
             optional_messages: false,
+            open_enums: false,
             out_dir: None,
             extern_paths: Vec::new(),
             default_package_filename: "_".to_string(),
@@ -967,6 +980,7 @@ impl fmt::Debug for Config {
             .field("prost_types", &self.prost_types)
             .field("strip_enum_prefix", &self.strip_enum_prefix)
             .field("optional_messages", &self.optional_messages)
+            .field("open_enums", &self.open_enums)
             .field("out_dir", &self.out_dir)
             .field("extern_paths", &self.extern_paths)
             .field("default_package_filename", &self.default_package_filename)

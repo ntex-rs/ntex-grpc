@@ -44,6 +44,10 @@ struct Args {
     /// Generate singular message fields as `Option<T>` to track presence
     #[clap(long, value_parser)]
     optional_messages: bool,
+
+    /// Generate enum fields as `i32` to keep values unknown to the generated enum
+    #[clap(long, value_parser)]
+    open_enums: bool,
 }
 
 fn main() -> io::Result<()> {
@@ -60,6 +64,7 @@ fn main() -> io::Result<()> {
         cfg.compile_well_known_types();
     }
     cfg.optional_messages(args.optional_messages);
+    cfg.open_enums(args.open_enums);
 
     for map in args.map {
         if let Some((s1, s2)) = map.split_once('=') {

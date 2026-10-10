@@ -17,8 +17,8 @@ ntex-prost-build = { path = "./prost-build" }
 [workspace.dependencies]
 ntex-grpc = "3.3.0"
 ntex-grpc-derive = "3.1.0"
-ntex-grpc-codegen = "0.4.0"
-ntex-prost-build = "0.14.0"
+ntex-grpc-codegen = "0.4.1"
+ntex-prost-build = "0.14.1"
 
 ntex = "4.1.0"
 ntex-bytes = "1.11"

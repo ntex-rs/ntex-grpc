@@ -1163,8 +1163,9 @@ impl CodeGenerator<'_> {
                         ty
                     }
                 }
-                // enums are open, the field keeps values unknown to the generated enum
-                Type::Enum => "i32".to_string(),
+                // open enums keep values unknown to the generated enum
+                Type::Enum if self.config.open_enums => "i32".to_string(),
+                Type::Enum => self.resolve_ident(field.type_name()),
                 _ => to_rust_type(field.r#type()),
             }
         }
@@ -1257,6 +1258,12 @@ impl CodeGenerator<'_> {
         let default = field.default_value.as_deref()?;
         let values = self.enums.get(field.type_name())?;
         let number = values.iter().find(|v| v.name() == default)?.number();
+        self.enum_variant(field, number)
+    }
+
+    /// Generated variant of an enum field value
+    fn enum_variant(&self, field: &FieldDescriptorProto, number: i32) -> Option<String> {
+        let values = self.enums.get(field.type_name())?;
         let enum_name = to_upper_camel(field.type_name().rsplit('.').next().unwrap());
         build_enum_value_mappings(&enum_name, self.config.strip_enum_prefix, values)
             .into_iter()
@@ -1299,10 +1306,20 @@ impl CodeGenerator<'_> {
                     Some(name) => values.iter().find(|v| v.name() == name)?.number(),
                     None => values.first()?.number(),
                 };
-                DefaultLiteral {
-                    field: number.to_string(),
-                    accessor: number.to_string(),
-                    ty: "i32".to_string(),
+                if self.config.open_enums {
+                    DefaultLiteral {
+                        field: number.to_string(),
+                        accessor: number.to_string(),
+                        ty: "i32".to_string(),
+                    }
+                } else {
+                    let ty = self.resolve_ident(field.type_name());
+                    let lit = format!("{ty}::{}", self.enum_variant(field, number)?);
+                    DefaultLiteral {
+                        field: lit.clone(),
+                        accessor: lit,
+                        ty,
+                    }
                 }
             }
             Type::Group | Type::Message => return None,
@@ -1374,7 +1391,8 @@ impl CodeGenerator<'_> {
         out: &mut String,
     ) {
         if field.default_value.is_none()
-            || field.r#type() == Type::Enum
+            // open enums get typed accessors instead
+            || (field.r#type() == Type::Enum && self.config.open_enums)
             || field.label() == Label::Repeated
             || !self.optional(fq_message_name, field)
         {

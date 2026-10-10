@@ -1,6 +1,6 @@
 //! protobuf encoding utils
 //! cloned from `<https://github.com/hyperium/tonic/>`
-use std::{borrow::Cow, cmp::min, convert::TryFrom, fmt, rc::Rc};
+use std::{borrow::Cow, cell::Cell, cmp::min, convert::TryFrom, fmt, rc::Rc};
 
 use ntex_bytes::{Buf, BufMut, BytePages, Bytes};
 
@@ -251,6 +251,42 @@ pub fn check_wire_type(expected: WireType, actual: WireType) -> Result<(), Decod
 /// Groups nested deeper than this inside a group fail to decode, the
 /// default recursion limit of protobuf implementations.
 const GROUP_DEPTH_LIMIT: usize = 100;
+
+/// Messages nested deeper than this fail to decode, the default recursion
+/// limit of protobuf implementations.
+pub(crate) const RECURSION_LIMIT: u32 = 100;
+
+thread_local! {
+    // nesting depth of the messages being decoded, decoding is synchronous
+    static DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Decodes a nested message, fails if messages are nested more than
+/// `RECURSION_LIMIT` levels deep.
+pub(crate) fn merge_nested<F>(f: F) -> Result<(), DecodeError>
+where
+    F: FnOnce() -> Result<(), DecodeError>,
+{
+    struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            DEPTH.with(|d| d.set(d.get() - 1));
+        }
+    }
+
+    let depth = DEPTH.with(|d| {
+        let depth = d.get() + 1;
+        d.set(depth);
+        depth
+    });
+    let _guard = Guard;
+    if depth > RECURSION_LIMIT {
+        Err(DecodeError::new("recursion limit reached"))
+    } else {
+        f()
+    }
+}
 
 /// Splits the body of a group off the buffer.
 ///

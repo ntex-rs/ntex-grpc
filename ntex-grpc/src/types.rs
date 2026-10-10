@@ -207,7 +207,7 @@ impl<T: Message + PartialEq> NativeType for T {
 
     /// Deserialize from the input
     fn merge(&mut self, src: &mut Bytes) -> Result<(), DecodeError> {
-        Message::merge_from(self, src)
+        encoding::merge_nested(|| Message::merge_from(self, src))
     }
 }
 
@@ -1224,6 +1224,46 @@ mod tests {
 
         let boxed: Box<Node> = Box::new(node.clone());
         assert_eq!(Message::encoded_len(&boxed), Message::encoded_len(&node));
+    }
+
+    /// `Node` messages nested `depth` levels deep below the top one
+    fn nested_nodes(depth: usize) -> Bytes {
+        // body length of each level, from the innermost one
+        let mut lens = vec![0usize];
+        for _ in 0..depth {
+            let len = *lens.last().unwrap();
+            lens.push(1 + encoding::encoded_len_varint(len as u64) + len);
+        }
+        let mut buf = BytePages::default();
+        for len in lens[..depth].iter().rev() {
+            encoding::encode_key(2, WireType::LengthDelimited, &mut buf);
+            encoding::encode_varint(*len as u64, &mut buf);
+        }
+        buf.freeze()
+    }
+
+    #[test]
+    fn recursion_limit() {
+        let limit = encoding::RECURSION_LIMIT as usize;
+
+        let node = Node::read(&mut nested_nodes(limit)).unwrap();
+        let mut depth = 0;
+        let mut next = node.next.as_deref();
+        while let Some(node) = next {
+            depth += 1;
+            next = node.next.as_deref();
+        }
+        assert_eq!(depth, limit);
+
+        let err = Node::read(&mut nested_nodes(limit + 1)).unwrap_err();
+        assert!(err.to_string().contains("recursion limit reached"));
+
+        // deep input fails without overflowing the stack
+        let err = Node::read(&mut nested_nodes(100_000)).unwrap_err();
+        assert!(err.to_string().contains("recursion limit reached"));
+
+        // the depth is restored after an error
+        Node::read(&mut nested_nodes(limit)).unwrap();
     }
 
     #[test]

@@ -1,6 +1,9 @@
 # Changes
 
-## [3.3.0] - Unreleased
+## [3.3.0] - 2026-10-10
+
+* Decoding fails with "recursion limit reached" for messages nested more
+  than 100 levels deep, deeply nested recursive messages overflowed the stack
 
 * Codegen writes the impls of nested messages, enums and oneofs with their
   module path, the code failed to compile for types nested more than one

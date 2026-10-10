@@ -381,7 +381,7 @@ impl Group {
     ) -> Result<(), DecodeError> {
         encoding::check_wire_type(WireType::StartGroup, wtype)?;
         let mut body = encoding::split_group(tag, src)?;
-        value.merge_from(&mut body)
+        encoding::merge_nested(|| value.merge_from(&mut body))
     }
 }
 
@@ -969,6 +969,57 @@ mod tests {
         let bytes = [0x0b, 0x08, 0x01, 0x10, 0x02, 0x0c];
         assert_eq!(write::<Group, _>(&boxed, DefaultValue::Default), bytes);
         assert_eq!(read::<Group, Box<Msg>>(&bytes).unwrap(), boxed);
+    }
+
+    #[derive(Default, Debug, PartialEq)]
+    struct Rec {
+        next: Option<Box<Rec>>,
+    }
+
+    impl Message for Rec {
+        fn read(src: &mut Bytes) -> Result<Self, DecodeError> {
+            let mut msg = Self::default();
+            msg.merge_from(src)?;
+            Ok(msg)
+        }
+
+        fn merge_from(&mut self, src: &mut Bytes) -> Result<(), DecodeError> {
+            while !src.is_empty() {
+                let (tag, wtype) = encoding::decode_key(src)?;
+                match tag {
+                    1 => <Group as FieldFormat<_>>::deserialize(&mut self.next, tag, wtype, src)?,
+                    _ => encoding::skip_field(wtype, tag, src)?,
+                }
+            }
+            Ok(())
+        }
+
+        fn write(&self, dst: &mut BytePages) {
+            <Group as FieldFormat<_>>::serialize(&self.next, 1, DefaultValue::Default, dst);
+        }
+
+        fn encoded_len(&self) -> usize {
+            <Group as FieldFormat<_>>::serialized_len(&self.next, 1, DefaultValue::Default)
+        }
+    }
+
+    #[test]
+    fn group_recursion_limit() {
+        let nested = |depth| {
+            let mut buf = BytePages::default();
+            for _ in 0..depth {
+                encoding::encode_key(1, WireType::StartGroup, &mut buf);
+            }
+            for _ in 0..depth {
+                encoding::encode_key(1, WireType::EndGroup, &mut buf);
+            }
+            buf.freeze()
+        };
+        let limit = encoding::RECURSION_LIMIT as usize;
+
+        assert!(Rec::read(&mut nested(limit)).is_ok());
+        let err = Rec::read(&mut nested(limit + 1)).unwrap_err();
+        assert!(err.to_string().contains("recursion limit reached"));
     }
 
     #[test]

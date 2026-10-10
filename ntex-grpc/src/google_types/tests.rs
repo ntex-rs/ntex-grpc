@@ -338,14 +338,15 @@ fn timestamp_into_system_time() {
         .unwrap(),
         UNIX_EPOCH + time::Duration::new(1, 500_000_000)
     );
-    // negative `nanos` borrow a second, as the type requires nanos >= 0
+    // negative `nanos` borrow a second, as the type requires nanos >= 0;
+    // 100ns is the resolution of `SystemTime` on Windows
     assert_eq!(
         SystemTime::try_from(Timestamp {
             seconds: 0,
-            nanos: -1
+            nanos: -100
         })
         .unwrap(),
-        UNIX_EPOCH - time::Duration::from_nanos(1)
+        UNIX_EPOCH - time::Duration::from_nanos(100)
     );
     assert_eq!(
         SystemTime::try_from(Timestamp {

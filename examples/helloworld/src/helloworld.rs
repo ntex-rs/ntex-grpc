@@ -20,59 +20,20 @@
 pub struct HelloRequest {
     pub name: ::ntex_grpc::ByteString,
     pub data1: Vec<i64>,
-    pub data2: Vec<i32>,
-}
-
-impl HelloRequest {
-    /// Returns an iterator over the enum values of `data2`, unknown values are skipped.
-    pub fn data2(&self) -> impl ::std::iter::Iterator<Item = DocumentType> + '_ {
-        self.data2
-            .iter()
-            .filter_map(|value| DocumentType::from_i32(*value))
-    }
-
-    /// Appends an enum value to `data2`.
-    pub fn push_data2(&mut self, value: DocumentType) {
-        self.data2.push(value as i32);
-    }
+    pub data2: Vec<DocumentType>,
 }
 
 ///  The response message containing the greetings
 #[derive(Clone, PartialEq, Debug)]
 pub struct HelloReply {
-    pub data5: Vec<i32>,
+    pub data5: Vec<DocumentType>,
     pub data6: Vec<i64>,
     pub message: ::ntex_grpc::ByteString,
     pub tag: u32,
     pub data1: Vec<u32>,
     pub data2: Vec<::ntex_grpc::ByteString>,
     pub data3: ::ntex_grpc::HashMap<::ntex_grpc::ByteString, u32>,
-    pub data4: i32,
-}
-
-impl HelloReply {
-    /// Returns an iterator over the enum values of `data5`, unknown values are skipped.
-    pub fn data5(&self) -> impl ::std::iter::Iterator<Item = DocumentType> + '_ {
-        self.data5
-            .iter()
-            .filter_map(|value| DocumentType::from_i32(*value))
-    }
-
-    /// Appends an enum value to `data5`.
-    pub fn push_data5(&mut self, value: DocumentType) {
-        self.data5.push(value as i32);
-    }
-
-    /// Returns the enum value of `data4`, or the default if the field has
-    /// an unknown value.
-    pub fn data4(&self) -> DocumentType {
-        DocumentType::from_i32(self.data4).unwrap_or_default()
-    }
-
-    /// Sets `data4` to the enum value.
-    pub fn set_data4(&mut self, value: DocumentType) {
-        self.data4 = value as i32;
-    }
+    pub data4: DocumentType,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

@@ -282,6 +282,10 @@ either encoding.
   value, and a message field is always encoded, as an empty message when it
   holds the default. Run the generator with `--optional-messages` to get
   `Option<T>` fields. Recursive message fields are always `Option<Box<T>>`.
+* Enum fields have the generated enum type, a value unknown to the enum
+  decodes as the default variant and is lost when the message is encoded
+  again. Run the generator with `--open-enums` to get `i32` fields that keep
+  unknown values.
 
 ## Examples
 

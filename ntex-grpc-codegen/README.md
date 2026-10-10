@@ -26,6 +26,11 @@ Options:
 * `--optional-messages`: generate singular message fields as `Option<T>`, so an
   unset field is `None` and is not encoded. By default they are plain values,
   always encoded, and a missing field decodes as the default.
+* `--open-enums`: generate enum fields as `i32`, so values unknown to the
+  generated enum are kept. Typed accessors (`field()`/`set_field()`,
+  `push_field()`, `get_field()`/`insert_field()` for maps) convert them. By
+  default enum fields have the enum type and unknown values decode as the
+  default variant.
 
 See the [ntex-grpc README](https://github.com/ntex-rs/ntex-grpc#readme) for
 how to use the generated code.

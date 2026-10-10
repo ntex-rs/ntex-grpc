@@ -277,6 +277,11 @@ either encoding.
 * Unknown fields are skipped when a message is decoded. A message that is
   decoded and encoded again drops fields that are not in the generated code,
   for example fields added in a newer version of the proto file.
+* Singular message fields are generated as plain values, not `Option<T>`, so
+  presence is not tracked. A missing message field decodes as its default
+  value, and a message field is always encoded, as an empty message when it
+  holds the default. Run the generator with `--optional-messages` to get
+  `Option<T>` fields. Recursive message fields are always `Option<Box<T>>`.
 
 ## Examples
 

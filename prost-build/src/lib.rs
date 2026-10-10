@@ -210,6 +210,7 @@ pub struct Config {
     field_attributes: PathMap<String>,
     prost_types: bool,
     strip_enum_prefix: bool,
+    optional_messages: bool,
     out_dir: Option<PathBuf>,
     extern_paths: Vec<(String, String)>,
     default_package_filename: String,
@@ -577,6 +578,17 @@ impl Config {
         self
     }
 
+    /// Configures the code generator to generate singular message fields as `Option<T>`.
+    ///
+    /// By default a message field is a plain value: presence is not tracked and the field
+    /// is always encoded, as an empty message when it holds the default. With this option
+    /// an unset field is `None` and is not encoded. Recursive message fields are always
+    /// generated as `Option<Box<T>>`.
+    pub fn optional_messages(&mut self, enabled: bool) -> &mut Self {
+        self.optional_messages = enabled;
+        self
+    }
+
     /// Configures the output directory where generated Rust files will be written.
     ///
     /// If unset, defaults to the `OUT_DIR` environment variable. `OUT_DIR` is set by Cargo when
@@ -932,6 +944,7 @@ impl default::Default for Config {
             field_attributes: PathMap::default(),
             prost_types: true,
             strip_enum_prefix: true,
+            optional_messages: false,
             out_dir: None,
             extern_paths: Vec::new(),
             default_package_filename: "_".to_string(),
@@ -953,6 +966,7 @@ impl fmt::Debug for Config {
             .field("field_attributes", &self.field_attributes)
             .field("prost_types", &self.prost_types)
             .field("strip_enum_prefix", &self.strip_enum_prefix)
+            .field("optional_messages", &self.optional_messages)
             .field("out_dir", &self.out_dir)
             .field("extern_paths", &self.extern_paths)
             .field("default_package_filename", &self.default_package_filename)

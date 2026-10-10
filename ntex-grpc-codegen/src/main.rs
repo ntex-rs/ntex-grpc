@@ -40,6 +40,10 @@ struct Args {
     /// Generate google types
     #[clap(short, long, value_parser, name = "WELL-KNOWN-TYPES")]
     well_known_types: bool,
+
+    /// Generate singular message fields as `Option<T>` to track presence
+    #[clap(long, value_parser)]
+    optional_messages: bool,
 }
 
 fn main() -> io::Result<()> {
@@ -55,6 +59,7 @@ fn main() -> io::Result<()> {
     if args.well_known_types {
         cfg.compile_well_known_types();
     }
+    cfg.optional_messages(args.optional_messages);
 
     for map in args.map {
         if let Some((s1, s2)) = map.split_once('=') {

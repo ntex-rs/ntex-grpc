@@ -20,7 +20,7 @@ use crate::{consts, encoding::DecodeError, service::MethodDef, status::GrpcStatu
 /// put something between the client and the connection, like metrics or
 /// retries. [`Client`], [`ntex_h2::client::Client`] and
 /// [`ntex_h2::client::SimpleClient`] implement it.
-pub trait Transport<T: MethodDef> {
+pub trait Transport<T: MethodDef, St = ()> {
     /// Errors produced by the transport.
     type Error;
 
@@ -32,7 +32,7 @@ pub trait Transport<T: MethodDef> {
     async fn request(
         &self,
         args: &T::Input,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestContext<St>,
     ) -> Result<Response<T>, Self::Error>;
 }
 

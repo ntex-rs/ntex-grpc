@@ -12,7 +12,7 @@ use crate::{client::Transport, consts, service::MethodDef};
 /// [`Transport::request()`]. A custom transport that wraps a built-in one
 /// passes the context on unchanged.
 #[derive(Debug)]
-pub struct RequestContext {
+pub struct RequestContext<S> {
     err: Option<HttpError>,
     headers: HeaderMap,
     timeout: Option<time::Duration>,
@@ -21,6 +21,225 @@ pub struct RequestContext {
     #[cfg(feature = "compression")]
     compression: Option<Compression>,
     flags: Flags,
+    request_state: S,
+}
+
+/// Headers, timeout and flags of a single call.
+///
+/// [`Request`] collects them and passes them to
+/// [`Transport::request()`]. A custom transport that wraps a built-in one
+/// passes the context on unchanged.
+pub struct RequestContextBuilder {
+    err: Option<HttpError>,
+    headers: HeaderMap,
+    timeout: Option<time::Duration>,
+    max_message_size: usize,
+    max_send_message_size: usize,
+    #[cfg(feature = "compression")]
+    compression: Option<Compression>,
+    flags: Flags,
+}
+
+impl<S> RequestContext<S> {
+    /// Get request timeout
+    pub fn get_timeout(&self) -> Option<time::Duration> {
+        self.timeout
+    }
+
+    /// Set the max duration the request is allowed to take.
+    ///
+    /// The duration is sent in the `grpc-timeout` header, formatted according
+    /// to [the spec] with the most precise unit that fits, rounded up and at
+    /// most `99999999H`. Built-in transports also stop waiting when it runs
+    /// out and return [`ClientError::DeadlineExceeded`](super::ClientError::DeadlineExceeded).
+    /// A zero timeout fails the call without sending it.
+    ///
+    /// [the spec]: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
+    pub fn timeout<U>(&mut self, timeout: U) -> &mut Self
+    where
+        time::Duration: From<U>,
+    {
+        let to = timeout.into();
+        self.timeout = Some(to);
+        // always valid, the value holds only digits and a unit
+        if let Ok(val) = HeaderValue::try_from(duration_to_grpc_timeout(to)) {
+            self.headers.insert(consts::GRPC_TIMEOUT, val);
+        }
+        self
+    }
+
+    /// Get the size limit of the response message.
+    pub fn get_max_message_size(&self) -> usize {
+        self.max_message_size
+    }
+
+    /// Set the size limit of the response message, 4 MiB by default.
+    ///
+    /// Built-in transports check the length the server declares for the
+    /// message. If it is over the limit, they reset the stream instead of
+    /// reading the message and return
+    /// [`GrpcStatus::ResourceExhausted`](crate::GrpcStatus::ResourceExhausted).
+    /// A compressed message must fit the limit after decompression too.
+    pub fn max_message_size(&mut self, size: usize) -> &mut Self {
+        self.max_message_size = size;
+        self
+    }
+
+    /// Get the size limit of the request message.
+    pub fn get_max_send_message_size(&self) -> usize {
+        self.max_send_message_size
+    }
+
+    /// Set the size limit of the request message, 2 GiB - 1 by default.
+    ///
+    /// Built-in transports do not send a larger message and return
+    /// [`GrpcStatus::ResourceExhausted`](crate::GrpcStatus::ResourceExhausted).
+    /// A message is never sent if it is 4 GiB or larger, its length does
+    /// not fit the length prefix. A compressed message is checked after
+    /// compression.
+    pub fn max_send_message_size(&mut self, size: usize) -> &mut Self {
+        self.max_send_message_size = size;
+        self
+    }
+
+    /// Get the compression of the request message.
+    ///
+    /// Requires the `compression` feature.
+    #[cfg(feature = "compression")]
+    pub fn get_compression(&self) -> Option<Compression> {
+        self.compression
+    }
+
+    /// Compress the request message, it is not compressed by default.
+    ///
+    /// Built-in transports send the encoding in the `grpc-encoding` header.
+    /// An empty message is sent uncompressed. A server that does not support
+    /// the encoding fails the call with
+    /// [`GrpcStatus::Unimplemented`](crate::GrpcStatus::Unimplemented).
+    ///
+    /// Requires the `compression` feature.
+    #[cfg(feature = "compression")]
+    pub fn compression(&mut self, compression: Compression) -> &mut Self {
+        self.compression = Some(compression);
+        self
+    }
+
+    /// Disconnect connection on request drop
+    pub fn disconnect_on_drop(&mut self) -> &mut Self {
+        self.flags.insert(Flags::DISCONNECT_ON_DROP);
+        self
+    }
+
+    /// Set a request header, replacing any existing value for the same name.
+    ///
+    /// An invalid name or value is not sent; the error is kept and returned
+    /// by [`take_error()`](Self::take_error). Values of `-bin` headers are
+    /// sent as they are, encode them with
+    /// [`encode_binary_header()`](crate::encode_binary_header).
+    ///
+    /// Headers the client sets itself are ignored:
+    /// `content-type`, `user-agent`, `te`, `grpc-encoding`,
+    /// `grpc-accept-encoding`, `grpc-message-type`, `grpc-message`,
+    /// `grpc-status` and `grpc-timeout`.
+    /// Use [`timeout()`](Self::timeout) for the timeout.
+    pub fn header<K, V>(&mut self, key: K, value: V) -> &mut Self
+    where
+        HeaderName: TryFrom<K>,
+        HeaderValue: TryFrom<V>,
+        <HeaderName as TryFrom<K>>::Error: Into<HttpError>,
+        <HeaderValue as TryFrom<V>>::Error: Into<HttpError>,
+    {
+        if let Some((key, value)) = self.try_header(key, value) {
+            self.headers.insert(key, value);
+        }
+        self
+    }
+
+    /// Add a request header, keeping existing values for the same name.
+    ///
+    /// Errors are handled as in [`header()`](Self::header).
+    pub fn append_header<K, V>(&mut self, key: K, value: V) -> &mut Self
+    where
+        HeaderName: TryFrom<K>,
+        HeaderValue: TryFrom<V>,
+        <HeaderName as TryFrom<K>>::Error: Into<HttpError>,
+        <HeaderValue as TryFrom<V>>::Error: Into<HttpError>,
+    {
+        if let Some((key, value)) = self.try_header(key, value) {
+            self.headers.append(key, value);
+        }
+        self
+    }
+
+    fn try_header<K, V>(&mut self, key: K, value: V) -> Option<(HeaderName, HeaderValue)>
+    where
+        HeaderName: TryFrom<K>,
+        HeaderValue: TryFrom<V>,
+        <HeaderName as TryFrom<K>>::Error: Into<HttpError>,
+        <HeaderValue as TryFrom<V>>::Error: Into<HttpError>,
+    {
+        match HeaderName::try_from(key) {
+            Ok(key) => match HeaderValue::try_from(value) {
+                Ok(_) if is_reserved(&key) => {}
+                Ok(value) => return Some((key, value)),
+                Err(e) => self.set_error(e),
+            },
+            Err(e) => self.set_error(e),
+        }
+        None
+    }
+
+    fn set_error<T: Into<HttpError>>(&mut self, err: T) {
+        if self.err.is_none() {
+            self.err = Some(err.into());
+        }
+    }
+
+    /// Take the first error recorded while building the request.
+    ///
+    /// [`header()`](Self::header) does not fail on an invalid name or value, it
+    /// remembers the error instead. Built-in transports return it as
+    /// [`ClientError::Http`](super::ClientError::Http) before sending anything,
+    /// custom transports should do the same.
+    pub fn take_error(&mut self) -> Option<HttpError> {
+        self.err.take()
+    }
+
+    /// Clear existing headers and timeout.
+    ///
+    /// The timeout is sent as the `grpc-timeout` header, so it is removed too.
+    pub fn clear(&mut self) -> &mut Self {
+        self.headers.clear();
+        self.timeout = None;
+        self
+    }
+
+    /// Headers set for the call, including `grpc-timeout`.
+    ///
+    /// A custom transport sends them with the request.
+    pub fn headers(&self) -> impl Iterator<Item = (&HeaderName, &HeaderValue)> {
+        self.headers.iter()
+    }
+
+    /// Check if the connection must be closed when the request is dropped.
+    pub fn get_disconnect_on_drop(&self) -> bool {
+        self.flags.contains(Flags::DISCONNECT_ON_DROP)
+    }
+
+    /// The per-call state passed to [`Request::send_with()`].
+    ///
+    /// A custom transport reads it to carry caller-provided data, such as
+    /// connection or session info, down to where it observes or dispatches
+    /// the call.
+    pub fn request_state(&self) -> &S {
+        &self.request_state
+    }
+
+    /// Mutable access to the per-call state passed to
+    /// [`Request::send_with()`].
+    pub fn request_state_mut(&mut self) -> &mut S {
+        &mut self.request_state
+    }
 }
 
 /// Default limit of a received message.
@@ -36,7 +255,7 @@ bitflags::bitflags! {
     }
 }
 
-impl RequestContext {
+impl RequestContextBuilder {
     /// Create new `RequestContext` instance
     fn new() -> Self {
         Self {
@@ -48,6 +267,31 @@ impl RequestContext {
             #[cfg(feature = "compression")]
             compression: None,
             flags: Flags::empty(),
+        }
+    }
+
+    fn build<S>(self, request_state: S) -> RequestContext<S> {
+        let Self {
+            err,
+            headers,
+            timeout,
+            max_message_size,
+            max_send_message_size,
+            #[cfg(feature = "compression")]
+            compression,
+            flags,
+        } = self;
+
+        RequestContext {
+            err,
+            headers,
+            timeout,
+            max_message_size,
+            max_send_message_size,
+            #[cfg(feature = "compression")]
+            compression,
+            flags,
+            request_state,
         }
     }
 
@@ -244,18 +488,16 @@ impl RequestContext {
 /// keep the message in a variable rather than building it inline.
 pub struct Request<'a, T, M>
 where
-    T: Transport<M>,
     T: 'a,
     M: MethodDef,
 {
     input: &'a M::Input,
     transport: &'a T,
-    ctx: RequestContext,
+    ctx: RequestContextBuilder,
 }
 
 impl<'a, T, M> Request<'a, T, M>
 where
-    T: Transport<M>,
     M: MethodDef,
 {
     /// Create a call that sends `input` through `transport`.
@@ -265,7 +507,7 @@ where
         Self {
             input,
             transport,
-            ctx: RequestContext::new(),
+            ctx: RequestContextBuilder::new(),
         }
     }
 
@@ -367,14 +609,32 @@ where
     }
 
     /// Send request
-    pub async fn send(self) -> Result<Response<M>, T::Error> {
+    ///
+    /// Only available when `St` is `()` (the default). Use
+    /// [`send_with()`](Self::send_with) to supply a concrete per-call state.
+    pub async fn send(self) -> Result<Response<M>, T::Error>
+    where
+        T: Transport<M, ()>,
+    {
+        self.send_with(()).await
+    }
+
+    /// Send request, carrying `request_state` through to the transport.
+    ///
+    /// See [`RequestContext::request_state()`].
+    pub async fn send_with<St>(self, request_state: St) -> Result<Response<M>, T::Error>
+    where
+        T: Transport<M, St>,
+    {
         let Request {
             input,
             transport,
-            mut ctx,
+            ctx,
         } = self;
 
-        transport.request(input, &mut ctx).await
+        transport
+            .request(input, &mut ctx.build(request_state))
+            .await
     }
 }
 
@@ -506,7 +766,7 @@ mod tests {
 
     #[test]
     fn context_header_and_clear() {
-        let mut ctx = RequestContext::new();
+        let mut ctx = RequestContextBuilder::new();
         ctx.header("x-a", "1").header("x-a", "2");
         let hdrs: Vec<_> = ctx.headers().collect();
         assert_eq!(
@@ -541,7 +801,7 @@ mod tests {
 
     #[test]
     fn reserved_headers() {
-        let mut ctx = RequestContext::new();
+        let mut ctx = RequestContextBuilder::new();
         for key in [
             "content-type",
             "User-Agent",
@@ -579,7 +839,7 @@ mod tests {
 
     #[test]
     fn context_max_message_size() {
-        let mut ctx = RequestContext::new();
+        let mut ctx = RequestContextBuilder::new();
         assert_eq!(ctx.get_max_message_size(), 4 * 1024 * 1024);
         ctx.max_message_size(10);
         assert_eq!(ctx.get_max_message_size(), 10);
@@ -593,7 +853,7 @@ mod tests {
     #[cfg(feature = "compression")]
     #[test]
     fn context_compression() {
-        let mut ctx = RequestContext::new();
+        let mut ctx = RequestContextBuilder::new();
         assert_eq!(ctx.get_compression(), None);
         ctx.compression(Compression::Zstd);
         assert_eq!(ctx.get_compression(), Some(Compression::Zstd));
@@ -601,7 +861,7 @@ mod tests {
 
     #[test]
     fn context_disconnect_on_drop() {
-        let mut ctx = RequestContext::new();
+        let mut ctx = RequestContextBuilder::new();
         assert!(!ctx.get_disconnect_on_drop());
         ctx.disconnect_on_drop();
         assert!(ctx.get_disconnect_on_drop());
@@ -717,11 +977,12 @@ mod tests {
         let input = BytesValue {
             value: Bytes::from(vec![0; 1024 * 1024]),
         };
-        let mut ctx = RequestContext::new();
+        let mut ctx = RequestContextBuilder::new();
         ctx.timeout(time::Duration::from_millis(50));
         if disconnect {
             ctx.disconnect_on_drop();
         }
+        let mut ctx = ctx.build(());
 
         let err = <_ as Transport<BigMethod>>::request(&client, &input, &mut ctx)
             .await

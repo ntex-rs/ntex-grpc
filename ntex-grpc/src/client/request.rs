@@ -255,6 +255,12 @@ bitflags::bitflags! {
     }
 }
 
+// `RequestContextBuilder` is not re-exported, so these getters and `clear()`
+// are only reachable from this module's own unit tests (not from
+// `RequestContext<S>`'s equivalent methods, which are the ones actually used
+// by built-in transports after `build()`). Keep them `#[allow(dead_code)]`
+// rather than deleting, since the tests rely on them to verify builder state.
+#[allow(dead_code)]
 impl RequestContextBuilder {
     /// Create new `RequestContext` instance
     fn new() -> Self {

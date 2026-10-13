@@ -20,7 +20,7 @@ impl<St, T: MethodDef> Transport<T, St> for Client {
     async fn request(
         &self,
         val: &T::Input,
-        ctx: &mut RequestContext<St>,
+        ctx: &mut RequestContext<'_, St>,
     ) -> Result<Response<T>, Self::Error> {
         Transport::request(&self.0, val, ctx).await
     }
@@ -33,7 +33,7 @@ impl<T: MethodDef, St> Transport<T, St> for h2::client::Client {
     async fn request(
         &self,
         val: &T::Input,
-        ctx: &mut RequestContext<St>,
+        ctx: &mut RequestContext<'_, St>,
     ) -> Result<Response<T>, Self::Error> {
         with_deadline(ctx.get_timeout(), async |deadline| {
             let client = self.client().await.map_err(|e| e.map(ClientError::from))?;
@@ -49,7 +49,7 @@ impl<T: MethodDef, St> Transport<T, St> for h2::client::SimpleClient {
     async fn request(
         &self,
         val: &T::Input,
-        ctx: &mut RequestContext<St>,
+        ctx: &mut RequestContext<'_, St>,
     ) -> Result<Response<T>, Self::Error> {
         with_deadline(ctx.get_timeout(), async |deadline| {
             send_request(self, val, ctx, deadline).await
@@ -89,7 +89,7 @@ where
 async fn send_request<T: MethodDef, St>(
     client: &h2::client::SimpleClient,
     val: &T::Input,
-    ctx: &mut RequestContext<St>,
+    ctx: &mut RequestContext<'_, St>,
     deadline: Option<Instant>,
 ) -> Result<Response<T>, Error<ClientError>> {
     if let Some(err) = ctx.take_error() {
@@ -464,7 +464,7 @@ fn synthesized(
 #[cfg_attr(not(feature = "compression"), allow(clippy::unused_async))]
 async fn encode_message<M: Message, St>(
     val: &M,
-    ctx: &RequestContext<St>,
+    ctx: &RequestContext<'_, St>,
 ) -> Result<BytePages, ClientError> {
     let max_size = ctx.get_max_send_message_size();
 

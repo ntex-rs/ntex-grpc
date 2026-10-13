@@ -12,7 +12,7 @@ use crate::{client::Transport, consts, service::MethodDef};
 /// [`Transport::request()`]. A custom transport that wraps a built-in one
 /// passes the context on unchanged.
 #[derive(Debug)]
-pub struct RequestContext<S> {
+pub struct RequestContext<'s, S> {
     err: Option<HttpError>,
     headers: HeaderMap,
     timeout: Option<time::Duration>,
@@ -21,7 +21,7 @@ pub struct RequestContext<S> {
     #[cfg(feature = "compression")]
     compression: Option<Compression>,
     flags: Flags,
-    request_state: S,
+    request_state: &'s S,
 }
 
 /// Headers, timeout and flags of a single call.
@@ -40,7 +40,7 @@ pub struct RequestContextBuilder {
     flags: Flags,
 }
 
-impl<S> RequestContext<S> {
+impl<'s, S> RequestContext<'s, S> {
     /// Get request timeout
     pub fn get_timeout(&self) -> Option<time::Duration> {
         self.timeout
@@ -231,14 +231,8 @@ impl<S> RequestContext<S> {
     /// A custom transport reads it to carry caller-provided data, such as
     /// connection or session info, down to where it observes or dispatches
     /// the call.
-    pub fn request_state(&self) -> &S {
-        &self.request_state
-    }
-
-    /// Mutable access to the per-call state passed to
-    /// [`Request::send_with()`].
-    pub fn request_state_mut(&mut self) -> &mut S {
-        &mut self.request_state
+    pub fn request_state(&self) -> &'s S {
+        self.request_state
     }
 }
 
@@ -276,7 +270,7 @@ impl RequestContextBuilder {
         }
     }
 
-    fn build<S>(self, request_state: S) -> RequestContext<S> {
+    fn build<S>(self, request_state: &S) -> RequestContext<'_, S> {
         let Self {
             err,
             headers,
@@ -622,13 +616,13 @@ where
     where
         T: Transport<M, ()>,
     {
-        self.send_with(()).await
+        self.send_with(&()).await
     }
 
     /// Send request, carrying `request_state` through to the transport.
     ///
     /// See [`RequestContext::request_state()`].
-    pub async fn send_with<St>(self, request_state: St) -> Result<Response<M>, T::Error>
+    pub async fn send_with<St>(self, request_state: &St) -> Result<Response<M>, T::Error>
     where
         T: Transport<M, St>,
     {
@@ -988,7 +982,7 @@ mod tests {
         if disconnect {
             ctx.disconnect_on_drop();
         }
-        let mut ctx = ctx.build(());
+        let mut ctx = ctx.build(&());
 
         let err = <_ as Transport<BigMethod>>::request(&client, &input, &mut ctx)
             .await

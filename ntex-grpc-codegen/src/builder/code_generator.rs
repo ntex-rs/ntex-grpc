@@ -1,4 +1,4 @@
-use std::{collections::HashMap, collections::HashSet, iter};
+use std::{collections::HashMap, collections::HashSet, fmt::Write, iter};
 
 use heck::ToSnekCase;
 use itertools::{Either, Itertools};
@@ -11,9 +11,9 @@ use prost_types::{
     FileDescriptorProto, OneofDescriptorProto, ServiceDescriptorProto, SourceCodeInfo,
 };
 
-use crate::ast::{Comments, Method, Service};
-use crate::ident::{to_snake, to_upper_camel};
-use crate::{extern_paths::ExternPaths, Config};
+use super::ast::{Comments, Method, Service};
+use super::ident::{to_snake, to_upper_camel};
+use super::{Config, extern_paths::ExternPaths};
 
 #[derive(PartialEq)]
 enum Syntax {
@@ -21,7 +21,23 @@ enum Syntax {
     Proto3,
 }
 
-pub struct CodeGenerator<'a> {
+type NestedTypes = Vec<(DescriptorProto, usize)>;
+type MapTypes = HashMap<String, (FieldDescriptorProto, FieldDescriptorProto)>;
+type Fields = Vec<(FieldDescriptorProto, usize)>;
+type OneofFields = MultiMap<i32, (FieldDescriptorProto, usize)>;
+
+#[derive(Default)]
+struct MessageCode {
+    write: String,
+    read: String,
+    encoded_len: String,
+    default: String,
+    accessors: String,
+    required: String,
+    required_num: usize,
+}
+
+pub(crate) struct CodeGenerator<'a> {
     config: &'a mut Config,
     name: String,
     package: String,
@@ -105,11 +121,11 @@ fn boxed_fields(package: &str, messages: &[DescriptorProto]) -> HashSet<(String,
 }
 
 /// Values of every enum, by fully qualified name with the leading dot
-pub type EnumValues = HashMap<String, Vec<EnumValueDescriptorProto>>;
+pub(crate) type EnumValues = HashMap<String, Vec<EnumValueDescriptorProto>>;
 
 /// Collects the values of the enums of `files`, imported files included,
 /// to resolve proto2 enum field defaults.
-pub fn enum_values<'a>(files: impl Iterator<Item = &'a FileDescriptorProto>) -> EnumValues {
+pub(crate) fn enum_values<'a>(files: impl Iterator<Item = &'a FileDescriptorProto>) -> EnumValues {
     fn collect(prefix: &str, messages: &[DescriptorProto], enums: &mut EnumValues) {
         for msg in messages {
             let name = format!("{prefix}.{}", msg.name());
@@ -140,8 +156,53 @@ fn push_indent(buf: &mut String, depth: u8) {
     }
 }
 
+fn source_index(index: usize) -> i32 {
+    i32::try_from(index).expect("Protobuf source index exceeds i32::MAX")
+}
+
+fn split_nested_types(
+    types: Vec<DescriptorProto>,
+    fq_message_name: &str,
+) -> (NestedTypes, MapTypes) {
+    types
+        .into_iter()
+        .enumerate()
+        .partition_map(|(idx, nested_type)| {
+            if nested_type
+                .options
+                .as_ref()
+                .and_then(|options| options.map_entry)
+                .unwrap_or(false)
+            {
+                let key = nested_type.field[0].clone();
+                let value = nested_type.field[1].clone();
+                assert_eq!("key", key.name());
+                assert_eq!("value", value.name());
+                let name = format!("{fq_message_name}.{}", nested_type.name());
+                Either::Right((name, (key, value)))
+            } else {
+                Either::Left((nested_type, idx))
+            }
+        })
+}
+
+fn split_fields(fields: Vec<FieldDescriptorProto>) -> (Fields, OneofFields) {
+    fields
+        .into_iter()
+        .enumerate()
+        .partition_map(|(idx, field)| {
+            if field.proto3_optional.unwrap_or(false) {
+                Either::Left((field, idx))
+            } else if let Some(oneof_index) = field.oneof_index {
+                Either::Right((oneof_index, (field, idx)))
+            } else {
+                Either::Left((field, idx))
+            }
+        })
+}
+
 impl CodeGenerator<'_> {
-    pub fn generate(
+    pub(crate) fn generate(
         config: &mut Config,
         extern_paths: &ExternPaths,
         enums: &EnumValues,
@@ -150,14 +211,11 @@ impl CodeGenerator<'_> {
     ) {
         let name = file
             .name
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or("")
             .strip_suffix(".proto")
             .unwrap_or("")
-            .replace(".", "_")
-            .replace("-", "_")
-            .replace("/", "_");
+            .replace(['.', '-', '/'], "_");
 
         let mut source_info = file
             .source_code_info
@@ -202,7 +260,7 @@ impl CodeGenerator<'_> {
 
         code_gen.path.push(4);
         for (idx, message) in file.message_type.into_iter().enumerate() {
-            code_gen.path.push(idx as i32);
+            code_gen.path.push(source_index(idx));
             code_gen.append_message(message);
             code_gen.path.pop();
         }
@@ -210,8 +268,8 @@ impl CodeGenerator<'_> {
 
         code_gen.path.push(5);
         for (idx, desc) in file.enum_type.into_iter().enumerate() {
-            code_gen.path.push(idx as i32);
-            code_gen.append_enum(to_upper_camel(desc.name()), desc);
+            code_gen.path.push(source_index(idx));
+            code_gen.append_enum(&to_upper_camel(desc.name()), &desc);
             code_gen.path.pop();
         }
         code_gen.path.pop();
@@ -219,7 +277,7 @@ impl CodeGenerator<'_> {
         if code_gen.config.service_generator.is_some() {
             code_gen.path.push(6);
             for (idx, service) in file.service.into_iter().enumerate() {
-                code_gen.path.push(idx as i32);
+                code_gen.path.push(source_index(idx));
                 code_gen.push_service(service);
                 code_gen.path.pop();
             }
@@ -233,9 +291,7 @@ impl CodeGenerator<'_> {
 
         code_gen.buf.push_str("\n\n\n");
 
-        code_gen
-            .buf
-            .push_str(&format!("mod _priv_impl_{} {{\n", code_gen.name));
+        writeln!(code_gen.buf, "mod _priv_impl_{} {{", code_gen.name).unwrap();
         code_gen.buf.push_str("use super::*;\n\n");
         code_gen.buf.push_str(&code_gen.priv_buf);
         code_gen.buf.push('}');
@@ -260,51 +316,13 @@ impl CodeGenerator<'_> {
         // Split the nested message types into a vector of normal nested message types, and a map
         // of the map field entry types. The path index of the nested message types is preserved so
         // that comments can be retrieved.
-        type NestedTypes = Vec<(DescriptorProto, usize)>;
-        type MapTypes = HashMap<String, (FieldDescriptorProto, FieldDescriptorProto)>;
-        let (nested_types, map_types): (NestedTypes, MapTypes) = message
-            .nested_type
-            .into_iter()
-            .enumerate()
-            .partition_map(|(idx, nested_type)| {
-                if nested_type
-                    .options
-                    .as_ref()
-                    .and_then(|options| options.map_entry)
-                    .unwrap_or(false)
-                {
-                    let key = nested_type.field[0].clone();
-                    let value = nested_type.field[1].clone();
-                    assert_eq!("key", key.name());
-                    assert_eq!("value", value.name());
-
-                    let name = format!("{fq_message_name}.{}", nested_type.name());
-                    Either::Right((name, (key, value)))
-                } else {
-                    Either::Left((nested_type, idx))
-                }
-            });
+        let (nested_types, map_types) = split_nested_types(message.nested_type, &fq_message_name);
 
         // Split the fields into a vector of the normal fields, and oneof fields.
         // Path indexes are preserved so that comments can be retrieved.
-        type Fields = Vec<(FieldDescriptorProto, usize)>;
-        type OneofFields = MultiMap<i32, (FieldDescriptorProto, usize)>;
-        let (fields, mut oneof_fields): (Fields, OneofFields) = message
-            .field
-            .into_iter()
-            .enumerate()
-            .partition_map(|(idx, field)| {
-                if field.proto3_optional.unwrap_or(false) {
-                    Either::Left((field, idx))
-                } else if let Some(oneof_index) = field.oneof_index {
-                    Either::Right((oneof_index, (field, idx)))
-                } else {
-                    Either::Left((field, idx))
-                }
-            });
+        let (fields, mut oneof_fields) = split_fields(message.field);
 
-        self.append_doc(&fq_message_name, None);
-        self.append_type_attributes(&fq_message_name);
+        self.append_doc();
         self.push_indent();
         self.buf.push_str("#[derive(Clone, PartialEq, Debug)]\n");
         self.push_indent();
@@ -313,34 +331,79 @@ impl CodeGenerator<'_> {
         self.buf.push_str(" {\n");
 
         let type_path = self.type_path(&to_upper_camel(&message_name));
-        self.priv_buf.push_str("impl ::ntex_grpc::Message for ");
-        self.priv_buf.push_str(&type_path);
-        self.priv_buf.push_str(" {\n");
-
-        let mut has_fields = false;
-        let mut write = String::new();
-        let mut read = String::new();
-        let mut encoded_len = String::new();
-        let mut default = String::new();
-        let mut accessors = String::new();
-        let mut required = String::new();
-        let mut required_num = 0;
-
+        let mut code = MessageCode::default();
         self.depth += 1;
+        self.append_message_fields(&fq_message_name, &fields, &map_types, &mut code);
+        self.append_message_oneofs(&message_name, &message.oneof_decl, &oneof_fields, &mut code);
+        self.depth -= 1;
+        self.push_indent();
+        self.buf.push_str("}\n\n");
+
+        if !code.accessors.is_empty() {
+            self.push_indent();
+            write!(
+                self.buf,
+                "impl {} {{\n{}}}\n\n",
+                to_upper_camel(&message_name),
+                code.accessors
+            )
+            .unwrap();
+        }
+        self.append_message_impl(&message_name, &type_path, &code);
+
+        if !message.enum_type.is_empty() || !nested_types.is_empty() || !oneof_fields.is_empty() {
+            self.push_mod(&message_name);
+            self.path.push(3);
+            for (nested_type, idx) in nested_types {
+                self.path.push(source_index(idx));
+                self.append_message(nested_type);
+                self.path.pop();
+            }
+            self.path.pop();
+
+            self.path.push(4);
+            for (idx, nested_enum) in message.enum_type.iter().enumerate() {
+                self.path.push(source_index(idx));
+                let enum_name = self.type_path(&to_upper_camel(nested_enum.name()));
+                self.append_enum(&enum_name, nested_enum);
+                self.path.pop();
+            }
+            self.path.pop();
+
+            for (idx, oneof) in message.oneof_decl.iter().enumerate() {
+                let idx = source_index(idx);
+                // optional fields create a synthetic oneof that we want to skip
+                let Some(fields) = oneof_fields.remove(&idx) else {
+                    continue;
+                };
+                self.append_oneof(&fq_message_name, oneof, idx, &fields);
+            }
+
+            self.pop_mod();
+        }
+    }
+
+    fn append_message_fields(
+        &mut self,
+        fq_message_name: &str,
+        fields: &Fields,
+        map_types: &MapTypes,
+        code: &mut MessageCode,
+    ) {
         self.path.push(2);
         for (field, idx) in fields {
             let field_no = field.number();
             let field_name = to_snake(field.name());
 
-            self.path.push(idx as i32);
+            self.path.push(source_index(*idx));
 
             let map_entry = field
                 .type_name
                 .as_ref()
                 .and_then(|type_name| map_types.get(type_name));
             let ops = match map_entry {
-                Some((key, value)) => self.map_ops(&fq_message_name, key, value),
-                None => self.field_ops(&fq_message_name, &field),
+                Some((key, value)) => self.map_ops(fq_message_name, key, value),
+                None => self.field_ops(fq_message_name, field),
             };
 
             // proto2 required fields are always written, the reader
@@ -353,126 +416,145 @@ impl CodeGenerator<'_> {
             let value = match map_entry {
                 Some(_) => None,
                 None if field.label() == Label::Required => self
-                    .default_value(&field, fq_message_name.as_str())
+                    .default_value(field, fq_message_name)
                     .map(|value| value.field),
                 None => {
-                    self.default_accessor(&field, &fq_message_name, &mut accessors);
+                    self.default_accessor(field, fq_message_name, &mut code.accessors);
                     None
                 }
             };
             let value = value.unwrap_or_else(|| "::core::default::Default::default()".to_string());
 
-            has_fields = true;
-            write.push_str(&format!(
+            write!(code.write,
                 "{ops}serialize(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::{skip}, dst);",
-            ));
+            ).unwrap();
             if field.label() == Label::Required {
                 // a required field missing from the input fails decoding
-                let idx = required_num;
-                required_num += 1;
-                read.push_str(&format!(
+                let idx = code.required_num;
+                code.required_num += 1;
+                write!(
+                    code.read,
                     "{field_no} => {{
                         {ops}deserialize(&mut self.{field_name}, tag, wire_type, src)
                             .map_err(|err| err.push(STRUCT_NAME, \"{field_name}\"))?;
                         required[{idx}] = true;
                     }}",
-                ));
-                required.push_str(&format!(
+                )
+                .unwrap();
+                write!(
+                    code.required,
                     "if !required[{idx}] {{
                         return Err(::ntex_grpc::DecodeError::new(\"required field is missing\")
                             .push(STRUCT_NAME, \"{field_name}\"));
                     }}",
-                ));
+                )
+                .unwrap();
             } else {
-                read.push_str(&format!(
+                write!(
+                    code.read,
                     "{field_no} => {ops}deserialize(&mut self.{field_name}, tag, wire_type, src)
                     .map_err(|err| err.push(STRUCT_NAME, \"{field_name}\"))?,",
-                ));
+                )
+                .unwrap();
             }
-            encoded_len.push_str(&format!(
+            write!(code.encoded_len,
                 " + {ops}serialized_len(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::{skip})",
-            ));
-            default.push_str(&format!("{field_name}: {value},\n"));
+            ).unwrap();
+            writeln!(code.default, "{field_name}: {value},").unwrap();
 
-            self.enum_accessors(&fq_message_name, &field, map_entry, &mut accessors);
+            self.enum_accessors(fq_message_name, field, map_entry, &mut code.accessors);
             match map_entry {
-                Some((key, value)) => self.append_map_field(&fq_message_name, field, key, value),
-                None => self.append_field(&fq_message_name, field),
+                Some((key, value)) => self.append_map_field(fq_message_name, field, key, value),
+                None => self.append_field(fq_message_name, field),
             }
 
             self.path.pop();
         }
         self.path.pop();
+    }
 
+    fn append_message_oneofs(
+        &mut self,
+        message_name: &str,
+        oneofs: &[OneofDescriptorProto],
+        oneof_fields: &OneofFields,
+        code: &mut MessageCode,
+    ) {
         self.path.push(8);
-        for (idx, oneof) in message.oneof_decl.iter().enumerate() {
-            let idx = idx as i32;
+        for (idx, oneof) in oneofs.iter().enumerate() {
+            let idx = source_index(idx);
 
-            let fields = match oneof_fields.get_vec(&idx) {
-                Some(fields) => fields,
-                None => continue,
+            let Some(fields) = oneof_fields.get_vec(&idx) else {
+                continue;
             };
 
-            has_fields = true;
-            write.push_str(&format!(
+            write!(code.write,
                 "::ntex_grpc::NativeType::serialize(&self.{}, 0, ::ntex_grpc::types::DefaultValue::Default, dst);",
                 to_snake(oneof.name()),
-            ));
-            read.push_str(&format!(
+            ).unwrap();
+            write!(
+                code.read,
                 "
                {} => ::ntex_grpc::NativeType::deserialize(&mut self.{}, tag, wire_type, src)
                         .map_err(|err| err.push(STRUCT_NAME, \"{}\"))?,",
                 fields.iter().map(|(field, _)| field.number()).join("| "),
                 to_snake(oneof.name()),
                 to_snake(oneof.name()),
-            ));
-            encoded_len.push_str(&format!(
+            )
+            .unwrap();
+            write!(code.encoded_len,
                 " + ::ntex_grpc::NativeType::serialized_len(&self.{}, 0, ::ntex_grpc::types::DefaultValue::Default)",
                 to_snake(oneof.name()),
-            ));
-            default.push_str(&format!(
-                "{}: ::core::default::Default::default(),\n",
+            ).unwrap();
+            writeln!(
+                code.default,
+                "{}: ::core::default::Default::default(),",
                 to_snake(oneof.name()),
-            ));
+            )
+            .unwrap();
 
             self.path.push(idx);
-            self.append_oneof_field(&message_name, &fq_message_name, oneof);
+            self.append_oneof_field(message_name, oneof);
             self.path.pop();
         }
         self.path.pop();
+    }
 
-        self.depth -= 1;
-        self.push_indent();
-        self.buf.push_str("}\n\n");
+    fn append_message_impl(&mut self, message_name: &str, type_path: &str, code: &MessageCode) {
+        let MessageCode {
+            write,
+            read,
+            encoded_len,
+            default,
+            required,
+            required_num,
+            ..
+        } = code;
+        self.priv_buf.push_str("impl ::ntex_grpc::Message for ");
+        self.priv_buf.push_str(type_path);
+        self.priv_buf.push_str(" {\n");
 
-        if !accessors.is_empty() {
-            self.push_indent();
-            self.buf.push_str(&format!(
-                "impl {} {{\n{accessors}}}\n\n",
-                to_upper_camel(&message_name)
-            ));
-        }
-
-        // message impl =============================
-        self.priv_buf.push_str(&format!(
+        write!(
+            self.priv_buf,
             "#[inline]
               fn write(&self, dst: &mut ::ntex_grpc::BytePages) {{
                 {write}
              }}\n\n"
-        ));
+        )
+        .unwrap();
 
-        let read = if has_fields {
+        let read = if read.is_empty() {
+            "::ntex_grpc::encoding::skip_field(wire_type, tag, src)?;".to_string()
+        } else {
             format!(
                 "match tag {{
                  {read}
                  _ => ::ntex_grpc::encoding::skip_field(wire_type, tag, src)?,
              }}"
             )
-        } else {
-            "::ntex_grpc::encoding::skip_field(wire_type, tag, src)?;".to_string()
         };
 
-        let (required_init, required) = if required_num > 0 {
+        let (required_init, required) = if *required_num > 0 {
             (
                 // only a message decoded from scratch must hold every required
                 // field, a merge into decoded data may update a part of it
@@ -490,7 +572,7 @@ impl CodeGenerator<'_> {
             (String::new(), String::new())
         };
 
-        self.priv_buf.push_str(&format!(
+        write!(self.priv_buf,
             "#[inline]
              fn read(src: &mut ::ntex_grpc::Bytes) -> ::std::result::Result<Self, ::ntex_grpc::DecodeError> {{
                  let mut msg = Self::default();
@@ -507,18 +589,21 @@ impl CodeGenerator<'_> {
                  }}
                  {required}Ok(())
              }}\n\n",
-            to_upper_camel(&message_name)
-        ));
-        self.priv_buf.push_str(&format!(
+            to_upper_camel(message_name)
+        ).unwrap();
+        write!(
+            self.priv_buf,
             "#[inline]
              fn encoded_len(&self) -> usize {{
                  0 {encoded_len}
              }}\n\n"
-        ));
+        )
+        .unwrap();
         self.priv_buf.push_str("}\n\n");
 
         // default
-        self.priv_buf.push_str(&format!(
+        write!(
+            self.priv_buf,
             "impl ::std::default::Default for {type_path} {{
                  #[inline]
                  fn default() -> Self {{
@@ -526,75 +611,19 @@ impl CodeGenerator<'_> {
                  }}
              }}\n\n
         "
-        ));
-        // ==========================================
-
-        if !message.enum_type.is_empty() || !nested_types.is_empty() || !oneof_fields.is_empty() {
-            self.push_mod(&message_name);
-            self.path.push(3);
-            for (nested_type, idx) in nested_types {
-                self.path.push(idx as i32);
-                self.append_message(nested_type);
-                self.path.pop();
-            }
-            self.path.pop();
-
-            self.path.push(4);
-            for (idx, nested_enum) in message.enum_type.into_iter().enumerate() {
-                self.path.push(idx as i32);
-                let enum_name = self.type_path(&to_upper_camel(nested_enum.name()));
-                self.append_enum(enum_name, nested_enum);
-                self.path.pop();
-            }
-            self.path.pop();
-
-            for (idx, oneof) in message.oneof_decl.into_iter().enumerate() {
-                let idx = idx as i32;
-                // optional fields create a synthetic oneof that we want to skip
-                let fields = match oneof_fields.remove(&idx) {
-                    Some(fields) => fields,
-                    None => continue,
-                };
-                self.append_oneof(&fq_message_name, oneof, idx, fields);
-            }
-
-            self.pop_mod();
-        }
+        )
+        .unwrap();
     }
 
-    fn append_type_attributes(&mut self, fq_message_name: &str) {
-        assert_eq!(b'.', fq_message_name.as_bytes()[0]);
-        for attribute in self.config.type_attributes.get(fq_message_name) {
-            push_indent(self.buf, self.depth);
-            self.buf.push_str(attribute);
-            self.buf.push('\n');
-        }
-    }
-
-    fn append_field_attributes(&mut self, fq_message_name: &str, field_name: &str) {
-        assert_eq!(b'.', fq_message_name.as_bytes()[0]);
-        for attribute in self
-            .config
-            .field_attributes
-            .get_field(fq_message_name, field_name)
-        {
-            push_indent(self.buf, self.depth);
-            self.buf.push_str(attribute);
-            self.buf.push('\n');
-        }
-    }
-
-    fn append_field(&mut self, fq_message_name: &str, field: FieldDescriptorProto) {
+    fn append_field(&mut self, fq_message_name: &str, field: &FieldDescriptorProto) {
         let repeated = field.label == Some(Label::Repeated as i32);
-        let optional = self.optional(fq_message_name, &field);
-        let ty = self.resolve_type(&field, fq_message_name);
+        let optional = self.optional(fq_message_name, field);
+        let ty = self.resolve_type(field, fq_message_name);
 
         debug!("    field: {:?}, type: {:?}", field.name(), ty);
 
-        self.append_doc(fq_message_name, Some(field.name()));
+        self.append_doc();
 
-        self.push_indent();
-        self.append_field_attributes(fq_message_name, field.name());
         self.push_indent();
         self.buf.push_str("pub ");
         self.buf.push_str(&to_snake(field.name()));
@@ -614,7 +643,7 @@ impl CodeGenerator<'_> {
     fn append_map_field(
         &mut self,
         fq_message_name: &str,
-        field: FieldDescriptorProto,
+        field: &FieldDescriptorProto,
         key: &FieldDescriptorProto,
         value: &FieldDescriptorProto,
     ) {
@@ -628,8 +657,7 @@ impl CodeGenerator<'_> {
             value_ty
         );
 
-        self.append_doc(fq_message_name, Some(field.name()));
-        self.push_indent();
+        self.append_doc();
 
         let map_type = self
             .config
@@ -638,57 +666,51 @@ impl CodeGenerator<'_> {
             .cloned()
             .unwrap_or_else(|| "::ntex_grpc::HashMap".to_string());
 
-        self.append_field_attributes(fq_message_name, field.name());
         self.push_indent();
-        self.buf.push_str(&format!(
-            "pub {}: {}<{}, {}>,\n",
+        writeln!(
+            self.buf,
+            "pub {}: {}<{}, {}>,",
             to_snake(field.name()),
             map_type,
             key_ty,
             value_ty
-        ));
+        )
+        .unwrap();
     }
 
-    fn append_oneof_field(
-        &mut self,
-        message_name: &str,
-        fq_message_name: &str,
-        oneof: &OneofDescriptorProto,
-    ) {
+    fn append_oneof_field(&mut self, message_name: &str, oneof: &OneofDescriptorProto) {
         let name = format!(
             "{}::{}",
             to_snake(message_name),
             to_upper_camel(oneof.name())
         );
-        self.append_doc(fq_message_name, None);
+        self.append_doc();
         self.push_indent();
-        self.append_field_attributes(fq_message_name, oneof.name());
-        self.push_indent();
-        self.buf.push_str(&format!(
-            "pub {}: Option<{}>,\n",
+        writeln!(
+            self.buf,
+            "pub {}: Option<{}>,",
             to_snake(oneof.name()),
             name
-        ));
+        )
+        .unwrap();
     }
 
     fn append_oneof(
         &mut self,
         fq_message_name: &str,
-        oneof: OneofDescriptorProto,
+        oneof: &OneofDescriptorProto,
         idx: i32,
-        fields: Vec<(FieldDescriptorProto, usize)>,
+        fields: &[(FieldDescriptorProto, usize)],
     ) {
         self.path.push(8);
         self.path.push(idx);
-        self.append_doc(fq_message_name, None);
+        self.append_doc();
         self.path.pop();
         self.path.pop();
 
         // path from the file module, the oneof enum is in the message module
         let name = self.type_path(&to_upper_camel(oneof.name()));
 
-        let oneof_name = format!("{}.{}", fq_message_name, oneof.name());
-        self.append_type_attributes(&oneof_name);
         self.push_indent();
         self.buf.push_str("#[derive(Clone, PartialEq, Debug)]\n");
         self.push_indent();
@@ -702,49 +724,48 @@ impl CodeGenerator<'_> {
 
         self.path.push(2);
         self.depth += 1;
-        for (field, idx) in &fields {
+        for (field, idx) in fields {
             let field_no = field.number();
             let field_name = to_upper_camel(field.name());
 
             let ops = self.field_ops(fq_message_name, field);
 
-            write.push_str(&format!(
+            write!(write,
                 "{name}::{field_name}(ref value) => {ops}serialize(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown, dst),",
-            ));
+            ).unwrap();
             if fields.len() == 1 {
                 // single variant oneof, pattern is irrefutable
-                read.push_str(&format!(
+                write!(
+                    read,
                     "{field_no} => {{
                         let {name}::{field_name}(ref mut value) = *self;
                         {ops}deserialize(value, {field_no}, wire_type, src)?;
                     }},\n",
-                ));
+                )
+                .unwrap();
             } else {
-                read.push_str(&format!(
+                write!(read,
                     "{field_no} => if let {name}::{field_name}(ref mut value) = *self {{
                         {ops}deserialize(value, {field_no}, wire_type, src)?;
                     }} else {{
                         *self = {name}::{field_name}({ops}deserialize_default({field_no}, wire_type, src)?);
                     }},\n",
-                ));
+                ).unwrap();
             }
-            encoded_len.push_str(&format!(
+            write!(encoded_len,
                 "{name}::{field_name}(ref value) => {ops}serialized_len(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown),",
-            ));
+            ).unwrap();
 
-            self.path.push(*idx as i32);
-            self.append_doc(fq_message_name, Some(field.name()));
+            self.path.push(source_index(*idx));
+            self.append_doc();
             self.path.pop();
-
-            self.push_indent();
-            self.append_field_attributes(&oneof_name, field.name());
 
             self.push_indent();
             let ty = self.resolve_type(field, fq_message_name);
 
             debug!("    oneof: {:?}, type: {ty:?}", field.name());
 
-            self.buf.push_str(&format!("{field_name}({ty}),\n"));
+            writeln!(self.buf, "{field_name}({ty}),").unwrap();
         }
         self.depth -= 1;
         self.path.pop();
@@ -752,7 +773,26 @@ impl CodeGenerator<'_> {
         self.push_indent();
         self.buf.push_str("}\n");
 
-        self.priv_buf.push_str(&format!(
+        self.append_oneof_impl(
+            &name,
+            oneof.name(),
+            &to_upper_camel(fields[0].0.name()),
+            &write,
+            &read,
+            &encoded_len,
+        );
+    }
+
+    fn append_oneof_impl(
+        &mut self,
+        name: &str,
+        oneof_name: &str,
+        default_variant: &str,
+        write: &str,
+        read: &str,
+        encoded_len: &str,
+    ) {
+        write!(self.priv_buf,
             "
         impl ::ntex_grpc::NativeType for {name} {{
             const TYPE: ::ntex_grpc::WireType = ::ntex_grpc::WireType::LengthDelimited;
@@ -764,17 +804,17 @@ impl CodeGenerator<'_> {
             fn encode_value(&self, _: &mut ::ntex_grpc::BytePages) {{
                 panic!(\"Not supported\")
             }}
-        "));
+        ").unwrap();
 
-        self.priv_buf.push_str(&format!(
+        write!(self.priv_buf,
             "
             #[inline]
             /// Encodes the message to a buffer.
             fn serialize(&self, _: u32, _: ::ntex_grpc::types::DefaultValue<&Self>, dst: &mut ::ntex_grpc::BytePages) {{
                 match *self {{ {write} }}
             }}\n",
-        ));
-        self.priv_buf.push_str(&format!("
+        ).unwrap();
+        write!(self.priv_buf, "
             #[inline]
             /// Decodes an instance of the message from a buffer, and merges it into self.
             fn deserialize(&mut self, tag: u32, wire_type: ::ntex_grpc::WireType, src: &mut ::ntex_grpc::Bytes) -> ::std::result::Result<(), ::ntex_grpc::DecodeError> {{
@@ -783,9 +823,9 @@ impl CodeGenerator<'_> {
                     _ => unreachable!(\"invalid {}, tag: {{}}\", tag),
                 }}
                 Ok(())
-            }}\n", read.trim_end(), to_upper_camel(oneof.name())));
+            }}\n", read.trim_end(), to_upper_camel(oneof_name)).unwrap();
 
-        self.priv_buf.push_str(&format!(
+        write!(self.priv_buf,
             "
             #[inline]
             /// Returns the encoded length of the message without a length delimiter.
@@ -794,18 +834,19 @@ impl CodeGenerator<'_> {
                     {encoded_len}
                 }}
             }}
-        }}\n\n"));
+        }}\n\n").unwrap();
 
-        let val = to_upper_camel(fields[0].0.name());
-        self.priv_buf.push_str(&format!(
+        write!(
+            self.priv_buf,
             "
         impl ::std::default::Default for {name} {{
             #[inline]
             fn default() -> Self {{
-                {name}::{val}(::std::default::Default::default())
+                {name}::{default_variant}(::std::default::Default::default())
             }}
         }}\n\n"
-        ));
+        )
+        .unwrap();
     }
 
     fn location(&self) -> &Location {
@@ -818,21 +859,11 @@ impl CodeGenerator<'_> {
         &self.source_info.location[idx]
     }
 
-    fn append_doc(&mut self, fq_name: &str, field_name: Option<&str>) {
-        let append_doc = if let Some(field_name) = field_name {
-            self.config
-                .disable_comments
-                .get_first_field(fq_name, field_name)
-                .is_none()
-        } else {
-            self.config.disable_comments.get(fq_name).next().is_none()
-        };
-        if append_doc {
-            Comments::from_location(self.location()).append_with_indent(self.depth, self.buf)
-        }
+    fn append_doc(&mut self) {
+        Comments::from_location(self.location()).append_with_indent(self.depth, self.buf);
     }
 
-    fn append_enum(&mut self, full_name: String, desc: EnumDescriptorProto) {
+    fn append_enum(&mut self, full_name: &str, desc: &EnumDescriptorProto) {
         debug!("  enum: {:?}", desc.name());
 
         let proto_enum_name = desc.name();
@@ -853,8 +884,18 @@ impl CodeGenerator<'_> {
             return;
         }
 
-        self.append_doc(&fq_proto_enum_name, None);
-        self.append_type_attributes(&fq_proto_enum_name);
+        let variant_mappings = build_enum_value_mappings(&enum_name, enum_values);
+        self.append_enum_definition(&enum_name, &variant_mappings);
+        self.append_enum_methods(&enum_name, &variant_mappings);
+        self.append_enum_impl(full_name, &variant_mappings);
+    }
+
+    fn append_enum_definition(
+        &mut self,
+        enum_name: &str,
+        variant_mappings: &[EnumVariantMapping<'_>],
+    ) {
+        self.append_doc();
         self.push_indent();
         self.buf
             .push_str("#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]\n");
@@ -862,19 +903,15 @@ impl CodeGenerator<'_> {
         self.buf.push_str("#[repr(i32)]\n");
         self.push_indent();
         self.buf.push_str("pub enum ");
-        self.buf.push_str(&enum_name);
+        self.buf.push_str(enum_name);
         self.buf.push_str(" {\n");
-
-        let variant_mappings =
-            build_enum_value_mappings(&enum_name, self.config.strip_enum_prefix, enum_values);
 
         self.depth += 1;
         self.path.push(2);
-        for variant in variant_mappings.iter() {
-            self.path.push(variant.path_idx as i32);
+        for variant in variant_mappings {
+            self.path.push(source_index(variant.path_idx));
 
-            self.append_doc(&fq_proto_enum_name, Some(variant.proto_name));
-            self.append_field_attributes(&fq_proto_enum_name, variant.proto_name);
+            self.append_doc();
             self.push_indent();
             self.buf.push_str(&variant.generated_variant_name);
             self.buf.push_str(" = ");
@@ -889,14 +926,53 @@ impl CodeGenerator<'_> {
 
         self.push_indent();
         self.buf.push_str("}\n\n");
+    }
 
+    fn append_enum_methods(
+        &mut self,
+        enum_name: &str,
+        variant_mappings: &[EnumVariantMapping<'_>],
+    ) {
         self.push_indent();
         self.buf.push_str("impl ");
-        self.buf.push_str(&enum_name);
+        self.buf.push_str(enum_name);
         self.buf.push_str(" {\n");
         self.depth += 1;
         self.path.push(2);
 
+        self.append_enum_name_methods(enum_name, variant_mappings);
+
+        self.path.pop();
+        self.depth -= 1;
+        self.push_indent();
+
+        self.buf.push_str(
+            "pub fn from_i32(value: i32) -> ::std::option::Option<Self> {
+                match value {
+            ",
+        );
+
+        for variant in variant_mappings {
+            writeln!(
+                self.buf,
+                "{} => Some({}::{}),",
+                variant.proto_number, enum_name, variant.generated_variant_name
+            )
+            .unwrap();
+        }
+        self.buf.push_str(
+            "    _ => ::std::option::Option::None,
+            }
+        }",
+        );
+        self.buf.push_str("}\n\n"); // End of impl
+    }
+
+    fn append_enum_name_methods(
+        &mut self,
+        enum_name: &str,
+        variant_mappings: &[EnumVariantMapping<'_>],
+    ) {
         // generate to_str_name()
         self.push_indent();
         self.buf.push_str(
@@ -912,9 +988,9 @@ impl CodeGenerator<'_> {
         self.buf.push_str("match self {\n");
         self.depth += 1;
 
-        for variant in variant_mappings.iter() {
+        for variant in variant_mappings {
             self.push_indent();
-            self.buf.push_str(&enum_name);
+            self.buf.push_str(enum_name);
             self.buf.push_str("::");
             self.buf.push_str(&variant.generated_variant_name);
             self.buf.push_str(" => \"");
@@ -955,9 +1031,9 @@ impl CodeGenerator<'_> {
         self.buf.push_str("match self {\n");
         self.depth += 1;
 
-        for variant in variant_mappings.iter() {
+        for variant in variant_mappings {
             self.push_indent();
-            self.buf.push_str(&enum_name);
+            self.buf.push_str(enum_name);
             self.buf.push_str("::");
             self.buf.push_str(&variant.generated_variant_name);
             self.buf.push_str(" => \"");
@@ -972,32 +1048,11 @@ impl CodeGenerator<'_> {
         self.depth -= 1;
         self.push_indent();
         self.buf.push_str("}\n\n"); // End of to_origin_name()
+    }
 
-        self.path.pop();
-        self.depth -= 1;
-        self.push_indent();
-
-        self.buf.push_str(
-            "pub fn from_i32(value: i32) -> ::std::option::Option<Self> {
-                match value {
-            ",
-        );
-
-        for variant in variant_mappings.iter() {
-            self.buf.push_str(&format!(
-                "{} => Some({}::{}),\n",
-                variant.proto_number, enum_name, variant.generated_variant_name
-            ));
-        }
-        self.buf.push_str(
-            "    _ => ::std::option::Option::None,
-            }
-        }",
-        );
-        self.buf.push_str("}\n\n"); // End of impl
-
+    fn append_enum_impl(&mut self, full_name: &str, variant_mappings: &[EnumVariantMapping<'_>]) {
         // NativeType impl
-        self.priv_buf.push_str(&format!(
+        write!(self.priv_buf,
             "impl ::ntex_grpc::NativeType for {} {{
                  const TYPE: ::ntex_grpc::WireType = ::ntex_grpc::WireType::Varint;
 
@@ -1049,7 +1104,7 @@ impl CodeGenerator<'_> {
             variant_mappings[0].generated_variant_name,
             full_name,
             full_name,
-        ));
+        ).unwrap();
     }
 
     fn push_service(&mut self, service: ServiceDescriptorProto) {
@@ -1065,7 +1120,7 @@ impl CodeGenerator<'_> {
             .enumerate()
             .map(|(idx, mut method)| {
                 debug!("  method: {:?}", method.name());
-                self.path.push(idx as i32);
+                self.path.push(source_index(idx));
                 let comments = Comments::from_location(self.location());
                 self.path.pop();
 
@@ -1075,20 +1130,12 @@ impl CodeGenerator<'_> {
                 let input_type = self.resolve_ident(&input_proto_type);
                 let input_type_extern = self.is_extern_ident(&input_proto_type);
                 let output_type = self.resolve_ident(&output_proto_type);
-                let client_streaming = method.client_streaming();
-                let server_streaming = method.server_streaming();
-
                 Method {
                     name: to_snake(&name),
                     proto_name: name,
-                    options: method.options.unwrap_or_default(),
                     comments,
                     input_type,
                     output_type,
-                    input_proto_type,
-                    output_proto_type,
-                    client_streaming,
-                    server_streaming,
                     input_type_extern,
                 }
             })
@@ -1101,11 +1148,10 @@ impl CodeGenerator<'_> {
             package: self.package.clone(),
             comments,
             methods,
-            options: service.options.unwrap_or_default(),
         };
 
         if let Some(service_generator) = self.config.service_generator.as_mut() {
-            service_generator.generate(service, self.buf, &mut self.priv_buf)
+            service_generator.generate(service, self.buf, &mut self.priv_buf);
         }
     }
 
@@ -1275,7 +1321,7 @@ impl CodeGenerator<'_> {
     fn enum_variant(&self, field: &FieldDescriptorProto, number: i32) -> Option<String> {
         let values = self.enums.get(field.type_name())?;
         let enum_name = to_upper_camel(field.type_name().rsplit('.').next().unwrap());
-        build_enum_value_mappings(&enum_name, self.config.strip_enum_prefix, values)
+        build_enum_value_mappings(&enum_name, values)
             .into_iter()
             .find(|variant| variant.proto_number == number)
             .map(|variant| variant.generated_variant_name)
@@ -1310,28 +1356,7 @@ impl CodeGenerator<'_> {
         };
 
         Some(match field.r#type() {
-            Type::Enum => {
-                let values = self.enums.get(field.type_name())?;
-                let number = match value {
-                    Some(name) => values.iter().find(|v| v.name() == name)?.number(),
-                    None => values.first()?.number(),
-                };
-                if self.config.open_enums {
-                    DefaultLiteral {
-                        field: number.to_string(),
-                        accessor: number.to_string(),
-                        ty: "i32".to_string(),
-                    }
-                } else {
-                    let ty = self.resolve_ident(field.type_name());
-                    let lit = format!("{ty}::{}", self.enum_variant(field, number)?);
-                    DefaultLiteral {
-                        field: lit.clone(),
-                        accessor: lit,
-                        ty,
-                    }
-                }
-            }
+            Type::Enum => self.enum_default_value(field, value)?,
             Type::Group | Type::Message => return None,
             Type::Bool => match value? {
                 v @ ("true" | "false") => literal(v.to_string()),
@@ -1363,11 +1388,11 @@ impl CodeGenerator<'_> {
             ),
             Type::Float => {
                 let v = value?.parse::<f32>().unwrap_or_else(|_| invalid());
-                literal(float_literal(f64::from(v), format!("{v:?}"), "f32"))
+                literal(float_literal(f64::from(v), &format!("{v:?}"), "f32"))
             }
             Type::Double => {
                 let v = value?.parse::<f64>().unwrap_or_else(|_| invalid());
-                literal(float_literal(v, format!("{v:?}"), "f64"))
+                literal(float_literal(v, &format!("{v:?}"), "f64"))
             }
             Type::String => {
                 let v = value?;
@@ -1378,16 +1403,42 @@ impl CodeGenerator<'_> {
                 }
             }
             Type::Bytes => {
-                let lit: String = unescape_c(value?)
-                    .unwrap_or_else(|| invalid())
-                    .iter()
-                    .map(|b| format!("\\x{b:02x}"))
-                    .collect();
+                let mut lit = String::new();
+                for b in unescape_c(value?).unwrap_or_else(|| invalid()) {
+                    write!(lit, "\\x{b:02x}").unwrap();
+                }
                 DefaultLiteral {
                     field: format!("::ntex_grpc::Bytes::from_static(b\"{lit}\")"),
                     accessor: format!("b\"{lit}\""),
                     ty: "&[u8]".to_string(),
                 }
+            }
+        })
+    }
+
+    fn enum_default_value(
+        &self,
+        field: &FieldDescriptorProto,
+        value: Option<&str>,
+    ) -> Option<DefaultLiteral> {
+        let values = self.enums.get(field.type_name())?;
+        let number = match value {
+            Some(name) => values.iter().find(|v| v.name() == name)?.number(),
+            None => values.first()?.number(),
+        };
+        Some(if self.config.open_enums {
+            DefaultLiteral {
+                field: number.to_string(),
+                accessor: number.to_string(),
+                ty: "i32".to_string(),
+            }
+        } else {
+            let ty = self.resolve_ident(field.type_name());
+            let lit = format!("{ty}::{}", self.enum_variant(field, number)?);
+            DefaultLiteral {
+                field: lit.clone(),
+                accessor: lit,
+                ty,
             }
         })
     }
@@ -1420,12 +1471,14 @@ impl CodeGenerator<'_> {
         } else {
             format!("self.{name}.unwrap_or({accessor})")
         };
-        out.push_str(&format!(
+        write!(
+            out,
             "/// Returns the value of `{proto}`, or its default if the field is unset.
              pub fn {name}(&self) -> {ty} {{
                  {get}
              }}\n\n"
-        ));
+        )
+        .unwrap();
     }
 
     /// Wire format of a field whose encoding differs from the `NativeType`
@@ -1583,12 +1636,7 @@ fn strip_enum_prefix(prefix: &str, name: &str) -> String {
     // If the next character after the stripped prefix is not
     // uppercase, then it means that we didn't have a true prefix -
     // for example, "Foo" should not be stripped from "Foobar".
-    if stripped
-        .chars()
-        .next()
-        .map(char::is_uppercase)
-        .unwrap_or(false)
-    {
+    if stripped.chars().next().is_some_and(char::is_uppercase) {
         stripped.to_owned()
     } else {
         name.to_owned()
@@ -1606,7 +1654,6 @@ struct EnumVariantMapping<'a> {
 
 fn build_enum_value_mappings<'a>(
     generated_enum_name: &str,
-    do_strip_enum_prefix: bool,
     enum_values: &'a [EnumValueDescriptorProto],
 ) -> Vec<EnumVariantMapping<'a>> {
     let mut numbers = HashSet::new();
@@ -1622,43 +1669,32 @@ fn build_enum_value_mappings<'a>(
             continue;
         }
 
-        let mut generated_variant_name = to_upper_camel(value.name());
-        if do_strip_enum_prefix {
-            generated_variant_name =
-                strip_enum_prefix(generated_enum_name, &generated_variant_name);
+        let generated_variant_name =
+            strip_enum_prefix(generated_enum_name, &to_upper_camel(value.name()));
+
+        if let Some(old_v) = generated_names.insert(generated_variant_name.clone(), value.name()) {
+            panic!(
+                "Generated enum variant names overlap: `{}` variant name to be used both by `{}` and `{}` ProtoBuf enum values",
+                generated_variant_name,
+                old_v,
+                value.name()
+            );
         }
 
-        if let Some(old_v) =
-            generated_names.insert(generated_variant_name.to_owned(), value.name())
-        {
-            panic!("Generated enum variant names overlap: `{}` variant name to be used both by `{}` and `{}` ProtoBuf enum values",
-                generated_variant_name, old_v, value.name());
-        }
-
-        let val = if do_strip_enum_prefix {
-            let mut val = value.name();
-            let val_lower = val.to_lowercase();
-
-            if val_lower.starts_with(&enum_name_lowercase) {
-                val.split_at(generated_enum_name.len()).1
-            } else if val_lower.starts_with(&enum_name_snek) {
-                val = val.split_at(enum_name_snek.len()).1;
-                val = val.strip_prefix('_').unwrap_or(val);
-                if val
-                    .chars()
-                    .next()
-                    .map(char::is_alphanumeric)
-                    .unwrap_or(false)
-                {
-                    val
-                } else {
-                    value.name()
-                }
-            } else {
+        let mut val = value.name();
+        let val_lower = val.to_lowercase();
+        let val = if val_lower.starts_with(&enum_name_lowercase) {
+            val.split_at(generated_enum_name.len()).1
+        } else if val_lower.starts_with(&enum_name_snek) {
+            val = val.split_at(enum_name_snek.len()).1;
+            val = val.strip_prefix('_').unwrap_or(val);
+            if val.chars().next().is_some_and(char::is_alphanumeric) {
                 val
+            } else {
+                value.name()
             }
         } else {
-            value.name()
+            val
         };
 
         mappings.push(EnumVariantMapping {
@@ -1667,7 +1703,7 @@ fn build_enum_value_mappings<'a>(
             proto_number: value.number(),
             proto_value: val,
             generated_variant_name,
-        })
+        });
     }
     mappings
 }
@@ -1682,7 +1718,7 @@ struct DefaultLiteral {
     ty: String,
 }
 
-fn float_literal(value: f64, repr: String, ty: &str) -> String {
+fn float_literal(value: f64, repr: &str, ty: &str) -> String {
     if value.is_nan() {
         format!("{ty}::NAN")
     } else if value == f64::INFINITY {
@@ -1766,6 +1802,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_source_index() {
+        assert_eq!(source_index(0), 0);
+        assert_eq!(source_index(usize::try_from(i32::MAX).unwrap()), i32::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "Protobuf source index exceeds i32::MAX")]
+    fn test_source_index_overflow() {
+        source_index(usize::try_from(i32::MAX).unwrap() + 1);
+    }
+
+    #[test]
     fn test_unescape_c() {
         assert_eq!(unescape_c("abc").unwrap(), b"abc");
         assert_eq!(
@@ -1781,14 +1829,11 @@ mod tests {
 
     #[test]
     fn test_float_literal() {
-        assert_eq!(float_literal(1.5, "1.5".into(), "f32"), "1.5_f32");
-        assert_eq!(float_literal(f64::NAN, "NaN".into(), "f64"), "f64::NAN");
+        assert_eq!(float_literal(1.5, "1.5", "f32"), "1.5_f32");
+        assert_eq!(float_literal(f64::NAN, "NaN", "f64"), "f64::NAN");
+        assert_eq!(float_literal(f64::INFINITY, "inf", "f32"), "f32::INFINITY");
         assert_eq!(
-            float_literal(f64::INFINITY, "inf".into(), "f32"),
-            "f32::INFINITY"
-        );
-        assert_eq!(
-            float_literal(f64::NEG_INFINITY, "-inf".into(), "f64"),
+            float_literal(f64::NEG_INFINITY, "-inf", "f64"),
             "f64::NEG_INFINITY"
         );
     }
@@ -1906,7 +1951,7 @@ mod tests {
         };
         let mut buf = String::new();
         CodeGenerator::generate(
-            &mut Config::new(),
+            &mut Config::default(),
             &ExternPaths::new(&[], false).unwrap(),
             &EnumValues::new(),
             file,
@@ -1979,7 +2024,7 @@ mod tests {
         };
         let mut code = String::new();
         CodeGenerator::generate(
-            &mut Config::new(),
+            &mut Config::default(),
             &ExternPaths::new(&[], false).unwrap(),
             &EnumValues::new(),
             file,

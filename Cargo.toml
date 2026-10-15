@@ -3,7 +3,6 @@ members = [
   "ntex-grpc",
   "ntex-grpc-codegen",
   "ntex-grpc-derive",
-  "prost-build",
   "examples/custom",
   "examples/helloworld"
 ]
@@ -12,13 +11,12 @@ resolver = "3"
 [patch.crates-io]
 ntex-grpc = { path = "./ntex-grpc" }
 ntex-grpc-derive = { path = "./ntex-grpc-derive" }
-ntex-prost-build = { path = "./prost-build" }
+ntex-grpc-codegen = { path = "./ntex-grpc-codegen" }
 
 [workspace.dependencies]
 ntex-grpc = "3.3.0"
 ntex-grpc-derive = "3.1.0"
 ntex-grpc-codegen = "0.4.1"
-ntex-prost-build = "0.14.1"
 
 ntex = "4.1.0"
 ntex-bytes = "1.11"
@@ -34,6 +32,8 @@ ntex-service = "5.2.0"
 base64 = "0.22"
 flate2 = "1.1.3"
 bitflags = "2"
+cmake = "0.1"
+cfg-if = "1"
 clap = { version = "4.6", features = ["derive"] }
 env_logger = "0.11"
 heck = "0.5"
@@ -52,3 +52,4 @@ thiserror = "2"
 urly = "1.1"
 uuid = "1"
 zstd = "0.13"
+which = "8"

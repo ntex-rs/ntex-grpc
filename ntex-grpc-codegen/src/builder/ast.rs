@@ -5,15 +5,15 @@ use regex::Regex;
 
 /// Comments on a Protobuf item.
 #[derive(Debug)]
-pub struct Comments {
+pub(crate) struct Comments {
     /// Leading detached blocks of comments.
-    pub leading_detached: Vec<Vec<String>>,
+    pub(crate) leading_detached: Vec<Vec<String>>,
 
     /// Leading comments.
-    pub leading: Vec<String>,
+    pub(crate) leading: Vec<String>,
 
     /// Trailing comments.
-    pub trailing: Vec<String>,
+    pub(crate) trailing: Vec<String>,
 }
 
 impl Comments {
@@ -48,7 +48,7 @@ impl Comments {
     /// Appends the comments to a buffer with indentation.
     ///
     /// Each level of indentation corresponds to four space (' ') characters.
-    pub fn append_with_indent(&self, indent_level: u8, buf: &mut String) {
+    pub(crate) fn append_with_indent(&self, indent_level: u8, buf: &mut String) {
         // Append blocks of detached comments.
         for detached_block in &self.leading_detached {
             for line in detached_block {
@@ -201,46 +201,34 @@ impl Comments {
 
 /// A service descriptor.
 #[derive(Debug)]
-pub struct Service {
+pub(crate) struct Service {
     /// The service name in Rust style.
-    pub name: String,
+    pub(crate) name: String,
     /// The service name as it appears in the .proto file.
-    pub proto_name: String,
+    pub(crate) proto_name: String,
     /// The package name as it appears in the .proto file.
-    pub package: String,
+    pub(crate) package: String,
     /// The service comments.
-    pub comments: Comments,
+    pub(crate) comments: Comments,
     /// The service methods.
-    pub methods: Vec<Method>,
-    /// The service options.
-    pub options: prost_types::ServiceOptions,
+    pub(crate) methods: Vec<Method>,
 }
 
 /// A service method descriptor.
 #[derive(Debug)]
-pub struct Method {
+pub(crate) struct Method {
     /// The name of the method in Rust style.
-    pub name: String,
+    pub(crate) name: String,
     /// The name of the method as it appears in the .proto file.
-    pub proto_name: String,
+    pub(crate) proto_name: String,
     /// The method comments.
-    pub comments: Comments,
+    pub(crate) comments: Comments,
     /// The input Rust type.
-    pub input_type: String,
+    pub(crate) input_type: String,
     /// The output Rust type.
-    pub output_type: String,
-    /// The input Protobuf type.
-    pub input_proto_type: String,
-    /// The output Protobuf type.
-    pub output_proto_type: String,
-    /// The method options.
-    pub options: prost_types::MethodOptions,
-    /// Identifies if client streams multiple client messages.
-    pub client_streaming: bool,
-    /// Identifies if server streams multiple server messages.
-    pub server_streaming: bool,
+    pub(crate) output_type: String,
     /// Identifies if input type is external type
-    pub input_type_extern: bool,
+    pub(crate) input_type_extern: bool,
 }
 
 #[cfg(test)]
@@ -284,7 +272,7 @@ mod tests {
                 trailing: vec![t.input],
             };
 
-            let mut actual = "".to_string();
+            let mut actual = String::new();
             input.append_with_indent(0, &mut actual);
 
             assert_eq!(t.expected, actual, "failed {}", t.name);
@@ -328,7 +316,7 @@ mod tests {
                 trailing: vec![t.input],
             };
 
-            let mut actual = "".to_string();
+            let mut actual = String::new();
             input.append_with_indent(0, &mut actual);
 
             assert_eq!(t.expected, actual, "failed {}", t.name);

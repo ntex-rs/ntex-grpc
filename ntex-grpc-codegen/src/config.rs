@@ -1,11 +1,10 @@
 use std::{env, io, ops, path::Path};
 
-use ntex_prost_build::Config;
-
+use crate::builder::Config;
 use crate::generator::GrpcServiceGenerator;
 
 #[derive(Debug)]
-pub struct NGrpcGenerator {
+pub(crate) struct NGrpcGenerator {
     pconfig: Config,
 }
 
@@ -22,13 +21,12 @@ impl NGrpcGenerator {
     }
 
     /// Map protobuf type to custom rust type
-    pub fn map_field_type(&mut self, path: &str, rust_type: &str) {
+    pub(crate) fn map_field_type(&mut self, path: &str, rust_type: &str) {
         let _ = self.pconfig.map_field_type([path], rust_type);
     }
 
-    /// Compile `.proto` files into Rust files during a Cargo build with additional code generator
-    /// configuration options.
-    pub fn compile_protos(
+    /// Compile a `.proto` file and its imports using the configured output directory.
+    pub(crate) fn compile_protos(
         &mut self,
         proto: &impl AsRef<Path>,
         includes: &[impl AsRef<Path>],

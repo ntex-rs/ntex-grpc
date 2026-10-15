@@ -13,27 +13,27 @@ use crate::Compression;
 use crate::utils::{self, Data};
 use crate::{GrpcStatus, Message, consts, service::MethodDef};
 
-impl<T: MethodDef> Transport<T> for Client {
+impl<St, T: MethodDef> Transport<T, St> for Client {
     type Error = Error<ClientError>;
 
     #[inline]
     async fn request(
         &self,
         val: &T::Input,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestContext<'_, St>,
     ) -> Result<Response<T>, Self::Error> {
         Transport::request(&self.0, val, ctx).await
     }
 }
 
-impl<T: MethodDef> Transport<T> for h2::client::Client {
+impl<T: MethodDef, St> Transport<T, St> for h2::client::Client {
     type Error = Error<ClientError>;
 
     /// The timeout covers waiting for a connection too.
     async fn request(
         &self,
         val: &T::Input,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestContext<'_, St>,
     ) -> Result<Response<T>, Self::Error> {
         with_deadline(ctx.get_timeout(), async |deadline| {
             let client = self.client().await.map_err(|e| e.map(ClientError::from))?;
@@ -43,13 +43,13 @@ impl<T: MethodDef> Transport<T> for h2::client::Client {
     }
 }
 
-impl<T: MethodDef> Transport<T> for h2::client::SimpleClient {
+impl<T: MethodDef, St> Transport<T, St> for h2::client::SimpleClient {
     type Error = Error<ClientError>;
 
     async fn request(
         &self,
         val: &T::Input,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestContext<'_, St>,
     ) -> Result<Response<T>, Self::Error> {
         with_deadline(ctx.get_timeout(), async |deadline| {
             send_request(self, val, ctx, deadline).await
@@ -86,10 +86,10 @@ where
 }
 
 #[allow(clippy::too_many_lines)]
-async fn send_request<T: MethodDef>(
+async fn send_request<T: MethodDef, St>(
     client: &h2::client::SimpleClient,
     val: &T::Input,
-    ctx: &mut RequestContext,
+    ctx: &mut RequestContext<'_, St>,
     deadline: Option<Instant>,
 ) -> Result<Response<T>, Error<ClientError>> {
     if let Some(err) = ctx.take_error() {
@@ -462,9 +462,9 @@ fn synthesized(
 ///
 /// A message is sent uncompressed if it is small or does not get smaller.
 #[cfg_attr(not(feature = "compression"), allow(clippy::unused_async))]
-async fn encode_message<M: Message>(
+async fn encode_message<M: Message, St>(
     val: &M,
-    ctx: &RequestContext,
+    ctx: &RequestContext<'_, St>,
 ) -> Result<BytePages, ClientError> {
     let max_size = ctx.get_max_send_message_size();
 

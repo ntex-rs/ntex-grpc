@@ -175,7 +175,7 @@ fn gen_method(method: &Method, service: &Service) -> (String, String) {
             type Output = {output_type};
         }}"),
         format!(
-            "impl<T: ::ntex_grpc::client::Transport<{def_ident}>> {service_ident}<T> {{
+            "impl<T> {service_ident}<T> {{
             {comments}
             pub fn {method_ident}<'a>(&'a self, req: &'a {req_input_type}) -> ::ntex_grpc::client::Request<'a, T, {def_ident}> {{
                 ::ntex_grpc::client::Request::new(&self.0, req)

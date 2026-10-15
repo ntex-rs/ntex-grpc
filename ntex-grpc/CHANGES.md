@@ -1,5 +1,9 @@
 # Changes
 
+## [3.4.0] - 2026-10-10
+
+* Add state forwarding - #52
+
 ## [3.3.0] - 2026-10-10
 
 * Decoding fails with "recursion limit reached" for messages nested more

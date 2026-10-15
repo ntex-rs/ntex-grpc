@@ -1,9 +1,10 @@
 //! Thrift service code generator
-#![deny(rust_2018_idioms, warnings)]
-use std::{io, path, process::Command};
+#![deny(clippy::pedantic)]
+use std::{path, process::Command};
 
 use clap::Parser;
 
+mod builder;
 mod config;
 mod generator;
 
@@ -29,7 +30,7 @@ struct Args {
     #[clap(short, long, value_parser, name = "INCLUDE-DIR")]
     include_dir: Vec<path::PathBuf>,
 
-    /// Map protobuf type to custom rust type that implements NativeType trait. {name}={rust-type-name}
+    /// Map protobuf type to custom rust type that implements `NativeType` trait. {name}={rust-type-name}
     #[clap(short, long, value_parser, name = "MAP")]
     map: Vec<String>,
 
@@ -50,7 +51,7 @@ struct Args {
     open_enums: bool,
 }
 
-fn main() -> io::Result<()> {
+fn main() {
     env_logger::init();
 
     let args = Args::parse();
@@ -88,8 +89,9 @@ fn main() -> io::Result<()> {
         };
 
         println!(
-            "GRPC {:?} package successfully processed. Generated {fname:?} file",
-            args.proto
+            "GRPC {} package successfully processed. Generated {} file",
+            args.proto.display(),
+            fname.display()
         );
 
         let mut fmt_args = vec!["--edition", "2024"];
@@ -107,6 +109,4 @@ fn main() -> io::Result<()> {
             println!("{e}");
         }
     }
-
-    Ok(())
 }

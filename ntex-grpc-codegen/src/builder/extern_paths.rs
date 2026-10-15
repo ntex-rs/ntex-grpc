@@ -1,11 +1,11 @@
-use std::collections::{hash_map, HashMap};
+use std::collections::{HashMap, hash_map};
 
 use itertools::Itertools;
 
-use crate::ident::{to_snake, to_upper_camel};
+use super::ident::{to_snake, to_upper_camel};
 
 fn validate_proto_path(path: &str) -> Result<(), String> {
-    if path.chars().next().map(|c| c != '.').unwrap_or(true) {
+    if !path.starts_with('.') {
         return Err(format!(
             "Protobuf paths must be fully qualified (begin with a leading '.'): {path}"
         ));
@@ -17,12 +17,15 @@ fn validate_proto_path(path: &str) -> Result<(), String> {
 }
 
 #[derive(Debug)]
-pub struct ExternPaths {
+pub(crate) struct ExternPaths {
     extern_paths: HashMap<String, String>,
 }
 
 impl ExternPaths {
-    pub fn new(paths: &[(String, String)], prost_types: bool) -> Result<ExternPaths, String> {
+    pub(crate) fn new(
+        paths: &[(String, String)],
+        prost_types: bool,
+    ) -> Result<ExternPaths, String> {
         let mut extern_paths = ExternPaths {
             extern_paths: HashMap::new(),
         };
@@ -100,14 +103,14 @@ impl ExternPaths {
         Ok(())
     }
 
-    pub fn is_extern_ident(&self, pb_ident: &str) -> bool {
+    pub(crate) fn is_extern_ident(&self, pb_ident: &str) -> bool {
         // protoc should always give fully qualified identifiers.
         assert_eq!(".", &pb_ident[..1]);
 
         self.extern_paths.contains_key(pb_ident)
     }
 
-    pub fn resolve_ident(&self, pb_ident: &str) -> Option<String> {
+    pub(crate) fn resolve_ident(&self, pb_ident: &str) -> Option<String> {
         // protoc should always give fully qualified identifiers.
         assert_eq!(".", &pb_ident[..1]);
 
@@ -192,8 +195,11 @@ mod tests {
             assert_eq!(paths.resolve_ident(proto_ident).unwrap(), resolved_ident);
         };
 
-        case(".google.protobuf.Value", "::prost_types::Value");
-        case(".google.protobuf.Duration", "::prost_types::Duration");
+        case(".google.protobuf.Value", "::ntex_grpc::google_types::Value");
+        case(
+            ".google.protobuf.Duration",
+            "::ntex_grpc::google_types::Duration",
+        );
         case(".google.protobuf.Empty", "()");
     }
 }

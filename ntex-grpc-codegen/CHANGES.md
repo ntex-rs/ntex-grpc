@@ -1,6 +1,10 @@
 # Changes
 
-## [0.4.1] - Unreleased
+## [0.5.0] - 2026-10-15
+
+* Merge ntex-prost-build into ntex-grpc-codegen
+
+## [0.4.1] - 2026-10-12
 
 * Fix "irrefutable `if let` pattern" error for single variant "oneof" fields
 

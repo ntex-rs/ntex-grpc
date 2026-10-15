@@ -1,4 +1,6 @@
-use ntex_prost_build::{Comments, Method, Service, ServiceGenerator};
+use std::fmt::Write;
+
+use crate::builder::{Comments, Method, Service, ServiceGenerator};
 
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct GrpcServiceGenerator;
@@ -11,16 +13,16 @@ impl ServiceGenerator for GrpcServiceGenerator {
             service
         );
 
-        buf.push_str(&format!("\n/// `{}` service definition\n", service.name));
+        writeln!(buf, "\n/// `{}` service definition", service.name).unwrap();
         generate_client(&service, buf, priv_buf);
     }
 }
 
 fn generate_client(service: &Service, buf: &mut String, priv_buf: &mut String) {
-    let service_ident = service.name.to_string();
+    let service_ident = service.name.clone();
     let client_ident = format!("{}Client", service.name);
     let service_name = if service.package.is_empty() {
-        service.proto_name.to_string()
+        service.proto_name.clone()
     } else {
         format!("{}.{}", service.package, service.proto_name)
     };
@@ -42,7 +44,7 @@ fn generate_client(service: &Service, buf: &mut String, priv_buf: &mut String) {
         .methods
         .iter()
         .map(|m| {
-            let name = m.proto_name.to_string();
+            let name = m.proto_name.clone();
             let m_name = format!("{}{}Method", service.proto_name, m.proto_name);
             format!("{m_name}::NAME => Some({service_methods_name}::{name}({m_name})),")
         })
@@ -71,19 +73,18 @@ fn generate_client(service: &Service, buf: &mut String, priv_buf: &mut String) {
 
     let stream = format!(
         "#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        pub struct {};
+        pub struct {service_ident};
 
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        pub enum {} {{
-            {}
+        pub enum {service_methods_name} {{
+            {service_methods}
         }}
 
-        {}
+        {comments}
         #[derive(Debug, Clone)]
-        pub struct {}<T>(T);
+        pub struct {client_ident}<T>(T);
 
-        {}",
-        service_ident, service_methods_name, service_methods, comments, client_ident, methods,
+        {methods}",
     );
     buf.push_str(&stream);
 
@@ -152,15 +153,15 @@ fn gen_method(method: &Method, service: &Service) -> (String, String) {
     };
 
     let service_ident = format!("{}Client", service.name);
-    let method_ident = method.name.to_string();
+    let method_ident = method.name.clone();
     let def_ident = format!("{}{}Method", service.name, method.proto_name);
-    let input_type = method.input_type.to_string();
+    let input_type = method.input_type.clone();
     let req_input_type = if method.input_type_extern {
-        method.input_type.to_string()
+        method.input_type.clone()
     } else {
         format!("super::{}", method.input_type)
     };
-    let output_type = method.output_type.to_string();
+    let output_type = method.output_type.clone();
     let comments = doc_comments(&method.comments);
 
     (
@@ -212,11 +213,6 @@ mod tests {
             comments: comments(&[" Says hello.", " Second line.", "", "     example"]),
             input_type: "Req".into(),
             output_type: "Req".into(),
-            input_proto_type: ".demo.Req".into(),
-            output_proto_type: ".demo.Req".into(),
-            options: prost_types::MethodOptions::default(),
-            client_streaming: false,
-            server_streaming: false,
             input_type_extern: false,
         };
         let service = Service {
@@ -225,7 +221,6 @@ mod tests {
             package: "demo".into(),
             comments: comments(&[" The demo service.", "", " Second paragraph."]),
             methods: vec![method],
-            options: prost_types::ServiceOptions::default(),
         };
 
         let (mut buf, mut priv_buf) = (String::new(), String::new());

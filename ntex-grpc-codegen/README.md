@@ -34,3 +34,5 @@ Options:
 
 See the [ntex-grpc README](https://github.com/ntex-rs/ntex-grpc#readme) for
 how to use the generated code.
+
+This is a fork of [tokio-rs/prost-build](https://github.com/tokio-rs/prost).

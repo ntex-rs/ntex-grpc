@@ -4,15 +4,16 @@ use ntex_bytes::{Buf, ByteString, Bytes};
 use ntex_h2::{self as h2, StreamRef, frame::Reason, frame::StreamId};
 use ntex_http::{HeaderMap, HeaderValue, Method, StatusCode, header::CONTENT_TYPE};
 use ntex_io::{Filter, Io, IoBoxed};
+use ntex_service::boxed::{self, BoxService, BoxServiceFactory};
 use ntex_service::{Ctx, Pipeline, Service, ServiceFactory, cfg::SharedCfg};
-use ntex_util::{HashMap, time::Millis, time::timeout_checked};
+use ntex_util::{HashMap, future::join_all, time::Millis, time::timeout_checked};
 
 #[cfg(feature = "compression")]
 use crate::Compression;
 use crate::utils::{self, Data};
 use crate::{consts, encode_grpc_message, status::GrpcStatus};
 
-use super::{ServerError, ServerRequest, ServerResponse};
+use super::{NamedService, ServerError, ServerRequest, ServerResponse};
 
 /// The length prefix of an uncompressed empty message.
 const EMPTY_MESSAGE: &[u8] = &[0; 5];
@@ -35,21 +36,116 @@ const DEFAULT_MAX_SEND_MESSAGE_SIZE: usize = i32::MAX as usize;
 const MILLIS_IN_HOUR: u64 = 60 * 60 * 1000;
 const MILLIS_IN_MINUTE: u64 = 60 * 1000;
 
+type Factory = BoxServiceFactory<(), ServerRequest, ServerResponse, ServerError, Box<dyn Error>>;
+type BoxedService = BoxService<(), ServerRequest, ServerResponse, ServerError>;
+
 /// Grpc server
-pub struct GrpcServer<T> {
-    factory: Rc<T>,
+///
+/// Routes each call by the service name in the request path,
+/// `/helloworld.Greeter/SayHello` goes to the service registered for
+/// `helloworld.Greeter`. A call to a service that is not registered goes to
+/// the [default service](GrpcServer::default_service), or fails with
+/// `UNIMPLEMENTED` if there is none.
+///
+/// A service instance of each registered service is created for every
+/// connection, the connection fails if one of them cannot be created.
+pub struct GrpcServer {
+    /// Names of the registered services, `names[i]` is served by
+    /// `factories[i]`.
+    names: Rc<[ByteString]>,
+    factories: Vec<Factory>,
+    default: Option<Factory>,
     max_message_size: usize,
     max_send_message_size: usize,
 }
 
-impl<T> GrpcServer<T> {
-    /// Create grpc server
-    pub fn new(factory: T) -> Self {
+impl GrpcServer {
+    /// Create grpc server with one service, it takes the calls for
+    /// [`NamedService::NAME`].
+    ///
+    /// Add more services with [`service()`](Self::service), a call to any
+    /// other service fails with `UNIMPLEMENTED`.
+    pub fn new<T>(factory: T) -> Self
+    where
+        T: NamedService
+            + ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError>
+            + 'static,
+        T::InitError: Into<Box<dyn Error>>,
+    {
         Self {
-            factory: Rc::new(factory),
+            names: Rc::new([]),
+            factories: Vec::new(),
+            default: None,
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_SEND_MESSAGE_SIZE,
         }
+        .service(factory)
+    }
+
+    #[must_use]
+    /// Add a service, it takes the calls for [`NamedService::NAME`].
+    ///
+    /// `#[server]` implements [`NamedService`], use
+    /// [`service_named()`](Self::service_named) for other services.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a service with the same name is already added.
+    pub fn service<T>(self, factory: T) -> Self
+    where
+        T: NamedService
+            + ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError>
+            + 'static,
+        T::InitError: Into<Box<dyn Error>>,
+    {
+        self.service_named(ByteString::from_static(T::NAME), factory)
+    }
+
+    #[must_use]
+    /// Add a service that takes the calls for the service `name`, the full
+    /// service name with the package, e.g. `helloworld.Greeter`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `name` is empty or contains `/`, or if a service with the
+    /// same name is already added.
+    pub fn service_named<T>(mut self, name: impl Into<ByteString>, factory: T) -> Self
+    where
+        T: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError> + 'static,
+        T::InitError: Into<Box<dyn Error>>,
+    {
+        let name = name.into();
+        assert!(
+            !name.is_empty() && !name.contains('/'),
+            "invalid grpc service name: {name:?}"
+        );
+        assert!(
+            !self.names.contains(&name),
+            "grpc service {name} is already added"
+        );
+        self.names = self.names.iter().cloned().chain([name]).collect();
+        self.factories.push(box_factory(factory));
+        self
+    }
+
+    #[must_use]
+    /// Set the service that takes the calls for the services that are not
+    /// added, whatever their service name.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the default service is already set.
+    pub fn default_service<T>(mut self, factory: T) -> Self
+    where
+        T: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError> + 'static,
+        T::InitError: Into<Box<dyn Error>>,
+    {
+        assert!(
+            self.default.is_none(),
+            "grpc default service is already set"
+        );
+        self.default = Some(box_factory(factory));
+        self
     }
 
     #[must_use]
@@ -74,24 +170,29 @@ impl<T> GrpcServer<T> {
         self.max_send_message_size = size;
         self
     }
-}
 
-impl<Sf> GrpcServer<Sf>
-where
-    Sf: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError> + 'static,
-    Sf::InitError: Into<Box<dyn Error>>,
-{
     async fn run(&self, io: IoBoxed) -> Result<(), Box<dyn Error>> {
         let cfg = io.shared();
 
-        // init server
-        let svc = self.factory.create(&()).await.map_err(Into::into)?;
+        // init services
+        let factories = self.factories.iter().chain(&self.default);
+        let services = join_all(factories.map(|f| f.create(&())))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
 
         let _ = h2::server::handle_one(
             io,
             Pipeline::new(
                 (),
-                PublishService::new(svc, cfg, self.max_message_size, self.max_send_message_size),
+                PublishService {
+                    cfg,
+                    names: self.names.clone(),
+                    services,
+                    max_size: self.max_message_size,
+                    max_send_size: self.max_send_message_size,
+                    streams: RefCell::new(HashMap::default()),
+                },
             ),
             Pipeline::new((), ControlService),
         )
@@ -101,12 +202,15 @@ where
     }
 }
 
-impl<Sf, F> Service<(), Io<F>> for GrpcServer<Sf>
+fn box_factory<T>(factory: T) -> Factory
 where
-    F: Filter,
-    Sf: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError> + 'static,
-    Sf::InitError: Into<Box<dyn Error>>,
+    T: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError> + 'static,
+    T::InitError: Into<Box<dyn Error>>,
 {
+    boxed::factory(factory.map_init_err(Into::into))
+}
+
+impl<F: Filter> Service<(), Io<F>> for GrpcServer {
     type Res = ();
     type Error = Box<dyn Error>;
 
@@ -115,11 +219,7 @@ where
     }
 }
 
-impl<Sf> Service<(), IoBoxed> for GrpcServer<Sf>
-where
-    Sf: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError> + 'static,
-    Sf::InitError: Into<Box<dyn Error>>,
-{
+impl Service<(), IoBoxed> for GrpcServer {
     type Res = ();
     type Error = Box<dyn Error>;
 
@@ -144,9 +244,13 @@ impl Service<(), h2::Control<h2::StreamError>> for ControlService {
     }
 }
 
-struct PublishService<S: Service<(), ServerRequest>> {
+struct PublishService {
     cfg: SharedCfg,
-    service: S,
+    /// Names of the registered services, `names[i]` is served by
+    /// `services[i]`.
+    names: Rc<[ByteString]>,
+    /// The registered services, followed by the default one if there is one.
+    services: Vec<BoxedService>,
     max_size: usize,
     max_send_size: usize,
     streams: RefCell<HashMap<StreamId, Inflight>>,
@@ -159,17 +263,13 @@ struct Inflight {
     headers: HeaderMap,
 }
 
-impl<S> PublishService<S>
-where
-    S: Service<(), ServerRequest, Res = ServerResponse, Error = ServerError>,
-{
-    fn new(service: S, cfg: SharedCfg, max_size: usize, max_send_size: usize) -> Self {
-        Self {
-            cfg,
-            service,
-            max_size,
-            max_send_size,
-            streams: RefCell::new(HashMap::default()),
+impl PublishService {
+    /// Returns the service that serves `service`, the default service
+    /// serves the names that are not registered.
+    fn route(&self, service: &str) -> Option<&BoxedService> {
+        match self.names.iter().position(|name| name == service) {
+            Some(idx) => Some(&self.services[idx]),
+            None => self.services.get(self.names.len()),
         }
     }
 
@@ -223,10 +323,7 @@ where
     }
 }
 
-impl<S> Service<(), h2::Message> for PublishService<S>
-where
-    S: Service<(), ServerRequest, Res = ServerResponse, Error = ServerError> + 'static,
-{
+impl Service<(), h2::Message> for PublishService {
     type Res = ();
     type Error = h2::StreamError;
 
@@ -261,10 +358,17 @@ where
                 }
 
                 let path = pseudo.path.unwrap().split_off(1);
-                if !path.contains('/') {
+                let Some(n) = path.find('/') else {
                     // not a `service/method` path, the method is unknown
                     let msg =
                         encode_grpc_message(&format!("grpc: malformed method name: /{path}"));
+                    reject(&stream, StatusCode::OK, GrpcStatus::Unimplemented, msg, eof);
+                    return Ok(());
+                };
+                // the request is not read for an unknown service
+                if self.route(&path[..n]).is_none() {
+                    let msg =
+                        encode_grpc_message(&format!("grpc: unknown service {}", &path[..n]));
                     reject(&stream, StatusCode::OK, GrpcStatus::Unimplemented, msg, eof);
                     return Ok(());
                 }
@@ -330,9 +434,19 @@ where
                     };
 
                     let (service, name) = split_path(inflight.path);
+                    // the service is known, it is checked with the headers
+                    let Some(svc) = self.route(&service) else {
+                        if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
+                            let msg =
+                                encode_grpc_message(&format!("grpc: unknown service {service}"));
+                            send_error(&stream, GrpcStatus::Unimplemented, msg);
+                        }
+                        return Ok(());
+                    };
                     log::debug!("{}: Call service {service} method {name}", self.cfg.tag());
                     let req = ServerRequest {
                         payload: data,
+                        service,
                         name,
                         headers: inflight.headers,
                     };
@@ -368,7 +482,7 @@ where
                         Millis::ZERO
                     };
 
-                    match timeout_checked(to, ctx.call(&self.service, req)).await {
+                    match timeout_checked(to, ctx.call(svc, req)).await {
                         Ok(Ok(mut res)) => {
                             log::debug!("{}: Response is received {res:?}", self.cfg.tag());
                             if res.payload.is_empty() {
@@ -660,6 +774,13 @@ mod tests {
     #[test]
     fn inflight_size() {
         // a slot of the streams map holds the state of a request
+        eprintln!(
+            "SIZES {} {} {} {}",
+            size_of::<Inflight>(),
+            size_of::<ByteString>(),
+            size_of::<Data>(),
+            size_of::<HeaderMap>()
+        );
         assert!(size_of::<Inflight>() <= 96, "{}", size_of::<Inflight>());
     }
 

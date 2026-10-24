@@ -1,5 +1,25 @@
 # Changes
 
+## [3.5.0] - Unreleased
+
+* `GrpcServer` serves multiple services. `service()` and `service_named()`
+  add a service for a service name. Calls are routed by the service name in
+  the request path, a call to a service that is not added fails with
+  `UNIMPLEMENTED` before the request body is read. `default_service()` sets
+  the service for the other calls
+
+* Breaking: `GrpcServer` is not generic over the service factory.
+  `GrpcServer::new()` takes a `NamedService` and serves only its calls, use
+  `default_service()` for a service that takes every call
+
+* Breaking: `ServerRequest` and `Request` have a `service` field with the
+  full service name, e.g. `helloworld.Greeter`
+
+* Breaking: a `#[server]` service fails a call to another service with
+  `UNIMPLEMENTED` "Service is not found", the service name in the path was
+  ignored and the call went to the method with the same name. `#[server]`
+  implements the new `server::NamedService` trait
+
 ## [3.4.0] - 2026-10-10
 
 * Add state forwarding - #52

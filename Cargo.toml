@@ -15,7 +15,7 @@ ntex-grpc-codegen = { path = "./ntex-grpc-codegen" }
 
 [workspace.dependencies]
 ntex-grpc = "3.3.0"
-ntex-grpc-derive = "3.1.0"
+ntex-grpc-derive = "3.2.0"
 ntex-grpc-codegen = "0.4.1"
 
 ntex = "4.1.0"

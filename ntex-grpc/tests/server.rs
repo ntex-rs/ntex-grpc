@@ -1,8 +1,9 @@
 use ntex::io::{Io, IoBoxed};
-use ntex::service::{Pipeline, cfg::SharedCfg, fn_factory, fn_service};
+use ntex::service::{Pipeline, ServiceFactory, cfg::SharedCfg, fn_factory, fn_service};
 use ntex::testing::IoTest;
 use ntex_bytes::{BytePages, Bytes};
-use ntex_grpc::server::{GrpcServer, ServerError, ServerRequest, ServerResponse};
+use ntex_grpc::server::{GrpcServer, NamedService, ServerError, ServerRequest, ServerResponse};
+use ntex_grpc::{Ctx, Service};
 use ntex_h2::{self as h2, client::SimpleClient};
 use ntex_http::{HeaderMap, HeaderName, HeaderValue, Method};
 
@@ -79,19 +80,61 @@ async fn handle(req: ServerRequest) -> Result<ServerResponse, ServerError> {
                 ],
             ))
         }
+        // answers with the service name of the call
+        "Service" => {
+            let mut payload = BytePages::default();
+            payload.append(Bytes::copy_from_slice(req.service.as_bytes()));
+            Ok(ServerResponse::new(payload))
+        }
         _ => Ok(ServerResponse::new(payload)),
+    }
+}
+
+/// A factory of [`handle`].
+fn handler() -> impl ServiceFactory<
+    (),
+    ServerRequest,
+    Res = ServerResponse,
+    Error = ServerError,
+    InitError = std::io::Error,
+> + 'static {
+    fn_factory(async |&()| Ok::<_, std::io::Error>(fn_service(handle)))
+}
+
+/// [`handle`] as the `test.Svc` service.
+struct Svc;
+
+impl NamedService for Svc {
+    const NAME: &'static str = "test.Svc";
+}
+
+impl ServiceFactory<(), ServerRequest> for Svc {
+    type Res = ServerResponse;
+    type Error = ServerError;
+    type Service = Svc;
+    type InitError = std::io::Error;
+
+    async fn create(&self, (): &()) -> Result<Svc, std::io::Error> {
+        Ok(Svc)
+    }
+}
+
+impl Service<(), ServerRequest> for Svc {
+    type Res = ServerResponse;
+    type Error = ServerError;
+
+    async fn call(
+        &self,
+        req: ServerRequest,
+        _: Ctx<'_, Self, ()>,
+    ) -> Result<ServerResponse, ServerError> {
+        handle(req).await
     }
 }
 
 /// Spawns a server and connects a client to it.
 fn start(max_size: Option<usize>, max_send_size: Option<usize>, boxed: bool) -> SimpleClient {
-    let (cli, srv) = IoTest::create();
-    cli.remote_buffer_cap(64 * 1024 * 1024);
-    srv.remote_buffer_cap(64 * 1024 * 1024);
-
-    let server = GrpcServer::new(fn_factory(async |&()| {
-        Ok::<_, std::io::Error>(fn_service(handle))
-    }));
+    let server = GrpcServer::new(Svc);
     let server = match max_size {
         Some(size) => server.max_message_size(size),
         None => server,
@@ -100,6 +143,15 @@ fn start(max_size: Option<usize>, max_send_size: Option<usize>, boxed: bool) -> 
         Some(size) => server.max_send_message_size(size),
         None => server,
     };
+    connect(server, boxed)
+}
+
+/// Spawns `server` and connects a client to it.
+fn connect(server: GrpcServer, boxed: bool) -> SimpleClient {
+    let (cli, srv) = IoTest::create();
+    cli.remote_buffer_cap(64 * 1024 * 1024);
+    srv.remote_buffer_cap(64 * 1024 * 1024);
+
     let srv = Io::new(srv, SharedCfg::new("SRV").build());
     ntex::rt::spawn(async move {
         if boxed {
@@ -704,6 +756,259 @@ async fn response_after_reset() {
     let (_, data, trailers) = call(&client, None, message(0, b"x")).await;
     assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
     assert_eq!(data, message(0, b"x"));
+}
+
+mod routing {
+    use std::convert::Infallible;
+
+    use ntex_grpc::server::Request;
+    use ntex_grpc::{MethodDef, ServiceDef, google_types::StringValue};
+
+    use super::*;
+
+    /// `test.Echo` service definition, as the codegen writes it.
+    pub struct Echo;
+
+    pub enum EchoMethods {
+        Call(EchoCallMethod),
+    }
+
+    pub struct EchoCallMethod;
+
+    impl MethodDef for EchoCallMethod {
+        const NAME: &'static str = "Call";
+        const PATH: ntex_grpc::ByteString = ntex_grpc::ByteString::from_static("/test.Echo/Call");
+        type Input = StringValue;
+        type Output = StringValue;
+    }
+
+    impl ServiceDef for Echo {
+        const NAME: &'static str = "test.Echo";
+        type Methods = EchoMethods;
+
+        fn method_by_name(name: &str) -> Option<EchoMethods> {
+            (name == EchoCallMethod::NAME).then_some(EchoMethods::Call(EchoCallMethod))
+        }
+    }
+
+    struct EchoServer;
+
+    #[ntex_grpc::server(self::Echo)]
+    impl EchoServer {
+        /// Answers with the service name and the request message.
+        #[method(Call)]
+        async fn call(&self, req: Request<StringValue>) -> StringValue {
+            StringValue {
+                value: format!("{} {}", req.service, req.value).into(),
+            }
+        }
+    }
+
+    impl ServiceFactory<(), ServerRequest> for EchoServer {
+        type Res = ServerResponse;
+        type Error = ServerError;
+        type Service = EchoServer;
+        type InitError = Infallible;
+
+        async fn create(&self, (): &()) -> Result<EchoServer, Infallible> {
+            Ok(EchoServer)
+        }
+    }
+
+    /// A request message of `value`.
+    fn string_message(value: &'static str) -> Vec<u8> {
+        let mut buf = BytePages::default();
+        ntex_grpc::Message::write(
+            &StringValue {
+                value: value.into(),
+            },
+            &mut buf,
+        );
+        message(0, &buf.freeze())
+    }
+
+    /// Calls `test.Echo/Call` at `path`, returns the status, the message
+    /// and the response.
+    async fn echo(client: &SimpleClient, path: &'static str) -> (String, String, String) {
+        let (_, data, trailers) =
+            call_to(client, path, req_headers(None), string_message("hi")).await;
+        let value = if data.is_empty() {
+            String::new()
+        } else {
+            let mut buf = Bytes::copy_from_slice(&data[5..]);
+            let msg: StringValue = ntex_grpc::Message::read(&mut buf).unwrap();
+            msg.value.to_string()
+        };
+        let get = |name| {
+            trailers
+                .get(name)
+                .map(|v: &HeaderValue| v.to_str().unwrap().to_owned())
+                .unwrap_or_default()
+        };
+        (get(GRPC_STATUS), get(GRPC_MESSAGE), value)
+    }
+
+    /// Asserts the call of `path` fails with a trailers-only response before
+    /// the request body is read.
+    async fn assert_unknown(client: &SimpleClient, path: &'static str, msg: &str) {
+        for eof in [true, false] {
+            let (snd, rcv) = client
+                .send(Method::POST, path.into(), req_headers(None), eof)
+                .await
+                .unwrap();
+            match rcv.recv().await.unwrap().kind {
+                h2::MessageKind::Headers {
+                    pseudo,
+                    headers,
+                    eof,
+                } => {
+                    assert_eq!(pseudo.status, Some(ntex_http::StatusCode::OK));
+                    assert_eq!(headers.get(GRPC_STATUS).unwrap(), "12");
+                    assert_eq!(headers.get(GRPC_MESSAGE).unwrap(), msg);
+                    assert!(eof);
+                }
+                kind => panic!("{kind:?}"),
+            }
+            if !eof {
+                // the stream is reset, the body is not read
+                ntex::time::sleep(ntex::time::Millis(50)).await;
+                assert!(
+                    snd.send_payload(Bytes::from_static(b"x"), true)
+                        .await
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[ntex::test]
+    async fn services() {
+        let server = GrpcServer::new(EchoServer).service(Svc);
+        let client = connect(server, false);
+
+        let res = echo(&client, "/test.Echo/Call").await;
+        assert_eq!(res, ("0".into(), String::new(), "test.Echo hi".into()));
+
+        let (_, data, trailers) = call_to(
+            &client,
+            "/test.Svc/Service",
+            req_headers(None),
+            message(0, b""),
+        )
+        .await;
+        assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+        assert_eq!(data, message(0, b"test.Svc"));
+
+        // an unknown method of a known service
+        let res = echo(&client, "/test.Echo/Other").await;
+        assert_eq!(
+            res,
+            (
+                "12".into(),
+                "Service method is not found: Other".into(),
+                String::new()
+            )
+        );
+
+        assert_unknown(
+            &client,
+            "/test.Other/Call",
+            "grpc: unknown service test.Other",
+        )
+        .await;
+        assert_unknown(&client, "//Call", "grpc: unknown service ").await;
+
+        // the connection still works
+        let res = echo(&client, "/test.Echo/Call").await;
+        assert_eq!(res.0, "0");
+    }
+
+    #[ntex::test]
+    async fn default_service() {
+        // the added services take their calls from the default service
+        let server = GrpcServer::new(EchoServer).default_service(handler());
+        let client = connect(server, false);
+
+        let res = echo(&client, "/test.Echo/Call").await;
+        assert_eq!(res, ("0".into(), String::new(), "test.Echo hi".into()));
+
+        for (path, name) in [
+            ("/test.Other/Service", &b"test.Other"[..]),
+            ("//Service", &b""[..]),
+        ] {
+            let (_, data, trailers) =
+                call_to(&client, path, req_headers(None), message(0, b"")).await;
+            assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+            assert_eq!(data, message(0, name));
+        }
+    }
+
+    #[ntex::test]
+    async fn server_checks_service() {
+        // `#[server]` takes the calls of its own service only
+        let server = GrpcServer::new(Svc).default_service(EchoServer);
+        let client = connect(server, false);
+        let res = echo(&client, "/test.Other/Call").await;
+        assert_eq!(
+            res,
+            (
+                "12".into(),
+                "Service is not found: test.Other".into(),
+                String::new()
+            )
+        );
+
+        let res = echo(&client, "/test.Echo/Call").await;
+        assert_eq!(res, ("0".into(), String::new(), "test.Echo hi".into()));
+    }
+
+    #[ntex::test]
+    async fn init_error() {
+        let server = GrpcServer::new(EchoServer).service_named(
+            "test.Svc",
+            fn_factory(async |&()| {
+                if true {
+                    return Err(std::io::Error::other("init failed"));
+                }
+                Ok(fn_service(handle))
+            }),
+        );
+        let (_cli, srv) = IoTest::create();
+        let srv = Io::new(srv, SharedCfg::new("SRV").build());
+        let err = Pipeline::new((), server).call(srv).await.unwrap_err();
+        assert_eq!(err.to_string(), "init failed");
+    }
+
+    #[test]
+    fn named_service() {
+        assert_eq!(<EchoServer as NamedService>::NAME, "test.Echo");
+    }
+
+    #[test]
+    #[should_panic(expected = "grpc service test.Echo is already added")]
+    fn duplicate_service() {
+        let _ = GrpcServer::new(EchoServer).service_named("test.Echo", handler());
+    }
+
+    #[test]
+    #[should_panic(expected = "grpc default service is already set")]
+    fn duplicate_default_service() {
+        let _ = GrpcServer::new(EchoServer)
+            .default_service(handler())
+            .default_service(handler());
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid grpc service name")]
+    fn empty_service_name() {
+        let _ = GrpcServer::new(EchoServer).service_named("", handler());
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid grpc service name")]
+    fn service_name_with_slash() {
+        let _ = GrpcServer::new(EchoServer).service_named("test/Svc", handler());
+    }
 }
 
 #[cfg(feature = "compression")]

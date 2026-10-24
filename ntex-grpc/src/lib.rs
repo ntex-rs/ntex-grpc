@@ -39,7 +39,7 @@ pub mod client;
 /// gRPC server.
 ///
 /// [`GrpcServer`](server::GrpcServer) accepts HTTP/2 connections and passes
-/// each call to a service. The `#[server]` attribute writes that service for
+/// each call to the service added for its service name. The `#[server]` attribute writes that service for
 /// you from a plain `impl` block, the rest of this module is what the
 /// generated code works with.
 pub mod server;

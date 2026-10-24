@@ -10,6 +10,17 @@ pub use self::error::{MethodResult, ServerError};
 pub use self::service::GrpcServer;
 pub use crate::GrpcStatus;
 
+/// A service that serves one gRPC service, such as `helloworld.Greeter`.
+///
+/// [`GrpcServer::new()`] and [`GrpcServer::service()`] pass it the calls for
+/// [`NAME`](Self::NAME).
+/// `#[server]` implements it for the type it is used on, implement it for
+/// the factory by hand otherwise.
+pub trait NamedService {
+    /// Full service name with the package, e.g. `helloworld.Greeter`.
+    const NAME: &'static str;
+}
+
 /// A call as [`GrpcServer`] receives it, before the message is decoded.
 ///
 /// The service given to `GrpcServer` handles these and answers with a
@@ -18,6 +29,8 @@ pub use crate::GrpcStatus;
 /// the raw bytes.
 #[derive(Debug)]
 pub struct ServerRequest {
+    /// Full service name with the package, e.g. `helloworld.Greeter`.
+    pub service: ByteString,
     /// Method name without the service, e.g. `SayHello`.
     pub name: ByteString,
     /// The encoded request message, without the 5-byte message prefix.
@@ -77,10 +90,12 @@ pub trait FromRequest<T> {
 
 /// Decoded request message, with the method name and headers.
 ///
-/// Derefs to the message. Message fields called `name`, `headers` or
-/// `message` are hidden behind the fields below, reach them through
+/// Derefs to the message. Message fields called `service`, `name`,
+/// `headers` or `message` are hidden behind the fields below, reach them through
 /// `req.message`.
 pub struct Request<T> {
+    /// Full service name with the package, e.g. `helloworld.Greeter`.
+    pub service: ByteString,
     /// Method name, e.g. `SayHello`.
     pub name: ByteString,
     /// Request headers.
@@ -189,6 +204,7 @@ mod tests {
     #[test]
     fn server_request_debug() {
         let req = ServerRequest {
+            service: ByteString::from_static("helloworld.Greeter"),
             name: ByteString::from_static("SayHello"),
             payload: Bytes::from_static(b"x"),
             headers: HeaderMap::new(),
@@ -203,6 +219,7 @@ mod tests {
             HeaderValue::from_static("1"),
         );
         Request {
+            service: ByteString::from_static("helloworld.Greeter"),
             name: ByteString::from_static("SayHello"),
             headers,
             message,

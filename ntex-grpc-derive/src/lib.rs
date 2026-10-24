@@ -42,6 +42,7 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 use ::ntex_grpc::MethodDef;
                 let req = ::ntex_grpc::server::Request {
                     message: method.decode(&mut req.payload)?,
+                    service: req.service,
                     name: req.name,
                     headers: req.headers
                 };
@@ -62,6 +63,10 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         mod #modname {
             use super::*;
 
+            impl ::ntex_grpc::server::NamedService for #ty {
+                const NAME: &'static str = <#srvpath as ::ntex_grpc::ServiceDef>::NAME;
+            }
+
             impl<St> ::ntex_grpc::Service<St, ::ntex_grpc::server::ServerRequest> for #ty {
                 type Res = ::ntex_grpc::server::ServerResponse;
                 type Error = ::ntex_grpc::server::ServerError;
@@ -69,6 +74,13 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 async fn call(&self, mut req: ::ntex_grpc::server::ServerRequest, _: ::ntex_grpc::Ctx<'_, Self, St>) -> Result<Self::Res, Self::Error> {
                     use ::ntex_grpc::{ServiceDef, MethodDef};
 
+                    if &*req.service != <#srvpath as ServiceDef>::NAME {
+                        return Err(::ntex_grpc::server::ServerError::new(
+                            ::ntex_grpc::GrpcStatus::Unimplemented,
+                            ::ntex_grpc::encode_grpc_message(&format!("Service is not found: {0}", req.service)),
+                            None
+                        ));
+                    }
                     match #srvpath::method_by_name(&req.name) {
                         #(#methods)*
                         Some(_) => Err(::ntex_grpc::server::ServerError::new(

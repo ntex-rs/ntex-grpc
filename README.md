@@ -191,7 +191,7 @@ async fn main() -> std::io::Result<()> {
 
 A method can take `server::Request<HelloRequest>` instead of the bare message
 when it needs the request headers. `Request` derefs to the message, but its own
-`name`, `headers` and `message` fields come first, so a message field with one
+`service`, `name`, `headers` and `message` fields come first, so a message field with one
 of these names has to be read as `req.message.name`.
 
 A method can also return `Result<HelloReply, E>` if `E: Into<HelloReply>`. The
@@ -199,7 +199,7 @@ error is turned into a reply, so the client still sees `grpc-status: 0`.
 
 The server sends a gRPC status itself in these cases:
 
-* `UNIMPLEMENTED` for an unknown method, a path that is not
+* `UNIMPLEMENTED` for an unknown service or method, a path that is not
   `/service/method` or an rpc that has no `#[method]`;
 * `INVALID_ARGUMENT` if the request message doesn't decode;
 * `INVALID_ARGUMENT` with HTTP status 415 if the request `content-type` is not
@@ -207,6 +207,27 @@ The server sends a gRPC status itself in these cases:
 * `INTERNAL` with HTTP status 405 if the request method is not `POST`;
 * `DEADLINE_EXCEEDED` if the client's `grpc-timeout` runs out before the method
   finishes.
+
+### Multiple services
+
+`GrpcServer::new()` takes the calls for one service, add more services on the
+same port with `service()`. Calls are routed by the service name in the
+request path, so `/helloworld.Greeter/SayHello` goes to the service added for
+`helloworld.Greeter`:
+
+```rust
+server::GrpcServer::new(GreeterServer)
+    .service(CalculatorServer)
+```
+
+`#[server]` implements `server::NamedService` with the full service name from
+the `.proto` file. For a hand-written service use
+`service_named("helloworld.Greeter", factory)`. A call to a service that is
+not added fails with `UNIMPLEMENTED` before the request body is read, unless
+`default_service(factory)` is set, then it takes these calls.
+
+The server creates an instance of every service for each connection, the
+connection fails if one of them cannot be created.
 
 `GrpcServer` is an ntex service that takes an I/O stream, so TLS works the
 usual ntex way. Chain a TLS acceptor that negotiates `h2` with ALPN in front of

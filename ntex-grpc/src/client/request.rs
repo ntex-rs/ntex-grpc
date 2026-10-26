@@ -257,7 +257,7 @@ bitflags::bitflags! {
 #[allow(dead_code)]
 impl RequestContextBuilder {
     /// Create new `RequestContext` instance
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             err: None,
             headers: HeaderMap::new(),
@@ -270,7 +270,7 @@ impl RequestContextBuilder {
         }
     }
 
-    fn build<S>(self, request_state: &S) -> RequestContext<'_, S> {
+    pub(crate) fn build<S>(self, request_state: &S) -> RequestContext<'_, S> {
         let Self {
             err,
             headers,

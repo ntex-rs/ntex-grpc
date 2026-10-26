@@ -7,10 +7,14 @@ use ntex_error::ErrorDiagnostic;
 use ntex_h2::{OperationError, StreamError, client};
 use ntex_http::{HeaderMap, StatusCode, error::Error as HttpError, header};
 
-mod request;
-mod transport;
+pub(crate) mod request;
+mod stream;
+pub(crate) mod transport;
 
 pub use self::request::{Request, RequestContext, Response};
+pub use self::stream::{
+    Bidi, ClientStreaming, ServerStreaming, StreamCall, StreamRequest, StreamTransport,
+};
 
 use crate::{consts, encoding::DecodeError, service::MethodDef, status::GrpcStatus, utils};
 

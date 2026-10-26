@@ -237,6 +237,105 @@ connection fails if one of them cannot be created.
 usual ntex way. Chain a TLS acceptor that negotiates `h2` with ALPN in front of
 it.
 
+## Streaming
+
+Client, server and bidirectional streaming rpcs use two types that are the
+same on the client and on the server. `SendStream<T>` sends messages with
+`send(&msg).await` and ends with `close()`, dropping every clone of it ends
+the stream too. `RecvStream<T>` gives the messages with `recv().await`, it
+returns `None` at the end of the stream.
+
+The generated client opens a bidi call with `open()`:
+
+```rust
+let (tx, mut rx) = client.route_chat().open().await?;
+tx.send(&note).await?;
+tx.close();
+while let Some(msg) = rx.recv().await {
+    println!("{:?}", msg?);
+}
+// the status and the trailers, once the stream has ended
+println!("{:?} {:?}", rx.status(), rx.trailers());
+```
+
+A server streaming method takes the request message and `open()` returns the
+`RecvStream` of the response. A client streaming method takes a `SendStream`
+and `send()` returns the response, so the messages are sent while `send()` is
+polled:
+
+```rust
+let tx = SendStream::new();
+let (res, sent) = ntex::util::join(client.record_route(&tx).send(), async {
+    for point in points {
+        tx.send(&point).await?;
+    }
+    tx.close();
+    Ok::<_, StreamError>(())
+})
+.await;
+```
+
+`header()`, `timeout()`, `compression()` and the size limits are set on the
+request before `open()` or `send()`, like for a unary call.
+
+In a `#[server]` service the kind of a method comes from its arguments, it
+has to match the rpc in the `.proto` file or the service doesn't build:
+
+```rust
+#[server(crate::route::RouteGuide)]
+impl RouteGuideServer {
+    // server streaming
+    #[method(ListFeatures)]
+    async fn list_features(&self, req: Rectangle, tx: SendStream<Feature>) {
+        for feature in self.features(&req) {
+            if tx.send(&feature).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    // client streaming
+    #[method(RecordRoute)]
+    async fn record_route(&self, mut rx: RecvStream<Point>) -> RouteSummary {
+        let mut summary = RouteSummary::default();
+        while let Some(Ok(point)) = rx.recv().await {
+            summary.point_count += 1;
+        }
+        summary
+    }
+
+    // bidirectional streaming
+    #[method(RouteChat)]
+    async fn route_chat(
+        &self,
+        mut rx: RecvStream<RouteNote>,
+        tx: SendStream<RouteNote>,
+    ) -> Result<(), ServerError> {
+        while let Some(note) = rx.recv().await {
+            tx.send(&note?).await?;
+        }
+        Ok(())
+    }
+}
+```
+
+A server streaming method can take `server::Request<T>` instead of the
+message. Server and bidi methods return `()` or `Result<(), E>` with
+`E: Into<ServerError>`, an error ends the call with its status. `rx.headers()`
+has the request headers, `tx.header()` adds a response header before the
+first message and `tx.trailer()` adds a trailer.
+
+* The method future is dropped when the client cancels the call or the
+  `grpc-timeout` runs out, the timeout is checked while the method polls its
+  streams.
+* `SendStream::send()` waits for flow-control capacity, so a slow reader
+  holds up the sender, `ready()` doesn't wait for it. Dropping the `send()`
+  future while the message is written cancels the call.
+* Streaming calls go only to `#[server]` services, a service added with
+  `service_named()` or `default_service()` gets only unary calls.
+* Streaming messages are encoded and decoded with `Message`, the
+  `MethodDef::encode()` and `decode()` overrides are used only for unary calls.
+
 ## Custom field types
 
 Any protobuf field can be mapped to your own Rust type. Implement
@@ -297,8 +396,6 @@ either encoding.
 
 ## Limitations
 
-* Only unary calls are supported. Client, server and bidirectional streaming
-  rpcs are not.
 * Unknown fields are skipped when a message is decoded. A message that is
   decoded and encoded again drops fields that are not in the generated code,
   for example fields added in a newer version of the proto file.

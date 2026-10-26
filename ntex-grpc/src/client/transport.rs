@@ -4,7 +4,7 @@ use std::{convert::TryFrom, future::Future, str::FromStr};
 use ntex_bytes::{Buf, BufMut, BytePages, ByteString, Bytes};
 use ntex_error::Error;
 use ntex_h2::{self as h2, ConnectionError, OperationError, StreamError, frame::Reason};
-use ntex_http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use ntex_http::{HeaderMap, HeaderValue, Method, StatusCode, error::Error as HttpError, header};
 use ntex_util::time;
 
 use super::{CallFailure, Cause, Client, ClientError, NotGrpc, Transport};
@@ -37,13 +37,7 @@ impl<T: MethodDef, St> Transport<T, St> for h2::client::Client {
         ctx: &mut RequestContext<'_, St>,
     ) -> Result<Response<T>, Self::Error> {
         with_deadline(ctx.get_timeout(), async |deadline| {
-            let client = self.client().await.map_err(|e| {
-                e.map(|e| ClientError::Connection {
-                    request_sent: false,
-                    failure: CallFailure::new(GrpcStatus::Unavailable, error_text(&e))
-                        .with_cause(e),
-                })
-            })?;
+            let client = self.client().await.map_err(|e| e.map(connect_error))?;
             send_request(&client, val, ctx, deadline).await
         })
         .await
@@ -72,7 +66,7 @@ impl<T: MethodDef, St> Transport<T, St> for h2::client::SimpleClient {
 /// timeout has already run out, the request is not sent then.
 ///
 /// `f` gets the deadline, the time the timeout runs out.
-async fn with_deadline<R, F>(
+pub(crate) async fn with_deadline<R, F>(
     timeout: Option<Duration>,
     f: impl FnOnce(Option<Instant>) -> F,
 ) -> Result<R, Error<ClientError>>
@@ -81,43 +75,42 @@ where
 {
     if let Some(timeout) = timeout {
         if timeout.is_zero() {
-            return Err(deadline_exceeded("Request timeout is zero"));
+            return Err(deadline_exceeded(TIMEOUT_ZERO, HeaderMap::new()));
         }
         let deadline = Instant::now().checked_add(timeout);
         time::timeout(timeout, f(deadline))
             .await
-            .unwrap_or_else(|()| Err(deadline_exceeded("Request timeout ran out")))
+            .unwrap_or_else(|()| Err(deadline_exceeded(TIMEOUT_RAN_OUT, HeaderMap::new())))
     } else {
         f(None).await
     }
 }
 
-fn deadline_exceeded(msg: &'static str) -> Error<ClientError> {
-    Error::from(ClientError::DeadlineExceeded(CallFailure::new(
-        GrpcStatus::DeadlineExceeded,
-        msg,
-    )))
+/// The request timeout ran out, `hdrs` are the response headers received
+/// so far.
+pub(crate) fn deadline_exceeded(msg: &'static str, hdrs: HeaderMap) -> Error<ClientError> {
+    Error::from(ClientError::DeadlineExceeded(
+        CallFailure::new(GrpcStatus::DeadlineExceeded, msg).with_headers(hdrs),
+    ))
 }
 
-#[allow(clippy::too_many_lines)]
-async fn send_request<T: MethodDef, St>(
-    client: &h2::client::SimpleClient,
-    val: &T::Input,
-    ctx: &mut RequestContext<'_, St>,
-    deadline: Option<Instant>,
-) -> Result<Response<T>, Error<ClientError>> {
-    if let Some(err) = ctx.take_error() {
-        let failure = CallFailure::new(GrpcStatus::Internal, err.to_string()).with_cause(err);
-        return Err(
-            Error::from(ClientError::InvalidRequest(failure)).with_service(client.service())
-        );
+/// Maps a failure to get a connection, the request was not sent.
+pub(crate) fn connect_error(err: h2::client::ClientError) -> ClientError {
+    ClientError::Connection {
+        request_sent: false,
+        failure: CallFailure::new(GrpcStatus::Unavailable, error_text(&err)).with_cause(err),
     }
+}
 
-    let buf = encode_message(val, ctx)
-        .await
-        .map_err(|e| Error::from(e).with_service(client.service()))?;
-    let req_size = buf.len();
+/// Maps an invalid header set for the call, see
+/// [`RequestContext::take_error()`].
+pub(crate) fn request_error(err: HttpError) -> ClientError {
+    let failure = CallFailure::new(GrpcStatus::Internal, err.to_string()).with_cause(err);
+    ClientError::InvalidRequest(failure)
+}
 
+/// The headers of a request: the grpc ones and the ones set for the call.
+pub(crate) fn request_headers<St>(ctx: &RequestContext<'_, St>) -> HeaderMap {
     let mut hdrs = HeaderMap::new();
     hdrs.append(header::CONTENT_TYPE, consts::HDRV_CT_GRPC);
     hdrs.append(header::USER_AGENT, consts::HDRV_USER_AGENT);
@@ -134,6 +127,26 @@ async fn send_request<T: MethodDef, St>(
     for (key, val) in ctx.headers() {
         hdrs.append(key.clone(), val.clone());
     }
+    hdrs
+}
+
+#[allow(clippy::too_many_lines)]
+async fn send_request<T: MethodDef, St>(
+    client: &h2::client::SimpleClient,
+    val: &T::Input,
+    ctx: &mut RequestContext<'_, St>,
+    deadline: Option<Instant>,
+) -> Result<Response<T>, Error<ClientError>> {
+    if let Some(err) = ctx.take_error() {
+        return Err(Error::from(request_error(err)).with_service(client.service()));
+    }
+
+    let buf = encode_message(val, ctx)
+        .await
+        .map_err(|e| Error::from(e).with_service(client.service()))?;
+    let req_size = buf.len();
+
+    let hdrs = request_headers(ctx);
 
     // send request
     let (snd_stream, rcv_stream) = client
@@ -253,7 +266,7 @@ async fn send_request<T: MethodDef, St>(
             // a message in an unknown encoding is an internal error
             let mut block = match utils::read_message(
                 flag,
-                &hdrs,
+                hdrs.get(consts::GRPC_ENCODING).cloned(),
                 block,
                 max_size,
                 GrpcStatus::Internal,
@@ -287,14 +300,16 @@ async fn send_request<T: MethodDef, St>(
 
 /// The most of a response body that is not a grpc one, kept for the error.
 const MAX_OTHER_BODY: usize = 64 * 1024;
-const NO_TRAILERS: &str = "Response ended without trailers";
-const NO_GRPC_STATUS: &str = "Response trailers have no grpc-status";
-const NO_MESSAGE: &str = "Response has no message";
-const TRUNCATED: &str = "Response message is truncated";
-const STREAM_CLOSED: &str = "Stream closed before the response ended";
-const EXTRA_DATA: &str = "cardinality violation: expected <EOF> for non server-streaming RPCs, but received another message";
+const TIMEOUT_ZERO: &str = "Request timeout is zero";
+pub(crate) const TIMEOUT_RAN_OUT: &str = "Request timeout ran out";
+pub(crate) const NO_TRAILERS: &str = "Response ended without trailers";
+pub(crate) const NO_GRPC_STATUS: &str = "Response trailers have no grpc-status";
+pub(crate) const NO_MESSAGE: &str = "Response has no message";
+pub(crate) const TRUNCATED: &str = "Response message is truncated";
+pub(crate) const STREAM_CLOSED: &str = "Stream closed before the response ended";
+pub(crate) const EXTRA_DATA: &str = "cardinality violation: expected <EOF> for non server-streaming RPCs, but received another message";
 
-fn invalid_response(
+pub(crate) fn invalid_response(
     status: GrpcStatus,
     msg: impl Into<ByteString>,
     hdrs: HeaderMap,
@@ -307,7 +322,7 @@ fn invalid_response(
 /// Maps a response that ends with its headers.
 ///
 /// A status the server sent wins, then a response that is not a grpc one.
-fn trailers_only(status: Option<StatusCode>, hdrs: HeaderMap) -> ClientError {
+pub(crate) fn trailers_only(status: Option<StatusCode>, hdrs: HeaderMap) -> ClientError {
     let (code, msg) = match check_grpc_status(&hdrs) {
         Some(Ok(GrpcStatus::Ok)) if is_grpc(status, &hdrs) => {
             (GrpcStatus::Internal, NO_MESSAGE.into())
@@ -327,7 +342,7 @@ fn trailers_only(status: Option<StatusCode>, hdrs: HeaderMap) -> ClientError {
 /// `REFUSED_STREAM` means the server did not process the request. A
 /// `CANCEL` once the deadline has passed means the server stopped the call
 /// because of the timeout.
-fn reset_error(
+pub(crate) fn reset_error(
     reason: Reason,
     hdrs: HeaderMap,
     deadline: Option<Instant>,
@@ -350,7 +365,11 @@ fn reset_error(
 }
 
 /// Maps a failed stream, the connection is still up.
-fn stream_error(err: StreamError, hdrs: HeaderMap, deadline: Option<Instant>) -> ClientError {
+pub(crate) fn stream_error(
+    err: StreamError,
+    hdrs: HeaderMap,
+    deadline: Option<Instant>,
+) -> ClientError {
     if let StreamError::Reset(reason) = err {
         return reset_error(reason, hdrs, deadline, err);
     }
@@ -367,7 +386,7 @@ fn stream_error(err: StreamError, hdrs: HeaderMap, deadline: Option<Instant>) ->
 ///
 /// `sent` is whether the request was handed to the connection. A GOAWAY
 /// fails only the streams the server did not process.
-fn operation_error(
+pub(crate) fn operation_error(
     err: Error<OperationError>,
     sent: bool,
     hdrs: HeaderMap,
@@ -421,12 +440,12 @@ fn error_text(err: &dyn std::error::Error) -> String {
 }
 
 /// The text of a percent-encoded `grpc-message`.
-fn text(val: &HeaderValue) -> ByteString {
+pub(crate) fn text(val: &HeaderValue) -> ByteString {
     ByteString::from(utils::percent_decode(val).into_owned())
 }
 
 /// Whether the response is a grpc one, its body is a grpc message then.
-fn is_grpc(status: Option<StatusCode>, hdrs: &HeaderMap) -> bool {
+pub(crate) fn is_grpc(status: Option<StatusCode>, hdrs: &HeaderMap) -> bool {
     status == Some(StatusCode::OK)
         && hdrs
             .get(header::CONTENT_TYPE)
@@ -442,7 +461,11 @@ fn message_limit(status: Option<StatusCode>, hdrs: &HeaderMap, max_size: usize) 
 /// Keeps at most [`MAX_OTHER_BODY`] bytes of a response body that is not a
 /// grpc one, e.g. an error page from a proxy. Returns true once the limit is
 /// reached, the rest of the body is dropped.
-fn limit_other_body(status: Option<StatusCode>, hdrs: &HeaderMap, payload: &mut Data) -> bool {
+pub(crate) fn limit_other_body(
+    status: Option<StatusCode>,
+    hdrs: &HeaderMap,
+    payload: &mut Data,
+) -> bool {
     if payload.as_slice().len() <= MAX_OTHER_BODY || is_grpc(status, hdrs) {
         return false;
     }
@@ -480,7 +503,7 @@ fn check_message(
 ///
 /// A message is sent uncompressed if it is small or does not get smaller.
 #[cfg_attr(not(feature = "compression"), allow(clippy::unused_async))]
-async fn encode_message<M: Message, St>(
+pub(crate) async fn encode_message<M: Message, St>(
     val: &M,
     ctx: &RequestContext<'_, St>,
 ) -> Result<BytePages, ClientError> {
@@ -529,7 +552,7 @@ fn send_size(len: usize, max_size: usize) -> Result<u32, ClientError> {
 
 /// Reads `grpc-status`, an unknown or invalid code is an error with the
 /// message to report it with `UNKNOWN`.
-fn check_grpc_status(hdrs: &HeaderMap) -> Option<Result<GrpcStatus, ByteString>> {
+pub(crate) fn check_grpc_status(hdrs: &HeaderMap) -> Option<Result<GrpcStatus, ByteString>> {
     let val = hdrs.get(consts::GRPC_STATUS)?;
     Some(
         val.to_str()

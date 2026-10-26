@@ -2,6 +2,26 @@
 
 ## [4.0.0] - Unreleased
 
+* Client, server and bidirectional streaming calls. `SendStream<T>` and
+  `RecvStream<T>` send and receive the messages, the same types on the
+  client and the server. Generated clients return a `StreamRequest`, its
+  `open()` gives the streams of a bidi call, `(SendStream<Req>,
+  RecvStream<Res>)`. Errors of a call are `StreamError::Client` with the
+  same `ClientError` variants as unary calls
+
+* `#[server]` methods are streaming when they take a `RecvStream` or a
+  `SendStream`, a method whose arguments don't match the rpc in the
+  `.proto` file fails to build. Server and bidi methods return `()` or a
+  `Result<(), E>`, see the new `server::StreamResult` trait
+
+* Breaking: `ServerRequest` has a `streams` field with the streams of a
+  streaming call. `NamedService` has an `is_streaming()` method and
+  `MethodDef` has `CLIENT_STREAMING` and `SERVER_STREAMING` consts, all
+  default to unary
+
+* ntex-grpc-codegen generates streaming rpcs as streaming
+  methods, they were generated as unary methods
+
 * `GrpcServer` serves multiple services. `service()` and `service_named()`
   add a service for a service name. Calls are routed by the service name in
   the request path, a call to a service that is not added fails with

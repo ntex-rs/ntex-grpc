@@ -35,11 +35,15 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut methods_path = srvmod;
     methods_path.segments.push(methods_prefix.into());
 
+    let errors = srv.errors.iter().map(syn::Error::to_compile_error);
+
     let mut methods = Vec::new();
-    for (m_name, fn_name, span) in srv.methods {
-        methods.push(quote::quote_spanned! {span=>
-            Some(#methods_path::#m_name(method)) => {
+    let mut streaming = Vec::new();
+    for (m_name, fn_name, kind, span) in srv.methods {
+        let body = match kind {
+            Kind::Unary => quote::quote_spanned! {span=>
                 use ::ntex_grpc::MethodDef;
+                ::ntex_grpc::server::__private::check_kind::<_, false, false>(&method);
                 let req = ::ntex_grpc::server::Request {
                     message: method.decode(&mut req.payload)?,
                     service: req.service,
@@ -55,9 +59,70 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 method.encode(response.message, &mut buf);
 
                 Ok(::ntex_grpc::server::ServerResponse::with_headers(buf, response.headers))
+            },
+            Kind::ServerStreaming => quote::quote_spanned! {span=>
+                ::ntex_grpc::server::__private::check_kind::<_, false, true>(&method);
+                let mut streams = ::ntex_grpc::server::__private::streams(&mut req)?;
+                let rx = ::ntex_grpc::server::__private::recv(&method, &mut streams);
+                let tx = ::ntex_grpc::server::__private::send(&method, &mut streams);
+                let req = ::ntex_grpc::server::Request {
+                    message: rx.single().await?,
+                    service: req.service,
+                    name: req.name,
+                    headers: req.headers
+                };
+
+                let result = #ty::#fn_name(self, ::ntex_grpc::server::FromRequest::from(req), tx).await;
+                ::ntex_grpc::server::StreamResult::into_result(result)?;
+                Ok(::ntex_grpc::server::ServerResponse::new(::ntex_grpc::BytePages::default()))
+            },
+            Kind::ClientStreaming => quote::quote_spanned! {span=>
+                use ::ntex_grpc::MethodDef;
+                ::ntex_grpc::server::__private::check_kind::<_, true, false>(&method);
+                let mut streams = ::ntex_grpc::server::__private::streams(&mut req)?;
+                let rx = ::ntex_grpc::server::__private::recv(&method, &mut streams);
+                let tx = ::ntex_grpc::server::__private::send(&method, &mut streams);
+
+                let result = #ty::#fn_name(self, rx).await;
+                tx.send(&method.server_result(result)).await?;
+                Ok(::ntex_grpc::server::ServerResponse::new(::ntex_grpc::BytePages::default()))
+            },
+            Kind::Bidi => quote::quote_spanned! {span=>
+                ::ntex_grpc::server::__private::check_kind::<_, true, true>(&method);
+                let mut streams = ::ntex_grpc::server::__private::streams(&mut req)?;
+                let rx = ::ntex_grpc::server::__private::recv(&method, &mut streams);
+                let tx = ::ntex_grpc::server::__private::send(&method, &mut streams);
+
+                let result = #ty::#fn_name(self, rx, tx).await;
+                ::ntex_grpc::server::StreamResult::into_result(result)?;
+                Ok(::ntex_grpc::server::ServerResponse::new(::ntex_grpc::BytePages::default()))
+            },
+        };
+        if kind != Kind::Unary {
+            streaming.push(quote::quote_spanned! {span=>
+                Some(#methods_path::#m_name(_)) => true,
+            });
+        }
+        methods.push(quote::quote_spanned! {span=>
+            Some(#methods_path::#m_name(method)) => {
+                #body
             }
         });
     }
+
+    let is_streaming = if streaming.is_empty() {
+        quote::quote! {}
+    } else {
+        quote::quote! {
+            fn is_streaming(method: &str) -> bool {
+                use ::ntex_grpc::ServiceDef;
+                match #srvpath::method_by_name(method) {
+                    #(#streaming)*
+                    _ => false,
+                }
+            }
+        }
+    };
 
     let service = quote::quote! {
         mod #modname {
@@ -65,6 +130,8 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
             impl ::ntex_grpc::server::NamedService for #ty {
                 const NAME: &'static str = <#srvpath as ::ntex_grpc::ServiceDef>::NAME;
+
+                #is_streaming
             }
 
             impl<St> ::ntex_grpc::Service<St, ::ntex_grpc::server::ServerRequest> for #ty {
@@ -102,6 +169,7 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let tokens = quote::quote! {
         #input
         #service
+        #(#errors)*
     };
     tokens.into()
 }
@@ -113,7 +181,58 @@ struct GrpcService {
     service: syn::Path,
     service_mod: syn::Path,
     service_name: syn::Ident,
-    methods: Vec<(syn::Ident, syn::Ident, proc_macro2::Span)>,
+    methods: Vec<(syn::Ident, syn::Ident, Kind, proc_macro2::Span)>,
+    errors: Vec<syn::Error>,
+}
+
+/// The kind of a method, inferred from its arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// `(req)`
+    Unary,
+    /// `(req, tx: SendStream<_>)`
+    ServerStreaming,
+    /// `(rx: RecvStream<_>)`
+    ClientStreaming,
+    /// `(rx: RecvStream<_>, tx: SendStream<_>)`
+    Bidi,
+}
+
+impl Kind {
+    fn from_sig(sig: &syn::Signature) -> syn::Result<Kind> {
+        let args: Vec<_> = sig
+            .inputs
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::FnArg::Typed(arg) => Some(&*arg.ty),
+                syn::FnArg::Receiver(_) => None,
+            })
+            .collect();
+
+        match args.as_slice() {
+            [rx] if is_type(rx, "RecvStream") => Ok(Kind::ClientStreaming),
+            [req] if !is_type(req, "SendStream") => Ok(Kind::Unary),
+            [rx, tx] if is_type(rx, "RecvStream") && is_type(tx, "SendStream") => Ok(Kind::Bidi),
+            [req, tx] if !is_type(req, "RecvStream") && is_type(tx, "SendStream") => {
+                Ok(Kind::ServerStreaming)
+            }
+            _ => Err(syn::Error::new_spanned(
+                &sig.inputs,
+                "expected method arguments: (req), (req, tx: SendStream<_>), \
+                 (rx: RecvStream<_>) or (rx: RecvStream<_>, tx: SendStream<_>)",
+            )),
+        }
+    }
+}
+
+/// Checks the last segment of a type path, e.g. `ntex_grpc::RecvStream<T>`.
+fn is_type(ty: &syn::Type, name: &str) -> bool {
+    match ty {
+        syn::Type::Path(tp) => tp.path.segments.last().is_some_and(|s| s.ident == name),
+        syn::Type::Paren(ty) => is_type(&ty.elem, name),
+        syn::Type::Group(ty) => is_type(&ty.elem, name),
+        _ => false,
+    }
 }
 
 impl Parse for GrpcService {
@@ -129,6 +248,7 @@ impl Parse for GrpcService {
             service_mod,
             service_name,
             methods: Vec::new(),
+            errors: Vec::new(),
             name: String::new(),
             self_ty: path,
         })
@@ -154,8 +274,13 @@ impl Fold for GrpcService {
                 };
 
                 let _ = m.attrs.remove(idx);
-                self.methods
-                    .push((m_name, m.sig.ident.clone(), m.sig.fn_token.span));
+                match Kind::from_sig(&m.sig) {
+                    Ok(kind) => {
+                        self.methods
+                            .push((m_name, m.sig.ident.clone(), kind, m.sig.fn_token.span))
+                    }
+                    Err(e) => self.errors.push(e),
+                }
                 break;
             }
         }

@@ -68,6 +68,34 @@ impl<T, E: Into<T>> MethodResult<T> for Result<T, E> {
     }
 }
 
+/// Return types a `#[server]` streaming method can have.
+///
+/// A bidirectional or server-streaming method returns `()`, or
+/// `Result<(), E>` where `E: Into<ServerError>`. The error is sent as the
+/// status of the call.
+pub trait StreamResult {
+    /// Turn into the result of the call.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error the call ends with.
+    fn into_result(self) -> Result<(), ServerError>;
+}
+
+impl StreamResult for () {
+    #[inline]
+    fn into_result(self) -> Result<(), ServerError> {
+        Ok(())
+    }
+}
+
+impl<E: Into<ServerError>> StreamResult for Result<(), E> {
+    #[inline]
+    fn into_result(self) -> Result<(), ServerError> {
+        self.map_err(Into::into)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ntex_http::HeaderName;

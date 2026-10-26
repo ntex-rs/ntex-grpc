@@ -3,12 +3,40 @@ use std::{borrow::Cow, fmt::Write, mem};
 use base64::engine::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 use ntex_bytes::{BytePages, Bytes, BytesMut};
-use ntex_http::{HeaderMap, HeaderValue};
+#[cfg(not(feature = "compression"))]
+use ntex_http::HeaderMap;
+use ntex_http::HeaderValue;
 use urly::quoting::{Component, unquote};
 
+use crate::GrpcStatus;
+
+/// Message compression, an uninhabited type without the `compression`
+/// feature so callers do not need their own `cfg`s.
 #[cfg(feature = "compression")]
-use crate::Compression;
-use crate::{GrpcStatus, consts};
+pub(crate) use crate::Compression as Enc;
+
+#[cfg(not(feature = "compression"))]
+#[derive(Copy, Clone, Debug)]
+pub(crate) enum Enc {}
+
+#[cfg(not(feature = "compression"))]
+#[allow(clippy::unused_async)]
+impl Enc {
+    pub(crate) async fn compress(
+        self,
+        _: &mut BytePages,
+    ) -> Result<bool, (GrpcStatus, HeaderValue)> {
+        match self {}
+    }
+
+    pub(crate) fn header(self) -> HeaderValue {
+        match self {}
+    }
+
+    pub(crate) fn of_response(_: &HeaderMap) -> Option<Self> {
+        None
+    }
+}
 
 pub(crate) enum Data {
     Chunk(Bytes),
@@ -98,6 +126,43 @@ pub(crate) fn prepend_prefix(msg: &mut BytePages, compressed: bool, len: u32) {
     msg.prepend(Bytes::copy_from_slice(&[u8::from(compressed), a, b, c, d]));
 }
 
+/// Returns the length prefix of a message, or the error message if the
+/// message must not be sent.
+pub(crate) fn send_size(len: usize, max_size: usize) -> Result<u32, HeaderValue> {
+    let msg = if len > max_size {
+        format!("grpc: trying to send message larger than max ({len} vs. {max_size})")
+    } else if let Ok(len) = u32::try_from(len) {
+        return Ok(len);
+    } else {
+        format!("grpc: message too large ({len} bytes)")
+    };
+    Err(HeaderValue::try_from(msg)
+        .unwrap_or_else(|_| HeaderValue::from_static("grpc: message too large")))
+}
+
+/// Compresses an encoded message if `enc` is set and puts the message prefix
+/// in front of it.
+///
+/// A small message, or one that does not get smaller, is sent uncompressed.
+/// The message must not be larger than `max_size` after compression.
+pub(crate) async fn frame_message(
+    mut msg: BytePages,
+    max_size: usize,
+    enc: Option<Enc>,
+) -> Result<BytePages, (GrpcStatus, HeaderValue)> {
+    let compressed = match enc {
+        Some(enc) => {
+            // the uncompressed message must fit the length prefix too
+            send_size(msg.len(), usize::MAX).map_err(|m| (GrpcStatus::ResourceExhausted, m))?;
+            enc.compress(&mut msg).await?
+        }
+        None => false,
+    };
+    let len = send_size(msg.len(), max_size).map_err(|m| (GrpcStatus::ResourceExhausted, m))?;
+    prepend_prefix(&mut msg, compressed, len);
+    Ok(msg)
+}
+
 /// Encode a binary metadata value.
 ///
 /// gRPC sends values of headers whose name ends with `-bin` as base64,
@@ -170,10 +235,10 @@ enum FlagError {
 }
 
 /// Checks the compressed flag of a message, only identity is supported.
-fn check_compressed_flag(flag: u8, hdrs: &HeaderMap) -> Result<(), FlagError> {
+fn check_compressed_flag(flag: u8, enc: Option<&HeaderValue>) -> Result<(), FlagError> {
     match flag {
         0 => Ok(()),
-        1 => match hdrs.get(consts::GRPC_ENCODING) {
+        1 => match enc {
             Some(enc) if !enc.as_bytes().eq_ignore_ascii_case(b"identity") => Err(
                 FlagError::Unsupported(grpc_message("Unsupported grpc-encoding", enc)),
             ),
@@ -191,27 +256,26 @@ fn check_compressed_flag(flag: u8, hdrs: &HeaderMap) -> Result<(), FlagError> {
 /// Returns the message, decompressed if needed.
 ///
 /// `unsupported` is the status of a message in an encoding we do not
-/// support. The decompressed message must not be larger than `max_size`.
+/// support. `enc` is the `grpc-encoding` header value. The decompressed
+/// message must not be larger than `max_size`.
 #[cfg_attr(not(feature = "compression"), allow(clippy::unused_async))]
 pub(crate) async fn read_message(
     flag: u8,
-    hdrs: &HeaderMap,
+    enc: Option<HeaderValue>,
     block: Bytes,
     max_size: usize,
     unsupported: GrpcStatus,
 ) -> Result<Bytes, (GrpcStatus, HeaderValue)> {
     #[cfg(feature = "compression")]
     if flag == 1
-        && let Some(enc) = hdrs
-            .get(consts::GRPC_ENCODING)
-            .and_then(Compression::from_header)
+        && let Some(enc) = enc.as_ref().and_then(Enc::from_header)
     {
         return enc.decompress(block, max_size).await;
     }
     #[cfg(not(feature = "compression"))]
     let _ = max_size;
 
-    match check_compressed_flag(flag, hdrs) {
+    match check_compressed_flag(flag, enc.as_ref()) {
         Ok(()) => Ok(block),
         Err(FlagError::Unsupported(msg)) => Err((unsupported, msg)),
         Err(FlagError::Invalid(msg)) => Err((GrpcStatus::Internal, msg)),

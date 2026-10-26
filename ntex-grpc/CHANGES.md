@@ -1,6 +1,6 @@
 # Changes
 
-## [3.5.0] - Unreleased
+## [4.0.0] - Unreleased
 
 * `GrpcServer` serves multiple services. `service()` and `service_named()`
   add a service for a service name. Calls are routed by the service name in
@@ -19,6 +19,33 @@
   `UNIMPLEMENTED` "Service is not found", the service name in the path was
   ignored and the call went to the method with the same name. `#[server]`
   implements the new `server::NamedService` trait
+
+* Breaking: `ClientError` is redesigned and `#[non_exhaustive]`. `Status`
+  holds a non-OK status from the server with its trailers, local failures are
+  `InvalidRequest`, `NotProcessed`, `Connection { request_sent }`,
+  `StreamFailed`, `NotGrpc`, `InvalidResponse` and `DeadlineExceeded`. They
+  carry a `CallFailure` with the status, the message, the headers received so
+  far and the underlying error as `cause`, also returned by `source()`.
+  Synthesized messages are no longer inserted into the headers as
+  `grpc-message`
+
+* Breaking: `ClientError::GrpcStatus`, `Http`, `Client`, `Operation`,
+  `Stream`, `Decode` and `UnexpectedEof`, `ClientError::grpc_message()` and
+  the `From` impls are removed. Use `ClientError::status()` and
+  `ClientError::message()`
+
+* Breaking: `DEADLINE_EXCEEDED` from the server is `ClientError::Status`,
+  `ClientError::DeadlineExceeded` is only the client giving up
+
+* Client returns `ClientError::NotProcessed` for `REFUSED_STREAM`, `GOAWAY`
+  and a connection that is closing before the request is sent, the call is
+  safe to retry
+
+* Client returns `ClientError::NotGrpc` for a non-gRPC response, it keeps the
+  HTTP status, the headers and up to 64 KiB of the body
+
+* A headers-only gRPC response without `grpc-status` fails with
+  `InvalidResponse` and `UNKNOWN`, it failed with `UnexpectedEof`
 
 ## [3.4.0] - 2026-10-10
 

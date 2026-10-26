@@ -6,7 +6,9 @@ use ntex::service::{Pipeline, cfg::SharedCfg, fn_service};
 use ntex::testing::IoTest;
 use ntex_bytes::{ByteString, Bytes};
 use ntex_error::Error;
-use ntex_grpc::client::{Client as GrpcClient, ClientError, Request, Response};
+use ntex_grpc::client::{
+    CallFailure, Cause, Client as GrpcClient, ClientError, NotGrpc, Request, Response, Status,
+};
 use ntex_grpc::{GrpcStatus, HashMap, MethodDef, google_types::BytesValue};
 use ntex_grpc::{decode_binary_header, encode_binary_header};
 use ntex_h2::{self as h2, client::SimpleClient, frame::Reason, frame::StreamId};
@@ -678,6 +680,30 @@ async fn send<M: MethodDef<Input = ()>>(
     Request::<_, M>::new(client, &()).send().await
 }
 
+#[track_caller]
+fn status(err: &Error<ClientError>) -> &Status {
+    let ClientError::Status(st) = &**err else {
+        panic!("{err:?}");
+    };
+    st
+}
+
+#[track_caller]
+fn invalid_response(err: &Error<ClientError>) -> &CallFailure {
+    let ClientError::InvalidResponse(f) = &**err else {
+        panic!("{err:?}");
+    };
+    f
+}
+
+#[track_caller]
+fn not_grpc(err: &Error<ClientError>) -> &NotGrpc {
+    let ClientError::NotGrpc(resp) = &**err else {
+        panic!("{err:?}");
+    };
+    resp
+}
+
 #[ntex::test]
 async fn response_size() {
     let client = client();
@@ -695,68 +721,44 @@ async fn response_size() {
 async fn trailers_without_status() {
     let client = client();
     let err = send::<NoStatus>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, trailers, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Unknown);
-    assert_eq!(trailers.get(X_TEST).unwrap(), "trailers");
-    assert_eq!(
-        trailers.get(GRPC_MESSAGE).unwrap(),
-        "Response trailers have no grpc-status"
-    );
-    assert_eq!(body.as_deref(), Some(&b"\0\0\0\0\0"[..]));
+    let f = invalid_response(&err);
+    assert_eq!(f.code, GrpcStatus::Unknown);
+    assert_eq!(f.headers.get(X_TEST).unwrap(), "trailers");
+    assert_eq!(err.message(), "Response trailers have no grpc-status");
 }
 
 #[ntex::test]
 async fn eof_without_trailers() {
     let client = client();
     let err = send::<NoTrailers>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, trailers, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Internal);
-    assert_eq!(trailers.len(), 1);
-    assert_eq!(
-        trailers.get(GRPC_MESSAGE).unwrap(),
-        "Response ended without trailers"
-    );
-    assert_eq!(body.as_deref(), Some(&b"\0\0\0\0\0"[..]));
+    let f = invalid_response(&err);
+    assert_eq!(f.code, GrpcStatus::Internal);
+    // the response headers, there are no trailers
+    assert_eq!(f.headers.get(X_TEST).unwrap(), "headers");
+    assert_eq!(err.message(), "Response ended without trailers");
 }
 
 #[ntex::test]
 async fn invalid_content_type() {
     let client = client();
     let err = send::<Html>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, trailers, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Unknown);
-    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
-    assert_eq!(
-        trailers.get(GRPC_MESSAGE).unwrap(),
-        "Invalid content-type: text/html"
-    );
-    assert_eq!(body.as_deref(), Some(&b"\0\0\0\0\0"[..]));
+    let resp = not_grpc(&err);
+    assert_eq!(resp.http_status, Some(StatusCode::OK));
+    assert_eq!(resp.headers.get(header::CONTENT_TYPE).unwrap(), "text/html");
+    assert_eq!(resp.body, &b"\0\0\0\0\0"[..]);
+    assert_eq!(err.status(), GrpcStatus::Unknown);
+    assert_eq!(err.message(), "Invalid content-type: text/html");
 
     let err = send::<NoContentType>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, trailers, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Unknown);
-    assert_eq!(
-        trailers.get(GRPC_MESSAGE).unwrap(),
-        "Response has no content-type"
-    );
-    assert!(body.is_some());
+    not_grpc(&err);
+    assert_eq!(err.status(), GrpcStatus::Unknown);
+    assert_eq!(err.message(), "Response has no content-type");
 
     // the server's own error status is kept
     let err = send::<HtmlError>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, trailers, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Internal);
-    assert!(trailers.get(GRPC_MESSAGE).is_none());
-    assert!(body.is_none());
+    let st = status(&err);
+    assert_eq!(st.code, GrpcStatus::Internal);
+    assert_eq!(st.message(), "");
 
     // the content-type may carry a suffix and is case-insensitive
     send::<Proto>(&client).await.unwrap();
@@ -766,61 +768,41 @@ async fn invalid_content_type() {
 async fn unknown_grpc_status() {
     let client = client();
 
-    // the server's message is kept
+    // the server's message is in the trailers
     let err = send::<UnknownStatus>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, trailers, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Unknown);
-    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "17");
-    assert_eq!(trailers.get(GRPC_MESSAGE).unwrap(), "boom");
-    assert_eq!(body.as_deref(), Some(&b"\0\0\0\0\0"[..]));
+    let f = invalid_response(&err);
+    assert_eq!(f.code, GrpcStatus::Unknown);
+    assert_eq!(f.headers.get(GRPC_STATUS).unwrap(), "17");
+    assert_eq!(f.headers.get(GRPC_MESSAGE).unwrap(), "boom");
+    assert_eq!(err.message(), "Unknown grpc-status: 17");
 
     let err = send::<BadStatus>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, trailers, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Unknown);
-    assert_eq!(
-        trailers.get(GRPC_MESSAGE).unwrap(),
-        "Unknown grpc-status: abc"
-    );
-    assert_eq!(body.as_deref(), Some(&b"\0\0\0\0\0"[..]));
+    assert_eq!(invalid_response(&err).code, GrpcStatus::Unknown);
+    assert_eq!(err.message(), "Unknown grpc-status: abc");
 
     // headers-only response
     let err = send::<UnknownStatusOnly>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Unknown);
-    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
-    assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), "Unknown grpc-status: 999");
-    assert_eq!(body.as_deref(), Some(&b""[..]));
+    let f = invalid_response(&err);
+    assert_eq!(f.code, GrpcStatus::Unknown);
+    assert_eq!(f.headers.get(X_TEST).unwrap(), "headers");
+    assert_eq!(err.message(), "Unknown grpc-status: 999");
 }
 
 #[ntex::test]
 async fn grpc_message_decoded() {
     let client = client();
     let err = send::<EncodedMessage>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, trailers, _) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::InvalidArgument);
+    let st = status(&err);
+    assert_eq!(st.code, GrpcStatus::InvalidArgument);
     // the trailers keep the raw value
     assert_eq!(
-        trailers.get(GRPC_MESSAGE).unwrap(),
+        st.metadata.get(GRPC_MESSAGE).unwrap(),
         "100%25 bad%0Ainput %E2%82%AC"
     );
-    assert_eq!(err.grpc_message().unwrap(), "100% bad\ninput \u{20ac}");
-
-    // plain synthesized messages read the same
-    let err = send::<BadStatus>(&client).await.unwrap_err();
-    assert_eq!(err.grpc_message().unwrap(), "Unknown grpc-status: abc");
-
-    assert!(
-        ClientError::UnexpectedEof(None, HeaderMap::new())
-            .grpc_message()
-            .is_none()
+    assert_eq!(err.message(), "100% bad\ninput \u{20ac}");
+    assert_eq!(
+        err.to_string(),
+        "Server replied with InvalidArgument: 100% bad\ninput \u{20ac}"
     );
 }
 
@@ -861,85 +843,66 @@ async fn metadata() {
 async fn http_status() {
     let client = client();
     let err = send::<Busy>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Unavailable);
-    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
-    assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), "HTTP status 503");
-    assert_eq!(body.as_deref(), Some(&b"busy"[..]));
+    let resp = not_grpc(&err);
+    assert_eq!(resp.http_status, Some(StatusCode::SERVICE_UNAVAILABLE));
+    assert_eq!(resp.headers.get(X_TEST).unwrap(), "headers");
+    assert_eq!(resp.body, &b"busy"[..]);
+    assert_eq!(err.status(), GrpcStatus::Unavailable);
+    assert_eq!(err.message(), "HTTP status 503");
 
     let err = send::<Missing>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Unimplemented);
-    assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), "HTTP status 404");
-    assert_eq!(body.as_deref(), Some(&b""[..]));
+    assert!(not_grpc(&err).body.is_empty());
+    assert_eq!(err.status(), GrpcStatus::Unimplemented);
+    assert_eq!(err.message(), "HTTP status 404");
 
     // only 200 is accepted
-    fn assert_unknown(err: &Error<ClientError>, code: u16) {
-        let ClientError::GrpcStatus(status, hdrs, _) = &**err else {
-            panic!("{err:?}");
-        };
-        assert_eq!(*status, GrpcStatus::Unknown);
-        assert_eq!(
-            hdrs.get(GRPC_MESSAGE).unwrap(),
-            &format!("HTTP status {code}")
-        );
+    for (err, code) in [
+        (send::<Accepted>(&client).await.unwrap_err(), 202),
+        (send::<NoContent>(&client).await.unwrap_err(), 204),
+    ] {
+        not_grpc(&err);
+        assert_eq!(err.status(), GrpcStatus::Unknown);
+        assert_eq!(err.message(), format!("HTTP status {code}"));
     }
-    assert_unknown(&send::<Accepted>(&client).await.unwrap_err(), 202);
-    assert_unknown(&send::<NoContent>(&client).await.unwrap_err(), 204);
 
     // grpc-status wins over the http status
     let err = send::<ProxyError>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::ResourceExhausted);
-    assert!(hdrs.get(GRPC_MESSAGE).is_none());
-    assert!(body.is_none());
+    let st = status(&err);
+    assert_eq!(st.code, GrpcStatus::ResourceExhausted);
+    assert_eq!(st.message(), "");
 }
 
 #[ntex::test]
 async fn compressed_flag() {
     let client = client();
-    for (err, msg, body) in [
+    for (err, msg) in [
         (
             send::<Compressed>(&client).await.unwrap_err(),
             "Compressed message without grpc-encoding",
-            &b"\x01\0\0\0\0"[..],
         ),
         (
             send::<Snappy>(&client).await.unwrap_err(),
             "Unsupported grpc-encoding: snappy",
-            &b"\x01\0\0\0\0"[..],
         ),
         #[cfg(not(feature = "compression"))]
         (
             send::<Gzip>(&client).await.unwrap_err(),
             "Unsupported grpc-encoding: gzip",
-            &b"\x01\0\0\0\0"[..],
         ),
         #[cfg(feature = "compression")]
         (
             send::<Gzip>(&client).await.unwrap_err(),
             "grpc: failed to read decompressed data: unexpected end of file",
-            &b"\x01\0\0\0\0"[..],
         ),
         (
             send::<BadFlag>(&client).await.unwrap_err(),
             "Invalid compressed flag 2",
-            &b"\x02\0\0\0\0"[..],
         ),
     ] {
-        let ClientError::GrpcStatus(status, trailers, data) = &*err else {
-            panic!("{err:?}");
-        };
-        assert_eq!(*status, GrpcStatus::Internal);
-        assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
-        assert_eq!(trailers.get(GRPC_MESSAGE).unwrap(), msg);
-        assert_eq!(data.as_deref(), Some(body));
+        let f = invalid_response(&err);
+        assert_eq!(f.code, GrpcStatus::Internal);
+        assert_eq!(f.headers.get(GRPC_STATUS).unwrap(), "0");
+        assert_eq!(err.message(), msg);
     }
 }
 
@@ -947,20 +910,18 @@ async fn compressed_flag() {
 async fn short_body() {
     let client = client();
     let err = send::<Short>(&client).await.unwrap_err();
-    assert!(
-        matches!(*err, ClientError::UnexpectedEof(Some(StatusCode::OK), _)),
-        "{err:?}"
-    );
+    assert_eq!(invalid_response(&err).code, GrpcStatus::Internal);
+    assert_eq!(err.message(), "Response has no message");
 }
 
 #[ntex::test]
 async fn deadline_headers() {
     let client = client();
     let err = send::<Deadline>(&client).await.unwrap_err();
-    let ClientError::DeadlineExceeded(ref hdrs) = *err else {
-        panic!("{err:?}")
-    };
-    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
+    // the server's status, not a local timeout
+    let st = status(&err);
+    assert_eq!(st.code, GrpcStatus::DeadlineExceeded);
+    assert_eq!(st.metadata.get(X_TEST).unwrap(), "headers");
 }
 
 #[ntex::test]
@@ -972,10 +933,12 @@ async fn client_timeout() {
         .await
         .expect("the client must stop waiting by itself")
         .unwrap_err();
-    let ClientError::DeadlineExceeded(ref hdrs) = *err else {
+    let ClientError::DeadlineExceeded(ref f) = *err else {
         panic!("{err:?}")
     };
-    assert!(hdrs.is_empty());
+    assert!(f.headers.is_empty());
+    assert_eq!(err.status(), GrpcStatus::DeadlineExceeded);
+    assert_eq!(err.message(), "Request timeout ran out");
 
     // the connection stays usable, the server sees the stream reset
     let res = send::<Message>(&client).await.unwrap();
@@ -986,29 +949,20 @@ async fn client_timeout() {
 #[ntex::test]
 async fn stream_reset() {
     let client = client();
+    // the server did not process the request
     let err = send::<Refused>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Unavailable);
-    assert_eq!(
-        hdrs.get(GRPC_MESSAGE).unwrap(),
-        "Stream reset with REFUSED_STREAM"
-    );
-    assert_eq!(body.as_deref(), Some(&b""[..]));
+    assert!(matches!(*err, ClientError::NotProcessed(_)), "{err:?}");
+    assert_eq!(err.status(), GrpcStatus::Unavailable);
+    assert_eq!(err.message(), "Stream reset with REFUSED_STREAM");
 
-    // the headers and the payload received before the reset are kept
+    // the headers received before the reset are kept
     let err = send::<ResetAfterHeaders>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
+    let ClientError::StreamFailed(ref f) = *err else {
         panic!("{err:?}");
     };
-    assert_eq!(*status, GrpcStatus::ResourceExhausted);
-    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
-    assert_eq!(
-        hdrs.get(GRPC_MESSAGE).unwrap(),
-        "Stream reset with ENHANCE_YOUR_CALM"
-    );
-    assert_eq!(body.as_deref(), Some(&b"\0\0"[..]));
+    assert_eq!(f.code, GrpcStatus::ResourceExhausted);
+    assert_eq!(f.headers.get(X_TEST).unwrap(), "headers");
+    assert_eq!(err.message(), "Stream reset with ENHANCE_YOUR_CALM");
 
     // `CANCEL` before the deadline is `CANCELLED`, also with a timeout
     for timeout in [None, Some(Duration::from_secs(60))] {
@@ -1017,10 +971,8 @@ async fn stream_reset() {
             req.timeout(timeout);
         }
         let err = req.send().await.unwrap_err();
-        let ClientError::GrpcStatus(status, ..) = &*err else {
-            panic!("{err:?}");
-        };
-        assert_eq!(*status, GrpcStatus::Cancelled);
+        assert!(matches!(*err, ClientError::StreamFailed(_)), "{err:?}");
+        assert_eq!(err.status(), GrpcStatus::Cancelled);
     }
 }
 
@@ -1034,11 +986,7 @@ async fn early_reply() {
         .send()
         .await
         .unwrap_err();
-    let ClientError::GrpcStatus(status, _, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::InvalidArgument);
-    assert!(body.is_none());
+    assert_eq!(status(&err).code, GrpcStatus::InvalidArgument);
 
     // the connection stays usable
     let res = send::<Message>(&client).await.unwrap();
@@ -1054,10 +1002,11 @@ async fn zero_timeout() {
         .await
         .expect("the deadline has already passed")
         .unwrap_err();
-    let ClientError::DeadlineExceeded(ref hdrs) = *err else {
+    let ClientError::DeadlineExceeded(ref f) = *err else {
         panic!("{err:?}")
     };
-    assert!(hdrs.is_empty());
+    assert!(f.headers.is_empty());
+    assert_eq!(err.message(), "Request timeout is zero");
 
     // nothing is sent, so there is no stream to reset
     let res = send::<Message>(&client).await.unwrap();
@@ -1080,7 +1029,9 @@ async fn invalid_header() {
     let mut req = Request::<_, Message>::new(&client, &());
     req.header("bad header", "value");
     let err = req.send().await.unwrap_err();
-    assert!(matches!(*err, ClientError::Http(_)), "{err:?}");
+    assert!(matches!(*err, ClientError::InvalidRequest(_)), "{err:?}");
+    assert_eq!(err.status(), GrpcStatus::Internal);
+    assert!(std::error::Error::source(&*err).is_some());
 
     // the bad header is not sent and the connection stays usable
     let res = send::<Message>(&client).await.unwrap();
@@ -1089,10 +1040,12 @@ async fn invalid_header() {
 
 #[test]
 fn client_error_display() {
-    let err = ClientError::from(ntex_h2::client::ClientError::Disconnected(
-        std::io::Error::other("test"),
-    ));
-    assert_eq!(err.to_string(), "HTTP2 Client");
+    let failure = CallFailure::new(GrpcStatus::Unavailable, "Connection is closed");
+    let err = ClientError::Connection {
+        request_sent: true,
+        failure,
+    };
+    assert_eq!(err.to_string(), "Connection failed: Connection is closed");
 }
 
 #[test]
@@ -1120,16 +1073,13 @@ async fn message_too_large() {
         .await
         .expect("the client must not wait for the message")
         .unwrap_err();
-    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::ResourceExhausted);
-    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
+    let f = invalid_response(&err);
+    assert_eq!(f.code, GrpcStatus::ResourceExhausted);
+    assert_eq!(f.headers.get(X_TEST).unwrap(), "headers");
     assert_eq!(
-        hdrs.get(GRPC_MESSAGE).unwrap(),
+        err.message(),
         "Received message larger than max (4194305 vs. 4194304)"
     );
-    assert_eq!(body.as_deref(), Some(&b"\0\0\x40\0\x01"[..]));
 
     // the connection stays usable, the server sees the stream reset
     let res = send::<Message>(&client).await.unwrap();
@@ -1161,13 +1111,13 @@ async fn max_send_message_size() {
     req.max_send_message_size(3);
     let err = req.send().await.unwrap_err();
     // nothing came from the server
-    let ClientError::GrpcStatus(status, hdrs, None) = &*err else {
+    let ClientError::InvalidRequest(ref f) = *err else {
         panic!("{err:?}");
     };
-    assert_eq!(*status, GrpcStatus::ResourceExhausted);
-    assert_eq!(hdrs.len(), 1);
+    assert_eq!(f.code, GrpcStatus::ResourceExhausted);
+    assert!(f.headers.is_empty());
     assert_eq!(
-        hdrs.get(GRPC_MESSAGE).unwrap(),
+        err.message(),
         "trying to send message larger than max (4 vs. 3)"
     );
 }
@@ -1185,15 +1135,10 @@ async fn max_message_size() {
     ];
     for err in errs {
         let err = err.unwrap_err();
-        let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
-            panic!("{err:?}");
-        };
-        assert_eq!(*status, GrpcStatus::ResourceExhausted);
-        assert_eq!(
-            hdrs.get(GRPC_MESSAGE).unwrap(),
-            "Received message larger than max (3 vs. 2)"
-        );
-        assert_eq!(body.as_deref(), Some(&b"\0\0\0\0\x03abc"[..]));
+        let f = invalid_response(&err);
+        assert_eq!(f.code, GrpcStatus::ResourceExhausted);
+        assert_eq!(f.headers.get(X_TEST).unwrap(), "headers");
+        assert_eq!(err.message(), "Received message larger than max (3 vs. 2)");
     }
 
     // a non-grpc response has no message to check
@@ -1205,11 +1150,9 @@ async fn max_message_size() {
     ];
     for (err, msg) in errs {
         let err = err.unwrap_err();
-        let ClientError::GrpcStatus(status, hdrs, _) = &*err else {
-            panic!("{err:?}");
-        };
-        assert_eq!(*status, GrpcStatus::Unknown);
-        assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), msg);
+        not_grpc(&err);
+        assert_eq!(err.status(), GrpcStatus::Unknown);
+        assert_eq!(err.message(), msg);
     }
 }
 
@@ -1220,25 +1163,18 @@ async fn extra_data() {
     let (client, resets) = client_with_resets();
     // the status from the server is not used, the response is invalid
     let err = send::<TwoMessages>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Internal);
-    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
-    assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), EXTRA_DATA);
-    assert_eq!(body.as_deref(), Some(&b"\0\0\0\0\x01a\0\0\0\0\0"[..]));
+    let f = invalid_response(&err);
+    assert_eq!(f.code, GrpcStatus::Internal);
+    assert_eq!(f.headers.get(X_TEST).unwrap(), "headers");
+    assert_eq!(err.message(), EXTRA_DATA);
 
     // the client fails on the first extra byte, without waiting for the end
     let err = ntex::time::timeout(Duration::from_secs(5), send::<ExtraData>(&client))
         .await
         .expect("the client must not wait for the end of the stream")
         .unwrap_err();
-    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Internal);
-    assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), EXTRA_DATA);
-    assert_eq!(body.as_deref(), Some(&b"\0\0\0\0\x02ab\0"[..]));
+    assert_eq!(invalid_response(&err).code, GrpcStatus::Internal);
+    assert_eq!(err.message(), EXTRA_DATA);
 
     // the connection stays usable, the server sees the stream reset
     let res = send::<Message>(&client).await.unwrap();
@@ -1254,36 +1190,24 @@ async fn other_body_limit() {
         .await
         .expect("the client must not wait for the end of the stream")
         .unwrap_err();
-    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Unavailable);
-    assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), "HTTP status 503");
-    assert_eq!(body.as_deref(), Some(&[b'x'; 64 * 1024][..]));
+    let resp = not_grpc(&err);
+    assert_eq!(resp.http_status, Some(StatusCode::SERVICE_UNAVAILABLE));
+    assert_eq!(resp.body, &[b'x'; 64 * 1024][..]);
+    assert_eq!(err.status(), GrpcStatus::Unavailable);
     ntex::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(*resets.borrow(), [Reason::CANCEL]);
 
     // a body at the limit is read to the end
     let err = send::<LimitError>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, _, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::ResourceExhausted);
-    assert!(body.is_none());
+    assert_eq!(status(&err).code, GrpcStatus::ResourceExhausted);
 
     // the last frame passes the limit
     let err = send::<BigHtml>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Unknown);
-    assert_eq!(
-        hdrs.get(GRPC_MESSAGE).unwrap(),
-        "Invalid content-type: text/html"
-    );
-    let body = body.as_deref().unwrap();
-    assert_eq!(body.len(), 64 * 1024);
-    assert_eq!(&body[59_999..60_001], b"xy");
+    let resp = not_grpc(&err);
+    assert_eq!(resp.body.len(), 64 * 1024);
+    assert_eq!(&resp.body[59_999..60_001], b"xy");
+    assert_eq!(err.status(), GrpcStatus::Unknown);
+    assert_eq!(err.message(), "Invalid content-type: text/html");
 
     // a grpc message is not limited
     let res = send::<BigGrpc>(&client).await.unwrap();
@@ -1293,15 +1217,19 @@ async fn other_body_limit() {
 #[ntex::test]
 async fn connection_lost() {
     let client = client();
-    // the headers and the payload received before the loss are kept
+    // the headers received before the loss are kept
     let err = send::<Disconnect>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
+    let ClientError::Connection {
+        request_sent,
+        ref failure,
+    } = *err
+    else {
         panic!("{err:?}");
     };
-    assert_eq!(*status, GrpcStatus::Unavailable);
-    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
-    assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), "Connection is closed");
-    assert_eq!(body.as_deref(), Some(&b"\0\0"[..]));
+    assert!(request_sent);
+    assert_eq!(failure.code, GrpcStatus::Unavailable);
+    assert_eq!(failure.headers.get(X_TEST).unwrap(), "headers");
+    assert_eq!(err.message(), "Connection is closed");
 
     // the request is not sent completely, it is over the flow control window
     let input = BytesValue {
@@ -1311,34 +1239,38 @@ async fn connection_lost() {
         .send()
         .await
         .unwrap_err();
-    let ClientError::GrpcStatus(status, hdrs, _) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Unavailable);
-    assert_eq!(hdrs.get(GRPC_MESSAGE).unwrap(), "Connection is closed");
+    assert!(
+        matches!(
+            *err,
+            ClientError::Connection {
+                request_sent: true,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(err.status(), GrpcStatus::Unavailable);
+    assert_eq!(err.message(), "Connection is closed");
 
     // new calls on the closed connection
     let err = send::<Message>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, hdrs, body) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Unavailable);
-    assert!(hdrs.contains_key(GRPC_MESSAGE));
-    assert_eq!(body.as_deref(), Some(&b""[..]));
+    assert!(
+        matches!(
+            *err,
+            ClientError::Connection { .. } | ClientError::NotProcessed(_)
+        ),
+        "{err:?}"
+    );
+    assert_eq!(err.status(), GrpcStatus::Unavailable);
 }
 
 #[ntex::test]
 async fn go_away() {
     let client = client();
     let err = send::<GoAway>(&client).await.unwrap_err();
-    let ClientError::GrpcStatus(status, hdrs, _) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, GrpcStatus::Unavailable);
-    assert_eq!(
-        hdrs.get(GRPC_MESSAGE).unwrap(),
-        "Go away: not a result of an error"
-    );
+    assert!(matches!(*err, ClientError::NotProcessed(_)), "{err:?}");
+    assert_eq!(err.status(), GrpcStatus::Unavailable);
+    assert_eq!(err.message(), "Go away: not a result of an error");
 }
 
 #[ntex::test]
@@ -1392,11 +1324,10 @@ async fn reserved_headers() {
 async fn trailers_only_response() {
     let client = client();
     let err = send::<TrailersOnly>(&client).await.unwrap_err();
-    let ClientError::UnexpectedEof(status, hdrs) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*status, Some(StatusCode::OK));
-    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
+    let f = invalid_response(&err);
+    assert_eq!(f.code, GrpcStatus::Unknown);
+    assert_eq!(f.headers.get(X_TEST).unwrap(), "headers");
+    assert_eq!(err.message(), "Response trailers have no grpc-status");
 
     // the connection stays usable
     assert_eq!(send::<Message>(&client).await.unwrap().res_size, 5);
@@ -1406,23 +1337,20 @@ async fn trailers_only_response() {
 async fn deadline_in_trailers() {
     let client = client();
     let err = send::<DeadlineTrailers>(&client).await.unwrap_err();
-    let ClientError::DeadlineExceeded(hdrs) = &*err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(hdrs.get(GRPC_STATUS).unwrap(), "4");
-    assert_eq!(err.grpc_message().as_deref(), Some("too slow"));
+    let st = status(&err);
+    assert_eq!(st.code, GrpcStatus::DeadlineExceeded);
+    assert_eq!(st.metadata.get(GRPC_STATUS).unwrap(), "4");
+    assert_eq!(err.message(), "too slow");
 }
 
 #[ntex::test]
 async fn truncated_message() {
     let client = client();
     let err = send::<BadLength>(&client).await.unwrap_err();
-    let ClientError::UnexpectedEof(status, hdrs) = &*err else {
-        panic!("{err:?}");
-    };
-    // the message is incomplete, so the http status is not reported
-    assert!(status.is_none());
-    assert_eq!(hdrs.get(X_TEST).unwrap(), "headers");
+    let f = invalid_response(&err);
+    assert_eq!(f.code, GrpcStatus::Internal);
+    assert_eq!(f.headers.get(GRPC_STATUS).unwrap(), "0");
+    assert_eq!(err.message(), "Response message is truncated");
 }
 
 #[ntex::test]
@@ -1432,8 +1360,8 @@ async fn decode_error() {
         .send()
         .await
         .unwrap_err();
-    assert!(matches!(*err, ClientError::Decode(_)), "{err:?}");
-    assert!(err.grpc_message().is_none());
+    assert_eq!(invalid_response(&err).code, GrpcStatus::Internal);
+    assert!(std::error::Error::source(&*err).is_some());
 
     // the connection stays usable
     assert_eq!(send::<Message>(&client).await.unwrap().res_size, 5);
@@ -1443,11 +1371,12 @@ async fn decode_error() {
 async fn stream_protocol_error() {
     let client = client();
     let err = send::<BadContentLength>(&client).await.unwrap_err();
-    let ClientError::Stream(err) = &*err else {
+    let ClientError::StreamFailed(ref f) = *err else {
         panic!("{err:?}");
     };
+    assert_eq!(f.code, GrpcStatus::Internal);
     assert_eq!(
-        err.to_string(),
+        err.message(),
         "Payload length does not match content-length header"
     );
 }
@@ -1464,7 +1393,7 @@ async fn pooled_client() {
         .send()
         .await
         .unwrap_err();
-    assert!(matches!(*err, ClientError::DeadlineExceeded(_)), "{err:?}");
+    assert_eq!(status(&err).code, GrpcStatus::DeadlineExceeded);
 
     // the grpc client is a thin wrapper over the pool
     let client = GrpcClient::new(pool.clone());
@@ -1495,7 +1424,16 @@ async fn pool_connect_error() {
         .send()
         .await
         .unwrap_err();
-    assert!(matches!(*err, ClientError::Client(_)), "{err:?}");
+    let ClientError::Connection {
+        request_sent: false,
+        ref failure,
+    } = *err
+    else {
+        panic!("{err:?}");
+    };
+    assert_eq!(failure.code, GrpcStatus::Unavailable);
+    assert!(matches!(failure.cause, Some(Cause::Client(_))), "{err:?}");
+    assert!(std::error::Error::source(&*err).is_some());
 }
 
 #[cfg(feature = "compression")]
@@ -1525,24 +1463,22 @@ async fn compression() {
         let mut req = Request::<_, EchoBody>::new(&client, &input);
         req.compression(enc).max_message_size(1002);
         let err = req.send().await.unwrap_err();
-        let ClientError::GrpcStatus(status, trailers, Some(body)) = &*err else {
-            panic!("{err:?}");
-        };
-        assert_eq!(*status, GrpcStatus::ResourceExhausted);
+        let f = invalid_response(&err);
+        assert_eq!(f.code, GrpcStatus::ResourceExhausted);
+        assert_eq!(f.headers.get(GRPC_STATUS).unwrap(), "0");
         assert_eq!(
-            trailers.get(GRPC_MESSAGE).unwrap(),
+            err.message(),
             "grpc: received message after decompression larger than max 1002"
         );
-        assert_eq!(body.len(), res.res_size);
 
         // the limit applies to the compressed message
         let mut req = Request::<_, EchoBody>::new(&client, &input);
         req.compression(enc).max_send_message_size(res.req_size - 6);
         let err = req.send().await.unwrap_err();
-        let ClientError::GrpcStatus(status, _, None) = &*err else {
+        let ClientError::InvalidRequest(ref f) = *err else {
             panic!("{err:?}");
         };
-        assert_eq!(*status, GrpcStatus::ResourceExhausted);
+        assert_eq!(f.code, GrpcStatus::ResourceExhausted);
 
         // an empty message is not compressed
         let empty = BytesValue::default();

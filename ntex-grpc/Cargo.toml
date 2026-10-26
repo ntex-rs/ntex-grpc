@@ -1,6 +1,6 @@
 [package]
 name = "ntex-grpc"
-version = "3.5.0"
+version = "4.0.0"
 license = "MIT OR Apache-2.0"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 description = "GRPC Client/Server framework"

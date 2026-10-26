@@ -32,7 +32,7 @@ macro_rules! gen_error_code {
             /// `"grpc-status-NotFound"`.
             ///
             /// Used as the error signature of
-            /// [`ClientError::GrpcStatus`](crate::client::ClientError::GrpcStatus).
+            /// [`ClientError::Status`](crate::client::ClientError::Status).
             #[inline]
             pub const fn signature(&self) -> &'static str {
                 match self {
@@ -88,9 +88,10 @@ gen_error_code! {
     /// gRPC status code.
     ///
     /// The server sends it in the `grpc-status` trailer. On the client a
-    /// status other than `Ok` shows up as
-    /// [`ClientError::GrpcStatus`](crate::client::ClientError::GrpcStatus),
-    /// or [`ClientError::DeadlineExceeded`](crate::client::ClientError::DeadlineExceeded).
+    /// status other than `Ok` from the server shows up as
+    /// [`ClientError::Status`](crate::client::ClientError::Status), local
+    /// failures map to a status with
+    /// [`ClientError::status()`](crate::client::ClientError::status).
     /// A server returns one with [`ServerError`](crate::server::ServerError).
     #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub enum GrpcStatus {

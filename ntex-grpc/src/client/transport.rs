@@ -1,13 +1,14 @@
 use std::time::{Duration, Instant};
 use std::{convert::TryFrom, future::Future, str::FromStr};
 
-use ntex_bytes::{Buf, BufMut, BytePages, Bytes};
+use ntex_bytes::{Buf, BufMut, BytePages, ByteString, Bytes};
 use ntex_error::Error;
-use ntex_h2::{self as h2, OperationError, frame::Reason};
+use ntex_h2::{self as h2, ConnectionError, OperationError, StreamError, frame::Reason};
 use ntex_http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use ntex_util::time;
 
-use super::{Client, ClientError, Transport, request::RequestContext, request::Response};
+use super::{CallFailure, Cause, Client, ClientError, NotGrpc, Transport};
+use super::{Status, request::RequestContext, request::Response};
 #[cfg(feature = "compression")]
 use crate::Compression;
 use crate::utils::{self, Data};
@@ -36,7 +37,13 @@ impl<T: MethodDef, St> Transport<T, St> for h2::client::Client {
         ctx: &mut RequestContext<'_, St>,
     ) -> Result<Response<T>, Self::Error> {
         with_deadline(ctx.get_timeout(), async |deadline| {
-            let client = self.client().await.map_err(|e| e.map(ClientError::from))?;
+            let client = self.client().await.map_err(|e| {
+                e.map(|e| ClientError::Connection {
+                    request_sent: false,
+                    failure: CallFailure::new(GrpcStatus::Unavailable, error_text(&e))
+                        .with_cause(e),
+                })
+            })?;
             send_request(&client, val, ctx, deadline).await
         })
         .await
@@ -74,15 +81,22 @@ where
 {
     if let Some(timeout) = timeout {
         if timeout.is_zero() {
-            return Err(Error::from(ClientError::DeadlineExceeded(HeaderMap::new())));
+            return Err(deadline_exceeded("Request timeout is zero"));
         }
         let deadline = Instant::now().checked_add(timeout);
         time::timeout(timeout, f(deadline))
             .await
-            .unwrap_or_else(|()| Err(Error::from(ClientError::DeadlineExceeded(HeaderMap::new()))))
+            .unwrap_or_else(|()| Err(deadline_exceeded("Request timeout ran out")))
     } else {
         f(None).await
     }
+}
+
+fn deadline_exceeded(msg: &'static str) -> Error<ClientError> {
+    Error::from(ClientError::DeadlineExceeded(CallFailure::new(
+        GrpcStatus::DeadlineExceeded,
+        msg,
+    )))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -93,7 +107,10 @@ async fn send_request<T: MethodDef, St>(
     deadline: Option<Instant>,
 ) -> Result<Response<T>, Error<ClientError>> {
     if let Some(err) = ctx.take_error() {
-        return Err(Error::from(ClientError::Http(err)).with_service(client.service()));
+        let failure = CallFailure::new(GrpcStatus::Internal, err.to_string()).with_cause(err);
+        return Err(
+            Error::from(ClientError::InvalidRequest(failure)).with_service(client.service())
+        );
     }
 
     let buf = encode_message(val, ctx)
@@ -122,7 +139,7 @@ async fn send_request<T: MethodDef, St>(
     let (snd_stream, rcv_stream) = client
         .send(Method::POST, T::PATH, hdrs, false)
         .await
-        .map_err(|e| operation_error(e, HeaderMap::new(), Bytes::new()))?;
+        .map_err(|e| operation_error(e, false, HeaderMap::new(), deadline))?;
     if ctx.get_disconnect_on_drop() {
         snd_stream.disconnect_on_drop();
     }
@@ -133,23 +150,28 @@ async fn send_request<T: MethodDef, St>(
             *err,
             OperationError::RemoteReset(_) | OperationError::Closed(Some(_))
         ) {
-            return Err(operation_error(err, HeaderMap::new(), Bytes::new()));
+            return Err(operation_error(err, true, HeaderMap::new(), deadline));
         }
     }
 
     // read response
     let mut status = None;
     let mut hdrs = HeaderMap::default();
-    let mut trailers = HeaderMap::default();
+    let mut trailers = None;
     let mut payload = Data::Empty;
-    // the status to report if the response has no `grpc-status`
+    // the failure to report if the response has no `grpc-status`
     let mut missing = None;
     let max_size = ctx.get_max_message_size();
 
     async {
         loop {
             let Some(msg) = rcv_stream.recv().await else {
-                return Err(Error::from(ClientError::UnexpectedEof(status, hdrs)));
+                let failure =
+                    CallFailure::new(GrpcStatus::Unavailable, STREAM_CLOSED).with_headers(hdrs);
+                return Err(Error::from(ClientError::Connection {
+                    request_sent: true,
+                    failure,
+                }));
             };
 
             match msg.kind {
@@ -159,34 +181,7 @@ async fn send_request<T: MethodDef, St>(
                     eof,
                 } => {
                     if eof {
-                        // check grpc status
-                        match check_grpc_status(&headers) {
-                            Some(Ok(GrpcStatus::DeadlineExceeded)) => {
-                                return Err(Error::from(ClientError::DeadlineExceeded(headers)));
-                            }
-                            Some(Ok(status)) if status != GrpcStatus::Ok => {
-                                return Err(Error::from(ClientError::GrpcStatus(
-                                    status, headers, None,
-                                )));
-                            }
-                            Some(Err(msg)) => {
-                                return Err(synthesized_status(
-                                    GrpcStatus::Unknown,
-                                    headers,
-                                    msg,
-                                    Bytes::new(),
-                                ));
-                            }
-                            Some(Ok(_)) | None => {}
-                        }
-                        if let Some(st) = pseudo.status.filter(|st| *st != StatusCode::OK) {
-                            return Err(http_status_error(st, headers, Bytes::new()));
-                        }
-
-                        return Err(Error::from(ClientError::UnexpectedEof(
-                            pseudo.status,
-                            headers,
-                        )));
+                        return Err(Error::from(trailers_only(pseudo.status, headers)));
                     }
                     hdrs = headers;
                     status = pseudo.status;
@@ -195,94 +190,67 @@ async fn send_request<T: MethodDef, St>(
                 h2::MessageKind::Data(data, _cap) => {
                     payload.push(data, message_limit(status, &hdrs, max_size));
                     if let Some((st, msg)) = check_message(status, &hdrs, &payload, max_size) {
-                        return Err(synthesized_status(st, hdrs, msg, payload.get()));
+                        return Err(invalid_response(st, msg, hdrs));
                     }
                     if !limit_other_body(status, &hdrs, &mut payload) {
                         continue;
                     }
                     // not a grpc response, the rest of the body is not read
                 }
-                h2::MessageKind::Eof(data) => {
-                    match data {
-                        h2::StreamEof::Data(data, _cap) => {
-                            payload.push(data, message_limit(status, &hdrs, max_size));
-                            if let Some((st, msg)) =
-                                check_message(status, &hdrs, &payload, max_size)
-                            {
-                                return Err(synthesized_status(st, hdrs, msg, payload.get()));
-                            }
-                            limit_other_body(status, &hdrs, &mut payload);
-                            missing = Some((
-                                GrpcStatus::Internal,
-                                HeaderValue::from_static(NO_TRAILERS),
-                            ));
+                h2::MessageKind::Eof(data) => match data {
+                    h2::StreamEof::Data(data, _cap) => {
+                        payload.push(data, message_limit(status, &hdrs, max_size));
+                        if let Some((st, msg)) = check_message(status, &hdrs, &payload, max_size) {
+                            return Err(invalid_response(st, msg, hdrs));
                         }
-                        h2::StreamEof::Trailers(hdrs) => {
-                            // check grpc status
-                            match check_grpc_status(&hdrs) {
-                                Some(Ok(GrpcStatus::Ok)) => {}
-                                None => {
-                                    missing = Some((
-                                        GrpcStatus::Unknown,
-                                        HeaderValue::from_static(NO_GRPC_STATUS),
-                                    ));
-                                }
-                                Some(Ok(GrpcStatus::DeadlineExceeded)) => {
-                                    return Err(Error::from(ClientError::DeadlineExceeded(hdrs)));
-                                }
-                                Some(Ok(st)) => {
-                                    return Err(Error::from(ClientError::GrpcStatus(
-                                        st, hdrs, None,
-                                    )));
-                                }
-                                Some(Err(msg)) => {
-                                    return Err(synthesized_status(
-                                        GrpcStatus::Unknown,
-                                        hdrs,
-                                        msg,
-                                        payload.get(),
-                                    ));
-                                }
-                            }
-                            trailers = hdrs;
-                        }
-                        h2::StreamEof::Error(err) => {
-                            if let h2::StreamError::Reset(reason) = *err {
-                                return Err(reset_error(reason, hdrs, payload.get(), deadline));
-                            }
-                            return Err(err.map(ClientError::Stream));
-                        }
+                        limit_other_body(status, &hdrs, &mut payload);
+                        missing = Some((GrpcStatus::Internal, NO_TRAILERS));
                     }
-                }
+                    h2::StreamEof::Trailers(hdrs) => {
+                        match check_grpc_status(&hdrs) {
+                            Some(Ok(GrpcStatus::Ok)) => {}
+                            None => missing = Some((GrpcStatus::Unknown, NO_GRPC_STATUS)),
+                            Some(Ok(st)) => {
+                                return Err(Error::from(ClientError::Status(Status::new(
+                                    st, hdrs,
+                                ))));
+                            }
+                            Some(Err(msg)) => {
+                                return Err(invalid_response(GrpcStatus::Unknown, msg, hdrs));
+                            }
+                        }
+                        trailers = Some(hdrs);
+                    }
+                    h2::StreamEof::Error(err) => {
+                        return Err(err.map(|e| stream_error(e, hdrs, deadline)));
+                    }
+                },
                 h2::MessageKind::Disconnect(err) => {
-                    return Err(operation_error(err, hdrs, payload.get()));
+                    return Err(operation_error(err, true, hdrs, deadline));
                 }
             }
 
             let mut data = payload.get();
-            match status {
-                Some(st) => {
-                    if st != StatusCode::OK {
-                        return Err(http_status_error(st, hdrs, data));
-                    }
-                }
-                None => return Err(Error::from(ClientError::Response(None, hdrs, data))),
+            if !is_grpc(status, &hdrs) {
+                return Err(Error::from(ClientError::NotGrpc(NotGrpc::new(
+                    status, hdrs, data,
+                ))));
             }
-            if let Some((status, msg)) = check_content_type(&hdrs).or(missing) {
-                return Err(synthesized_status(status, trailers, msg, data));
+            // the trailers, or the response headers if the response has none
+            let trailers = trailers.unwrap_or_else(|| std::mem::take(&mut hdrs));
+            if let Some((st, msg)) = missing {
+                return Err(invalid_response(st, msg, trailers));
             }
             let resp_size = data.len();
             if resp_size < 5 {
-                return Err(Error::from(ClientError::UnexpectedEof(status, hdrs)));
+                return Err(invalid_response(GrpcStatus::Internal, NO_MESSAGE, trailers));
             }
-            let body = data.clone();
             let flag = data.get_u8();
             let len = data.get_u32();
             let Some(block) = data.split_to_checked(len as usize) else {
-                return Err(Error::from(ClientError::UnexpectedEof(None, hdrs)));
+                return Err(invalid_response(GrpcStatus::Internal, TRUNCATED, trailers));
             };
             // a message in an unknown encoding is an internal error
-            let max_size = ctx.get_max_message_size();
             let mut block = match utils::read_message(
                 flag,
                 &hdrs,
@@ -293,9 +261,7 @@ async fn send_request<T: MethodDef, St>(
             .await
             {
                 Ok(block) => block,
-                Err((status, msg)) => {
-                    return Err(synthesized_status(status, trailers, msg, body));
-                }
+                Err((st, msg)) => return Err(invalid_response(st, text(&msg), trailers)),
             };
 
             return match <T::Output as Message>::read(&mut block) {
@@ -306,7 +272,12 @@ async fn send_request<T: MethodDef, St>(
                     headers: hdrs,
                     res_size: resp_size,
                 }),
-                Err(e) => Err(Error::from(ClientError::Decode(e))),
+                Err(e) => {
+                    let failure = CallFailure::new(GrpcStatus::Internal, e.to_string())
+                        .with_headers(trailers)
+                        .with_cause(e);
+                    Err(Error::from(ClientError::InvalidResponse(failure)))
+                }
             };
         }
     }
@@ -318,66 +289,140 @@ async fn send_request<T: MethodDef, St>(
 const MAX_OTHER_BODY: usize = 64 * 1024;
 const NO_TRAILERS: &str = "Response ended without trailers";
 const NO_GRPC_STATUS: &str = "Response trailers have no grpc-status";
+const NO_MESSAGE: &str = "Response has no message";
+const TRUNCATED: &str = "Response message is truncated";
+const STREAM_CLOSED: &str = "Stream closed before the response ended";
 const EXTRA_DATA: &str = "cardinality violation: expected <EOF> for non server-streaming RPCs, but received another message";
 
-/// Maps an HTTP status other than 200 of a response without `grpc-status`.
+fn invalid_response(
+    status: GrpcStatus,
+    msg: impl Into<ByteString>,
+    hdrs: HeaderMap,
+) -> Error<ClientError> {
+    Error::from(ClientError::InvalidResponse(
+        CallFailure::new(status, msg).with_headers(hdrs),
+    ))
+}
+
+/// Maps a response that ends with its headers.
 ///
-/// The response headers are reported in place of the trailers.
-fn http_status_error(st: StatusCode, hdrs: HeaderMap, body: Bytes) -> Error<ClientError> {
-    let status = match st.as_u16() {
-        400 => GrpcStatus::Internal,
-        401 => GrpcStatus::Unauthenticated,
-        403 => GrpcStatus::PermissionDenied,
-        404 => GrpcStatus::Unimplemented,
-        429 | 502 | 503 | 504 => GrpcStatus::Unavailable,
-        _ => GrpcStatus::Unknown,
+/// A status the server sent wins, then a response that is not a grpc one.
+fn trailers_only(status: Option<StatusCode>, hdrs: HeaderMap) -> ClientError {
+    let (code, msg) = match check_grpc_status(&hdrs) {
+        Some(Ok(GrpcStatus::Ok)) if is_grpc(status, &hdrs) => {
+            (GrpcStatus::Internal, NO_MESSAGE.into())
+        }
+        None if is_grpc(status, &hdrs) => (GrpcStatus::Unknown, NO_GRPC_STATUS.into()),
+        Some(Ok(GrpcStatus::Ok)) | None => {
+            return ClientError::NotGrpc(NotGrpc::new(status, hdrs, Bytes::new()));
+        }
+        Some(Ok(st)) => return ClientError::Status(Status::new(st, hdrs)),
+        Some(Err(msg)) => (GrpcStatus::Unknown, msg),
     };
-    let msg = HeaderValue::try_from(format!("HTTP status {}", st.as_u16()))
-        .unwrap_or_else(|_| HeaderValue::from_static("HTTP error"));
-    synthesized_status(status, hdrs, msg, body)
+    ClientError::InvalidResponse(CallFailure::new(code, msg).with_headers(hdrs))
 }
 
 /// Maps a stream reset by the server.
 ///
-/// The response headers received so far are reported in place of the
-/// trailers. A `CANCEL` once the deadline has passed is reported as
-/// `DEADLINE_EXCEEDED`, the server stopped the call because of the timeout.
+/// `REFUSED_STREAM` means the server did not process the request. A
+/// `CANCEL` once the deadline has passed means the server stopped the call
+/// because of the timeout.
 fn reset_error(
     reason: Reason,
     hdrs: HeaderMap,
-    body: Bytes,
     deadline: Option<Instant>,
-) -> Error<ClientError> {
-    if reason == Reason::CANCEL && deadline.is_some_and(|d| Instant::now() >= d) {
-        return Error::from(ClientError::DeadlineExceeded(hdrs));
+    cause: impl Into<Cause>,
+) -> ClientError {
+    let msg = format!("Stream reset with {reason:?}");
+    if reason == Reason::REFUSED_STREAM {
+        let failure = CallFailure::new(GrpcStatus::Unavailable, msg);
+        return ClientError::NotProcessed(failure.with_headers(hdrs).with_cause(cause));
     }
-    let msg = HeaderValue::try_from(format!("Stream reset with {reason:?}"))
-        .unwrap_or_else(|_| HeaderValue::from_static("Stream reset"));
-    synthesized_status(GrpcStatus::from(reason), hdrs, msg, body)
+    if reason == Reason::CANCEL && deadline.is_some_and(|d| Instant::now() >= d) {
+        let failure = CallFailure::new(
+            GrpcStatus::DeadlineExceeded,
+            "Stream reset with CANCEL after the deadline",
+        );
+        return ClientError::DeadlineExceeded(failure.with_headers(hdrs).with_cause(cause));
+    }
+    let failure = CallFailure::new(GrpcStatus::from(reason), msg);
+    ClientError::StreamFailed(failure.with_headers(hdrs).with_cause(cause))
 }
 
-/// Maps a lost connection to `UNAVAILABLE`.
+/// Maps a failed stream, the connection is still up.
+fn stream_error(err: StreamError, hdrs: HeaderMap, deadline: Option<Instant>) -> ClientError {
+    if let StreamError::Reset(reason) = err {
+        return reset_error(reason, hdrs, deadline, err);
+    }
+    let code = if matches!(err, StreamError::CapacityTimeout) {
+        GrpcStatus::Unavailable
+    } else {
+        GrpcStatus::Internal
+    };
+    let failure = CallFailure::new(code, err.to_string());
+    ClientError::StreamFailed(failure.with_headers(hdrs).with_cause(err))
+}
+
+/// Maps an error of the connection or the stream.
 ///
-/// The connection closed, failed or is going away, the call may be retried
-/// on a new one. Other errors are reported as [`ClientError::Operation`].
+/// `sent` is whether the request was handed to the connection. A GOAWAY
+/// fails only the streams the server did not process.
 fn operation_error(
     err: Error<OperationError>,
+    sent: bool,
     hdrs: HeaderMap,
-    body: Bytes,
+    deadline: Option<Instant>,
 ) -> Error<ClientError> {
-    if matches!(
-        *err,
-        OperationError::Connection(_)
+    err.map(|err| {
+        let failure = |code| {
+            CallFailure::new(code, err.to_string())
+                .with_headers(hdrs.clone())
+                .with_cause(err)
+        };
+        match err {
+            OperationError::Connection(ConnectionError::GoAway(_)) => {
+                ClientError::NotProcessed(failure(GrpcStatus::Unavailable))
+            }
+            OperationError::Disconnecting | OperationError::OverflowedStreamId if !sent => {
+                ClientError::NotProcessed(failure(GrpcStatus::Unavailable))
+            }
+            OperationError::Connection(_)
             | OperationError::Disconnected
             | OperationError::Disconnecting
-            | OperationError::OverflowedStreamId
-    ) {
-        let msg = HeaderValue::try_from(err.to_string())
-            .unwrap_or_else(|_| HeaderValue::from_static("Connection is closed"));
-        err.map(|_| synthesized(GrpcStatus::Unavailable, hdrs, msg, body))
-    } else {
-        err.map(ClientError::Operation)
+            | OperationError::OverflowedStreamId => ClientError::Connection {
+                request_sent: sent,
+                failure: failure(GrpcStatus::Unavailable),
+            },
+            OperationError::HeaderListTooLarge { .. } => {
+                ClientError::InvalidRequest(failure(GrpcStatus::Internal))
+            }
+            OperationError::RemoteReset(reason) => reset_error(reason, hdrs, deadline, err),
+            OperationError::Stream(e) => stream_error(e, hdrs, deadline),
+            OperationError::Idle
+            | OperationError::Payload
+            | OperationError::Closed(_)
+            | OperationError::LocalReset(_) => {
+                ClientError::StreamFailed(failure(GrpcStatus::Internal))
+            }
+        }
+    })
+}
+
+/// The error and its sources, e.g. "Connect error: Connection refused".
+fn error_text(err: &dyn std::error::Error) -> String {
+    let mut msg = err.to_string();
+    let mut source = err.source();
+    while let Some(err) = source {
+        msg.push_str(": ");
+        msg.push_str(&err.to_string());
+        source = err.source();
     }
+    msg
+}
+
+/// The text of a percent-encoded `grpc-message`.
+fn text(val: &HeaderValue) -> ByteString {
+    ByteString::from(utils::percent_decode(val).into_owned())
 }
 
 /// Whether the response is a grpc one, its body is a grpc message then.
@@ -415,7 +460,7 @@ fn check_message(
     hdrs: &HeaderMap,
     payload: &Data,
     max_size: usize,
-) -> Option<(GrpcStatus, HeaderValue)> {
+) -> Option<(GrpcStatus, ByteString)> {
     if !is_grpc(status, hdrs) {
         return None;
     }
@@ -423,39 +468,12 @@ fn check_message(
     let len = u32::from_be_bytes(data.get(1..5)?.try_into().ok()?) as usize;
     if len > max_size {
         let msg = format!("Received message larger than max ({len} vs. {max_size})");
-        Some((
-            GrpcStatus::ResourceExhausted,
-            HeaderValue::try_from(msg)
-                .unwrap_or_else(|_| HeaderValue::from_static("Received message larger than max")),
-        ))
+        Some((GrpcStatus::ResourceExhausted, msg.into()))
     } else if data.len() - 5 > len {
-        Some((GrpcStatus::Internal, HeaderValue::from_static(EXTRA_DATA)))
+        Some((GrpcStatus::Internal, EXTRA_DATA.into()))
     } else {
         None
     }
-}
-
-/// Reports a status the client picked, `msg` is added as `grpc-message`
-/// unless the server sent one.
-fn synthesized_status(
-    status: GrpcStatus,
-    hdrs: HeaderMap,
-    msg: HeaderValue,
-    body: Bytes,
-) -> Error<ClientError> {
-    Error::from(synthesized(status, hdrs, msg, body))
-}
-
-fn synthesized(
-    status: GrpcStatus,
-    mut hdrs: HeaderMap,
-    msg: HeaderValue,
-    body: Bytes,
-) -> ClientError {
-    if !hdrs.contains_key(consts::GRPC_MESSAGE) {
-        hdrs.insert(consts::GRPC_MESSAGE, msg);
-    }
-    ClientError::GrpcStatus(status, hdrs, Some(body))
 }
 
 /// Encodes the request message with its length prefix.
@@ -477,9 +495,7 @@ async fn encode_message<M: Message, St>(
             let mut msg = BytePages::default();
             val.write(&mut msg);
             let compressed = enc.compress(&mut msg).await.map_err(|(status, msg)| {
-                let mut hdrs = HeaderMap::new();
-                hdrs.insert(consts::GRPC_MESSAGE, msg);
-                ClientError::GrpcStatus(status, hdrs, None)
+                ClientError::InvalidRequest(CallFailure::new(status, text(&msg)))
             })?;
             let len = send_size(msg.len(), max_size)?;
             utils::prepend_prefix(&mut msg, compressed, len);
@@ -505,124 +521,187 @@ fn send_size(len: usize, max_size: usize) -> Result<u32, ClientError> {
     } else {
         format!("grpc: message too large ({len} bytes)")
     };
-    let msg = HeaderValue::try_from(msg)
-        .unwrap_or_else(|_| HeaderValue::from_static("grpc: message too large"));
-    let mut hdrs = HeaderMap::new();
-    hdrs.insert(consts::GRPC_MESSAGE, msg);
-    Err(ClientError::GrpcStatus(
+    Err(ClientError::InvalidRequest(CallFailure::new(
         GrpcStatus::ResourceExhausted,
-        hdrs,
-        None,
-    ))
-}
-
-/// Returns the status to report if the response is not a grpc response.
-///
-/// Accepts `application/grpc`, optionally followed by `+format` or `;params`.
-fn check_content_type(hdrs: &HeaderMap) -> Option<(GrpcStatus, HeaderValue)> {
-    let Some(val) = hdrs.get(header::CONTENT_TYPE) else {
-        return Some((
-            GrpcStatus::Unknown,
-            HeaderValue::from_static("Response has no content-type"),
-        ));
-    };
-    if utils::is_grpc_content_type(val.as_bytes()) {
-        return None;
-    }
-    Some((
-        GrpcStatus::Unknown,
-        utils::grpc_message("Invalid content-type", val),
-    ))
+        msg,
+    )))
 }
 
 /// Reads `grpc-status`, an unknown or invalid code is an error with the
-/// `grpc-message` to report it with `UNKNOWN`.
-fn check_grpc_status(hdrs: &HeaderMap) -> Option<Result<GrpcStatus, HeaderValue>> {
+/// message to report it with `UNKNOWN`.
+fn check_grpc_status(hdrs: &HeaderMap) -> Option<Result<GrpcStatus, ByteString>> {
     let val = hdrs.get(consts::GRPC_STATUS)?;
     Some(
         val.to_str()
             .ok()
             .and_then(|v| u8::from_str(v).ok())
             .and_then(|v| GrpcStatus::try_from(v).ok())
-            .ok_or_else(|| utils::grpc_message("Unknown grpc-status", val)),
+            .ok_or_else(|| {
+                format!(
+                    "Unknown grpc-status: {}",
+                    String::from_utf8_lossy(val.as_bytes())
+                )
+                .into()
+            }),
     )
 }
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use super::*;
 
-    #[test]
-    fn connection_errors() {
-        let unavailable = |err: OperationError| {
-            let mut hdrs = HeaderMap::new();
-            hdrs.insert(header::CONTENT_TYPE, HeaderValue::from_static("x"));
-            let err = operation_error(Error::from(err), hdrs, Bytes::from_static(b"1"));
-            let ClientError::GrpcStatus(GrpcStatus::Unavailable, hdrs, Some(body)) = &*err else {
-                panic!("{err:?}");
-            };
-            assert_eq!(hdrs.get(header::CONTENT_TYPE).unwrap(), "x");
-            assert_eq!(body, &b"1"[..]);
-            hdrs.get(consts::GRPC_MESSAGE).unwrap().clone()
-        };
-        assert_eq!(
-            unavailable(OperationError::Connection(
-                h2::ConnectionError::KeepaliveTimeout
-            )),
-            "Keep-alive timeout"
-        );
-        assert_eq!(
-            unavailable(OperationError::Disconnected),
-            "Connection is closed"
-        );
-        assert_eq!(
-            unavailable(OperationError::Disconnecting),
-            "Connection is disconnecting"
-        );
-        assert_eq!(
-            unavailable(OperationError::OverflowedStreamId),
-            "The stream ID space is overflowed"
-        );
+    fn headers() -> HeaderMap {
+        let mut hdrs = HeaderMap::new();
+        hdrs.insert(header::CONTENT_TYPE, HeaderValue::from_static("x"));
+        hdrs
+    }
 
-        let err = operation_error(
-            Error::from(OperationError::Idle),
-            HeaderMap::new(),
-            Bytes::new(),
-        );
-        assert!(matches!(*err, ClientError::Operation(OperationError::Idle)));
+    fn failure(err: &ClientError) -> &CallFailure {
+        match err {
+            ClientError::InvalidRequest(f)
+            | ClientError::NotProcessed(f)
+            | ClientError::Connection { failure: f, .. }
+            | ClientError::StreamFailed(f)
+            | ClientError::InvalidResponse(f)
+            | ClientError::DeadlineExceeded(f) => f,
+            err => panic!("{err:?}"),
+        }
     }
 
     #[test]
-    fn reset_at_deadline() {
-        let mut hdrs = HeaderMap::new();
-        hdrs.insert(header::CONTENT_TYPE, HeaderValue::from_static("x"));
+    fn operation_errors() {
+        let map = |err, sent| {
+            let err = operation_error(Error::from(err), sent, headers(), None);
+            let f = failure(&err);
+            assert_eq!(f.headers.get(header::CONTENT_TYPE).unwrap(), "x");
+            assert!(f.source().is_some());
+            let msg = f.message.clone();
+            (err.into_error(), msg)
+        };
+        let goaway = OperationError::Connection(ConnectionError::GoAway(Reason::NO_ERROR));
+        let keepalive = OperationError::Connection(ConnectionError::KeepaliveTimeout);
+
+        for sent in [false, true] {
+            let (err, _) = map(goaway, sent);
+            assert!(matches!(err, ClientError::NotProcessed(_)), "{err:?}");
+            assert_eq!(err.status(), GrpcStatus::Unavailable);
+
+            let (err, msg) = map(keepalive, sent);
+            assert!(
+                matches!(err, ClientError::Connection { request_sent, .. } if request_sent == sent),
+                "{err:?}"
+            );
+            assert_eq!(err.status(), GrpcStatus::Unavailable);
+            assert_eq!(msg, "Keep-alive timeout");
+
+            let (err, msg) = map(OperationError::Disconnected, sent);
+            assert!(
+                matches!(err, ClientError::Connection { request_sent, .. } if request_sent == sent),
+                "{err:?}"
+            );
+            assert_eq!(msg, "Connection is closed");
+        }
+
+        // not sent, the server did not see the request
+        for err in [
+            OperationError::Disconnecting,
+            OperationError::OverflowedStreamId,
+        ] {
+            let (err, _) = map(err, false);
+            assert!(matches!(err, ClientError::NotProcessed(_)), "{err:?}");
+        }
+        let (err, msg) = map(OperationError::Disconnecting, true);
+        assert!(
+            matches!(
+                err,
+                ClientError::Connection {
+                    request_sent: true,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(msg, "Connection is disconnecting");
+
+        let (err, _) = map(
+            OperationError::HeaderListTooLarge { size: 2, max: 1 },
+            false,
+        );
+        assert!(matches!(err, ClientError::InvalidRequest(_)), "{err:?}");
+        assert_eq!(err.status(), GrpcStatus::Internal);
+
+        let (err, _) = map(OperationError::RemoteReset(Reason::REFUSED_STREAM), true);
+        assert!(matches!(err, ClientError::NotProcessed(_)), "{err:?}");
+        let (err, _) = map(OperationError::RemoteReset(Reason::CANCEL), true);
+        assert!(matches!(err, ClientError::StreamFailed(_)), "{err:?}");
+        assert_eq!(err.status(), GrpcStatus::Cancelled);
+
+        let (err, _) = map(OperationError::Stream(StreamError::CapacityTimeout), true);
+        assert!(matches!(err, ClientError::StreamFailed(_)), "{err:?}");
+        assert_eq!(err.status(), GrpcStatus::Unavailable);
+
+        for err in [
+            OperationError::Idle,
+            OperationError::Payload,
+            OperationError::Closed(None),
+        ] {
+            let (err, _) = map(err, true);
+            assert!(matches!(err, ClientError::StreamFailed(_)), "{err:?}");
+            assert_eq!(err.status(), GrpcStatus::Internal);
+        }
+    }
+
+    #[test]
+    fn reset_mapping() {
         let past = Instant::now().checked_sub(Duration::from_millis(1));
         let future = Instant::now().checked_add(Duration::from_secs(60));
+        let map = |reason, deadline| {
+            let err = reset_error(reason, headers(), deadline, StreamError::Reset(reason));
+            let f = failure(&err);
+            assert_eq!(f.headers.get(header::CONTENT_TYPE).unwrap(), "x");
+            assert!(f.source().is_some());
+            err
+        };
 
-        let status =
-            |reason, deadline| match &*reset_error(reason, hdrs.clone(), Bytes::new(), deadline) {
-                ClientError::GrpcStatus(st, ..) => Some(*st),
-                ClientError::DeadlineExceeded(h) => {
-                    assert_eq!(h.get(header::CONTENT_TYPE).unwrap(), "x");
-                    None
-                }
-                err => panic!("{err:?}"),
-            };
-        assert_eq!(status(Reason::CANCEL, past), None);
-        assert_eq!(status(Reason::CANCEL, future), Some(GrpcStatus::Cancelled));
-        assert_eq!(status(Reason::CANCEL, None), Some(GrpcStatus::Cancelled));
-        assert_eq!(
-            status(Reason::REFUSED_STREAM, past),
-            Some(GrpcStatus::Unavailable)
-        );
+        let err = map(Reason::CANCEL, past);
+        assert!(matches!(err, ClientError::DeadlineExceeded(_)), "{err:?}");
+        assert_eq!(err.status(), GrpcStatus::DeadlineExceeded);
+        assert_eq!(err.message(), "Stream reset with CANCEL after the deadline");
+
+        for deadline in [future, None] {
+            let err = map(Reason::CANCEL, deadline);
+            assert!(matches!(err, ClientError::StreamFailed(_)), "{err:?}");
+            assert_eq!(err.status(), GrpcStatus::Cancelled);
+            assert_eq!(err.message(), "Stream reset with CANCEL");
+        }
+
+        let err = map(Reason::REFUSED_STREAM, past);
+        assert!(matches!(err, ClientError::NotProcessed(_)), "{err:?}");
+        assert_eq!(err.status(), GrpcStatus::Unavailable);
+
+        let err = map(Reason::ENHANCE_YOUR_CALM, None);
+        assert!(matches!(err, ClientError::StreamFailed(_)), "{err:?}");
+        assert_eq!(err.status(), GrpcStatus::ResourceExhausted);
+    }
+
+    #[test]
+    fn stream_errors() {
+        let err = stream_error(StreamError::WindowOverflowed, headers(), None);
+        assert!(matches!(err, ClientError::StreamFailed(_)), "{err:?}");
+        assert_eq!(err.status(), GrpcStatus::Internal);
+        assert_eq!(err.message(), StreamError::WindowOverflowed.to_string());
+        assert!(err.source().is_some());
     }
 
     #[test]
     fn send_size_limit() {
         let msg = |res: Result<u32, ClientError>| match res.unwrap_err() {
-            ClientError::GrpcStatus(GrpcStatus::ResourceExhausted, hdrs, None) => {
-                assert_eq!(hdrs.len(), 1);
-                hdrs.get(consts::GRPC_MESSAGE).unwrap().clone()
+            ClientError::InvalidRequest(f) => {
+                assert_eq!(f.code, GrpcStatus::ResourceExhausted);
+                assert!(f.headers.is_empty());
+                f.message
             }
             err => panic!("{err:?}"),
         };
@@ -643,30 +722,65 @@ mod tests {
     }
 
     #[test]
-    fn http_status_mapping() {
-        for (code, status) in [
-            (400, GrpcStatus::Internal),
-            (401, GrpcStatus::Unauthenticated),
-            (403, GrpcStatus::PermissionDenied),
-            (404, GrpcStatus::Unimplemented),
-            (429, GrpcStatus::Unavailable),
-            (502, GrpcStatus::Unavailable),
-            (503, GrpcStatus::Unavailable),
-            (504, GrpcStatus::Unavailable),
-            (500, GrpcStatus::Unknown),
-            (302, GrpcStatus::Unknown),
-            (204, GrpcStatus::Unknown),
-        ] {
-            let st = StatusCode::from_u16(code).unwrap();
-            let err = http_status_error(st, HeaderMap::new(), Bytes::new());
-            let ClientError::GrpcStatus(s, hdrs, _) = &*err else {
-                panic!("{err:?}");
+    fn trailers_only_mapping() {
+        let map =
+            |status: Option<u16>, ct: Option<&'static str>, grpc_status: Option<&'static str>| {
+                let mut hdrs = HeaderMap::new();
+                if let Some(ct) = ct {
+                    hdrs.insert(header::CONTENT_TYPE, HeaderValue::from_static(ct));
+                }
+                if let Some(st) = grpc_status {
+                    hdrs.insert(consts::GRPC_STATUS, HeaderValue::from_static(st));
+                }
+                let status = status.map(|st| StatusCode::from_u16(st).unwrap());
+                trailers_only(status, hdrs)
             };
-            assert_eq!(*s, status, "{code}");
-            assert_eq!(
-                hdrs.get(consts::GRPC_MESSAGE).unwrap(),
-                &format!("HTTP status {code}")
-            );
-        }
+        let grpc = Some("application/grpc");
+
+        // a status from the server wins
+        let err = map(Some(503), None, Some("5"));
+        assert!(
+            matches!(&err, ClientError::Status(st) if st.code == GrpcStatus::NotFound),
+            "{err:?}"
+        );
+        let err = map(Some(200), grpc, Some("4"));
+        assert!(matches!(&err, ClientError::Status(_)), "{err:?}");
+        assert_eq!(err.status(), GrpcStatus::DeadlineExceeded);
+
+        let err = map(Some(503), None, Some("x"));
+        assert!(matches!(err, ClientError::InvalidResponse(_)), "{err:?}");
+        assert_eq!(err.status(), GrpcStatus::Unknown);
+        assert_eq!(err.message(), "Unknown grpc-status: x");
+
+        let err = map(Some(503), grpc, None);
+        assert!(matches!(err, ClientError::NotGrpc(_)), "{err:?}");
+        assert_eq!(err.status(), GrpcStatus::Unavailable);
+        let err = map(None, grpc, Some("0"));
+        assert!(
+            matches!(&err, ClientError::NotGrpc(r) if r.http_status.is_none()),
+            "{err:?}"
+        );
+        let err = map(Some(200), Some("text/html"), None);
+        assert!(matches!(err, ClientError::NotGrpc(_)), "{err:?}");
+        assert_eq!(err.status(), GrpcStatus::Unknown);
+        assert_eq!(err.message(), "Invalid content-type: text/html");
+
+        // a grpc response without status or message
+        let err = map(Some(200), grpc, None);
+        assert!(matches!(err, ClientError::InvalidResponse(_)), "{err:?}");
+        assert_eq!(err.status(), GrpcStatus::Unknown);
+        assert_eq!(err.message(), NO_GRPC_STATUS);
+        let err = map(Some(200), grpc, Some("0"));
+        assert!(matches!(err, ClientError::InvalidResponse(_)), "{err:?}");
+        assert_eq!(err.status(), GrpcStatus::Internal);
+        assert_eq!(err.message(), NO_MESSAGE);
+    }
+
+    #[test]
+    fn error_text_sources() {
+        let err = h2::client::ClientError::Connect(ntex_net::connect::ConnectError::Io(
+            std::io::Error::other("refused"),
+        ));
+        assert_eq!(error_text(&err), "Connect error: Tcp connect: refused");
     }
 }

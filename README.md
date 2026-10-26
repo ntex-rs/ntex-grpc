@@ -71,7 +71,7 @@ Add the runtime crates to `Cargo.toml`:
 ```toml
 [dependencies]
 ntex = "4"
-ntex-grpc = "3"
+ntex-grpc = "4"
 ntex-h2 = "4"
 ```
 
@@ -125,18 +125,22 @@ match req.send().await {
     Ok(res) => println!("trailers: {:?}", res.trailers()),
     // the error derefs to `ClientError`
     Err(err) => match &*err {
-        ClientError::GrpcStatus(status, trailers, _) => {
-            println!("failed with {status:?}, trailers: {trailers:?}")
+        ClientError::Status(status) => {
+            println!("failed with {:?}: {}", status.code, status.message())
         }
-        _ => println!("request failed: {err}"),
+        ClientError::NotProcessed(_) => println!("safe to retry: {err}"),
+        _ => println!("request failed with {:?}: {err}", err.status()),
     },
 }
 ```
 
-A non-OK status from the server comes back as `ClientError::GrpcStatus`.
-If the timeout runs out, you get `ClientError::DeadlineExceeded`, whether the
-server reported it or the client gave up first.
-Connection, HTTP/2 and decoding failures have their own `ClientError` variants.
+A non-OK status from the server comes back as `ClientError::Status`, with the
+trailers as `metadata`. The other variants are local failures: `InvalidRequest`,
+`NotProcessed` (the server did not process the call, it is safe to retry),
+`Connection`, `StreamFailed`, `NotGrpc` (the response is not gRPC, e.g. an
+HTTP error from a proxy), `InvalidResponse` and `DeadlineExceeded` (the client
+gave up when the timeout ran out). `err.status()` and `err.message()` give the
+gRPC status and message for any of them.
 
 ## Server
 
@@ -259,7 +263,7 @@ imports them from `google/protobuf`, the generated code uses these types.
 gzip and zstd message compression comes with the `compression` feature:
 
 ```toml
-ntex-grpc = { version = "3.2", features = ["compression"] }
+ntex-grpc = { version = "4", features = ["compression"] }
 ```
 
 Requests go out uncompressed unless you pick an encoding:

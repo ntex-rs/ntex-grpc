@@ -1,0 +1,22 @@
+[package]
+name = "routeguide"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[[bin]]
+name = "routeguide-client"
+path = "src/client.rs"
+
+[[bin]]
+name = "routeguide-server"
+path = "src/server.rs"
+
+[dependencies]
+ntex = { workspace = true }
+ntex-grpc = { workspace = true }
+ntex-h2 = { workspace = true }
+
+clap = { workspace = true }
+env_logger = { workspace = true }

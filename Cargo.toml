@@ -4,7 +4,8 @@ members = [
   "ntex-grpc-codegen",
   "ntex-grpc-derive",
   "examples/custom",
-  "examples/helloworld"
+  "examples/helloworld",
+  "examples/routeguide"
 ]
 resolver = "3"
 

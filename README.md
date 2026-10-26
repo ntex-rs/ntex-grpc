@@ -360,6 +360,32 @@ imports them from `google/protobuf`, the generated code uses these types.
 `Duration` converts to and from `std::time::Duration`. `Timestamp` converts to
 `SystemTime`, and `Timestamp::now()` gives the current time.
 
+## Message-size limits
+
+The client accepts response messages up to 4 MiB and sends request messages
+up to 2 GiB - 1 by default. Set client-wide defaults on the transport:
+
+```rust
+let transport = ntex_grpc::client::Client::new(h2client)
+    .max_message_size(16 * 1024 * 1024)
+    .max_send_message_size(8 * 1024 * 1024);
+let client = GreeterClient::new(transport);
+```
+
+These limits apply to each message in unary and streaming calls. Override
+either limit for one call using `Request::max_message_size()` /
+`max_send_message_size()` or the same methods on `StreamRequest`:
+
+```rust
+let mut req = client.say_hello(&msg);
+req.max_message_size(32 * 1024 * 1024);
+let res = req.send().await.unwrap();
+```
+
+`GrpcServer` has the same setters: `max_message_size()` limits received
+request messages, and `max_send_message_size()` limits response messages.
+Zero allows only empty encoded messages; it does not disable the limit.
+
 ## Compression
 
 gzip and zstd message compression comes with the `compression` feature:
@@ -387,10 +413,10 @@ either encoding.
 
 * Empty messages, messages under 64 bytes and messages that don't get smaller
   are sent uncompressed.
-* Size limits apply after decompression. `max_message_size()` on the request
-  and on `GrpcServer` covers the decompressed message, and a larger one fails
-  with `RESOURCE_EXHAUSTED`. `max_send_message_size()` covers the message as
-  it is sent, after compression.
+* Size limits apply after decompression. `max_message_size()` on the client,
+  request and `GrpcServer` covers the decompressed message, and a larger one
+  fails with `RESOURCE_EXHAUSTED`. `max_send_message_size()` covers the
+  message as it is sent, after compression.
 * Large messages are compressed and decompressed on the runtime's blocking
   thread pool, so they don't hold up the worker thread.
 * A server that doesn't support the encoding fails the call with

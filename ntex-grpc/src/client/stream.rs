@@ -95,7 +95,8 @@ impl<M: MethodDef, St> StreamTransport<M, St> for Client {
         &self,
         ctx: &mut RequestContext<'_, St>,
     ) -> Result<StreamCall, Error<ClientError>> {
-        StreamTransport::<M, St>::open(&self.0, ctx).await
+        ctx.message_size_defaults(self.max_message_size, self.max_send_message_size);
+        StreamTransport::<M, St>::open(&self.pool, ctx).await
     }
 }
 
@@ -250,7 +251,10 @@ impl<'a, T, M, K> StreamRequest<'a, T, M, K> {
         self
     }
 
-    /// Set the size limit of each response message, 4 MiB by default.
+    /// Set the size limit of each response message.
+    ///
+    /// Overrides the [`Client`] default for this call. Without a client
+    /// default or an override, the limit is 4 MiB.
     ///
     /// A larger message fails the call with
     /// [`GrpcStatus::ResourceExhausted`].
@@ -259,7 +263,10 @@ impl<'a, T, M, K> StreamRequest<'a, T, M, K> {
         self
     }
 
-    /// Set the size limit of each request message, 2 GiB - 1 by default.
+    /// Set the size limit of each request message.
+    ///
+    /// Overrides the [`Client`] default for this call. Without a client
+    /// default or an override, the limit is 2 GiB - 1.
     ///
     /// A larger message is not sent, sending it fails with
     /// [`GrpcStatus::ResourceExhausted`].

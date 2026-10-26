@@ -73,7 +73,10 @@ impl<'s, S> RequestContext<'s, S> {
         self.max_message_size
     }
 
-    /// Set the size limit of the response message, 4 MiB by default.
+    /// Set the size limit of the response message.
+    ///
+    /// Overrides the [`Client`](super::Client) default for this call.
+    /// Without a client default or an override, the limit is 4 MiB.
     ///
     /// Built-in transports check the length the server declares for the
     /// message. If it is over the limit, they reset the stream instead of
@@ -82,6 +85,7 @@ impl<'s, S> RequestContext<'s, S> {
     /// A compressed message must fit the limit after decompression too.
     pub fn max_message_size(&mut self, size: usize) -> &mut Self {
         self.max_message_size = size;
+        self.flags.insert(Flags::MAX_MESSAGE_SIZE);
         self
     }
 
@@ -90,7 +94,10 @@ impl<'s, S> RequestContext<'s, S> {
         self.max_send_message_size
     }
 
-    /// Set the size limit of the request message, 2 GiB - 1 by default.
+    /// Set the size limit of the request message.
+    ///
+    /// Overrides the [`Client`](super::Client) default for this call.
+    /// Without a client default or an override, the limit is 2 GiB - 1.
     ///
     /// Built-in transports do not send a larger message and return
     /// [`GrpcStatus::ResourceExhausted`](crate::GrpcStatus::ResourceExhausted).
@@ -99,7 +106,17 @@ impl<'s, S> RequestContext<'s, S> {
     /// compression.
     pub fn max_send_message_size(&mut self, size: usize) -> &mut Self {
         self.max_send_message_size = size;
+        self.flags.insert(Flags::MAX_SEND_MESSAGE_SIZE);
         self
+    }
+
+    pub(super) fn message_size_defaults(&mut self, recv: usize, send: usize) {
+        if !self.flags.contains(Flags::MAX_MESSAGE_SIZE) {
+            self.max_message_size = recv;
+        }
+        if !self.flags.contains(Flags::MAX_SEND_MESSAGE_SIZE) {
+            self.max_send_message_size = send;
+        }
     }
 
     /// Get the compression of the request message.
@@ -237,15 +254,17 @@ impl<'s, S> RequestContext<'s, S> {
 }
 
 /// Default limit of a received message.
-const DEFAULT_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+pub(super) const DEFAULT_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
 /// Default limit of a sent message.
-const DEFAULT_MAX_SEND_MESSAGE_SIZE: usize = i32::MAX as usize;
+pub(super) const DEFAULT_MAX_SEND_MESSAGE_SIZE: usize = i32::MAX as usize;
 
 bitflags::bitflags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
     struct Flags: u8 {
         const DISCONNECT_ON_DROP = 0b0000_0001;
+        const MAX_MESSAGE_SIZE = 0b0000_0010;
+        const MAX_SEND_MESSAGE_SIZE = 0b0000_0100;
     }
 }
 
@@ -336,6 +355,7 @@ impl RequestContextBuilder {
     /// A compressed message must fit the limit after decompression too.
     pub fn max_message_size(&mut self, size: usize) -> &mut Self {
         self.max_message_size = size;
+        self.flags.insert(Flags::MAX_MESSAGE_SIZE);
         self
     }
 
@@ -353,6 +373,7 @@ impl RequestContextBuilder {
     /// compression.
     pub fn max_send_message_size(&mut self, size: usize) -> &mut Self {
         self.max_send_message_size = size;
+        self.flags.insert(Flags::MAX_SEND_MESSAGE_SIZE);
         self
     }
 
@@ -576,7 +597,10 @@ where
         self
     }
 
-    /// Set the size limit of the response message, 4 MiB by default.
+    /// Set the size limit of the response message.
+    ///
+    /// Overrides the [`Client`](super::Client) default for this call.
+    /// Without a client default or an override, the limit is 4 MiB.
     ///
     /// Built-in transports reset the stream and return
     /// [`GrpcStatus::ResourceExhausted`](crate::GrpcStatus::ResourceExhausted)
@@ -586,7 +610,10 @@ where
         self
     }
 
-    /// Set the size limit of the request message, 2 GiB - 1 by default.
+    /// Set the size limit of the request message.
+    ///
+    /// Overrides the [`Client`](super::Client) default for this call.
+    /// Without a client default or an override, the limit is 2 GiB - 1.
     ///
     /// Built-in transports return
     /// [`GrpcStatus::ResourceExhausted`](crate::GrpcStatus::ResourceExhausted)
@@ -848,6 +875,39 @@ mod tests {
         ctx.max_send_message_size(20);
         assert_eq!(ctx.get_max_send_message_size(), 20);
         assert_eq!(ctx.get_max_message_size(), 10);
+    }
+
+    #[test]
+    fn context_message_size_defaults() {
+        // Explicit limits are overrides even when they equal the library defaults.
+        for (recv, send) in [
+            (0, 0),
+            (DEFAULT_MAX_MESSAGE_SIZE, DEFAULT_MAX_SEND_MESSAGE_SIZE),
+        ] {
+            let mut builder = RequestContextBuilder::new();
+            builder.max_message_size(recv).max_send_message_size(send);
+            let mut ctx = builder.build(&());
+            ctx.message_size_defaults(1, 2);
+            assert_eq!(ctx.get_max_message_size(), recv);
+            assert_eq!(ctx.get_max_send_message_size(), send);
+
+            let mut ctx = RequestContextBuilder::new().build(&());
+            ctx.max_message_size(recv).max_send_message_size(send);
+            ctx.message_size_defaults(1, 2);
+            assert_eq!(ctx.get_max_message_size(), recv);
+            assert_eq!(ctx.get_max_send_message_size(), send);
+        }
+
+        let mut builder = RequestContextBuilder::new();
+        builder.max_message_size(10);
+        let mut ctx = builder.build(&());
+        ctx.message_size_defaults(1, 2);
+        assert_eq!(ctx.get_max_message_size(), 10);
+        assert_eq!(ctx.get_max_send_message_size(), 2);
+        ctx.max_send_message_size(20);
+        ctx.message_size_defaults(3, 4);
+        assert_eq!(ctx.get_max_message_size(), 10);
+        assert_eq!(ctx.get_max_send_message_size(), 20);
     }
 
     #[cfg(feature = "compression")]

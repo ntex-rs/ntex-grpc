@@ -199,7 +199,7 @@ impl<'s, S> RequestContext<'s, S> {
     ///
     /// [`header()`](Self::header) does not fail on an invalid name or value, it
     /// remembers the error instead. Built-in transports return it as
-    /// [`ClientError::Http`](super::ClientError::Http) before sending anything,
+    /// [`ClientError::InvalidRequest`](super::ClientError::InvalidRequest) before sending anything,
     /// custom transports should do the same.
     pub fn take_error(&mut self) -> Option<HttpError> {
         self.err.take()
@@ -453,7 +453,7 @@ impl RequestContextBuilder {
     ///
     /// [`header()`](Self::header) does not fail on an invalid name or value, it
     /// remembers the error instead. Built-in transports return it as
-    /// [`ClientError::Http`](super::ClientError::Http) before sending anything,
+    /// [`ClientError::InvalidRequest`](super::ClientError::InvalidRequest) before sending anything,
     /// custom transports should do the same.
     pub fn take_error(&mut self) -> Option<HttpError> {
         self.err.take()

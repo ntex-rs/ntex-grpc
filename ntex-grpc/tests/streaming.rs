@@ -457,6 +457,62 @@ async fn bidi_compression() {
     assert_eq!(rx.status(), Some(GrpcStatus::Ok));
 }
 
+#[cfg(feature = "compression")]
+#[ntex::test]
+async fn contended_senders() {
+    use std::future::{Future, poll_fn};
+
+    let mut measurements = Vec::new();
+    for count in [32, 64, 128] {
+        let polls = Rc::new(Cell::new(0));
+        ntex::time::timeout(Duration::from_secs(5), async {
+            let client = client();
+            let mut req = StreamRequest::<_, Echo, _>::bidi(&client);
+            req.compression(ntex_grpc::Compression::Gzip);
+            let (tx, mut rx) = req.open().await.unwrap();
+            // Large enough to offload compression, so the send slot remains busy.
+            let input = StringValue {
+                value: "a".repeat(20_000).into(),
+            };
+            let mut tasks = Vec::new();
+            for _ in 0..count {
+                let tx = tx.clone();
+                let input = input.clone();
+                let polls = polls.clone();
+                tasks.push(ntex::rt::spawn(async move {
+                    let mut send = std::pin::pin!(tx.send(&input));
+                    poll_fn(|cx| {
+                        polls.set(polls.get() + 1);
+                        send.as_mut().poll(cx)
+                    })
+                    .await
+                    .unwrap();
+                }));
+            }
+            for result in ntex::util::join_all(tasks).await {
+                result.unwrap();
+            }
+            tx.close();
+            for _ in 0..count {
+                assert_eq!(rx.recv().await.unwrap().unwrap(), input);
+            }
+            assert!(rx.recv().await.is_none());
+            assert_eq!(rx.status(), Some(GrpcStatus::Ok));
+        })
+        .await
+        .expect("contended senders stalled");
+        measurements.push((count, polls.get()));
+    }
+
+    // Allow extra transport/runtime polls, but not a wake-all herd on every send.
+    assert!(
+        measurements
+            .iter()
+            .all(|(count, polls)| *polls <= count * 8),
+        "excessive send polls: {measurements:?}"
+    );
+}
+
 #[ntex::test]
 async fn server_streaming() {
     let client = client();

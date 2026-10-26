@@ -125,6 +125,8 @@ bitflags::bitflags! {
         const CLOSE_PENDING = 0b0000_1000;
         /// The stream is attached to an h2 stream.
         const ATTACHED      = 0b0001_0000;
+        /// The h2 stream is reset with `CANCEL`.
+        const RESET         = 0b0010_0000;
     }
 }
 
@@ -246,6 +248,18 @@ impl SendShared {
 
     pub(crate) fn sent(&self) -> usize {
         self.sent.get()
+    }
+
+    /// Checks if the call is cancelled, the h2 stream is reset by this side.
+    pub(crate) fn is_reset(&self) -> bool {
+        self.flags.get().contains(Flags::RESET)
+    }
+
+    fn reset(&self) {
+        if let Some(backend) = self.backend.get() {
+            backend.reset(Reason::CANCEL);
+            self.insert(Flags::RESET);
+        }
     }
 
     /// Attaches the h2 stream, a stream cancelled before resets it.
@@ -400,9 +414,7 @@ impl SendShared {
     fn cancel(&self) {
         self.insert(Flags::CLOSED);
         self.set_error(StreamError::Closed);
-        if let Some(backend) = self.backend.get() {
-            backend.reset(Reason::CANCEL);
-        }
+        self.reset();
         self.wake_all();
     }
 
@@ -416,9 +428,7 @@ impl SendShared {
         self.insert(Flags::CLOSED);
         if flags.contains(Flags::SENDING) {
             self.set_error(StreamError::Closed);
-            if let Some(backend) = self.backend.get() {
-                backend.reset(Reason::CANCEL);
-            }
+            self.reset();
         }
         self.wake_all();
         if self.error.borrow().is_some() {
@@ -440,9 +450,7 @@ impl Drop for SendGuard<'_> {
         let flags = shared.flags.get();
         if flags.contains(Flags::SENDING) {
             // dropped while writing, part of the message may be sent
-            if let Some(backend) = shared.backend.get() {
-                backend.reset(Reason::CANCEL);
-            }
+            shared.reset();
             shared.set_error(StreamError::Closed);
             shared.insert(Flags::CLOSED);
         }
@@ -517,6 +525,10 @@ impl<T> SendStream<T> {
     }
 
     /// Cancels the call, the h2 stream is reset with `CANCEL`.
+    ///
+    /// On the client the response stream, or the reply of a
+    /// client-streaming call, fails with [`ClientError::StreamFailed`] and
+    /// `CANCELLED`.
     pub fn cancel(&self) {
         self.shared.cancel();
     }
@@ -641,22 +653,14 @@ impl Decoder {
         !self.data.as_slice().is_empty()
     }
 
-    /// Returns the next complete message and its compressed flag.
-    fn next(&mut self) -> Result<Option<(u8, Bytes)>, (GrpcStatus, HeaderValue)> {
+    /// Returns the next complete message and its compressed flag, or the
+    /// length of a message over the size limit.
+    fn next(&mut self) -> Result<Option<(u8, Bytes)>, usize> {
         let Some(len) = self.next_len() else {
             return Ok(None);
         };
         if len > self.max_size {
-            let msg = format!(
-                "grpc: received message larger than max ({len} vs. {})",
-                self.max_size
-            );
-            return Err((
-                GrpcStatus::ResourceExhausted,
-                HeaderValue::try_from(msg).unwrap_or_else(|_| {
-                    HeaderValue::from_static("grpc: received message larger than max")
-                }),
-            ));
+            return Err(len);
         }
         if self.data.as_slice().len() - 5 < len {
             return Ok(None);
@@ -771,6 +775,8 @@ pub(crate) struct ClientRecv {
     /// The error to report once the last message is read.
     pending_end: Option<Error<ClientError>>,
     service: &'static str,
+    /// The request stream of a client-streaming or a bidi call.
+    send: Option<Rc<SendShared>>,
 }
 
 impl ClientRecv {
@@ -778,6 +784,7 @@ impl ClientRecv {
         rx: h2::client::RecvStream,
         deadline: Option<Instant>,
         service: &'static str,
+        send: Option<Rc<SendShared>>,
     ) -> Self {
         let sleep = deadline.map(|d| {
             time::sleep(time::Millis::from(
@@ -792,6 +799,7 @@ impl ClientRecv {
             other: Data::Empty,
             pending_end: None,
             service,
+            send,
         }
     }
 
@@ -878,6 +886,11 @@ impl ClientRecv {
                         tr::TIMEOUT_RAN_OUT,
                         headers.clone(),
                     )));
+                }
+                if self.send.as_ref().is_some_and(|s| s.is_reset()) {
+                    let failure = CallFailure::new(GrpcStatus::Cancelled, tr::CANCELLED)
+                        .with_headers(headers.clone());
+                    return Poll::Ready(Err(Error::from(ClientError::StreamFailed(failure))));
                 }
                 let failure = CallFailure::new(GrpcStatus::Unavailable, tr::STREAM_CLOSED)
                     .with_headers(headers.clone());
@@ -1104,6 +1117,23 @@ impl<T> RecvStream<T> {
         }
     }
 
+    /// The error of a message over the size limit.
+    fn too_large(&self, len: usize) -> StreamError {
+        let max_size = self.decoder.max_size;
+        if self.is_client() {
+            let msg = tr::too_large(len, max_size);
+            let err =
+                tr::invalid_response(GrpcStatus::ResourceExhausted, msg, self.headers.clone());
+            StreamError::Client(err.with_service(self.service()))
+        } else {
+            let msg = format!("grpc: received message larger than max ({len} vs. {max_size})");
+            let msg = HeaderValue::try_from(msg).unwrap_or_else(|_| {
+                HeaderValue::from_static("grpc: received message larger than max")
+            });
+            StreamError::Status(GrpcStatus::ResourceExhausted, msg)
+        }
+    }
+
     /// The error of a stream that ends inside a message. On the client, the
     /// error of a response without a message too.
     pub(crate) fn truncated(&self) -> StreamError {
@@ -1176,9 +1206,7 @@ impl<T: Message> RecvStream<T> {
                     continue;
                 }
                 Ok(None) => {}
-                Err((st, msg)) => {
-                    return Poll::Ready(Some(Err(self.fail(self.status_error(st, msg)))));
-                }
+                Err(len) => return Poll::Ready(Some(Err(self.fail(self.too_large(len))))),
             }
             if let Some(end) = &self.end {
                 let end = end.clone();
@@ -1385,12 +1413,218 @@ mod tests {
         // the size is checked as soon as the prefix has arrived
         dec.data
             .push(Bytes::from(frame(0, b"hello")[..5].to_vec()), dec.max_size);
-        let (st, msg) = dec.next().unwrap_err();
-        assert_eq!(st, GrpcStatus::ResourceExhausted);
-        assert_eq!(msg, "grpc: received message larger than max (5 vs. 4)");
+        assert_eq!(dec.next(), Err(5));
 
         let mut dec = decoder(5);
         dec.data.push(Bytes::from(frame(0, b"hello")), dec.max_size);
         assert_eq!(dec.next(), Ok(Some((0, Bytes::from_static(b"hello")))));
+    }
+
+    #[test]
+    fn server_error_from_stream_error() {
+        let cases = [
+            (
+                StreamError::Closed,
+                GrpcStatus::Internal,
+                "Stream is closed",
+            ),
+            (
+                StreamError::Reset(Reason::ENHANCE_YOUR_CALM),
+                GrpcStatus::ResourceExhausted,
+                "Stream reset with ENHANCE_YOUR_CALM",
+            ),
+            (
+                StreamError::Disconnected,
+                GrpcStatus::Unavailable,
+                "Connection is closed",
+            ),
+            (
+                StreamError::Status(GrpcStatus::NotFound, HeaderValue::from_static("gone")),
+                GrpcStatus::NotFound,
+                "gone",
+            ),
+        ];
+        for (err, st, msg) in cases {
+            let err = ServerError::from(err);
+            assert_eq!((err.status, err.message.to_str().unwrap()), (st, msg));
+        }
+    }
+
+    #[test]
+    fn client_error_from_stream_error() {
+        let err = Error::<ClientError>::from(StreamError::Status(
+            GrpcStatus::ResourceExhausted,
+            HeaderValue::from_static("too big"),
+        ));
+        assert!(matches!(*err, ClientError::InvalidRequest(_)));
+        assert_eq!(err.status(), GrpcStatus::ResourceExhausted);
+        assert_eq!(err.message(), "too big");
+
+        // a refused stream is not processed by the server, it can be retried
+        let err = Error::<ClientError>::from(StreamError::Reset(Reason::REFUSED_STREAM));
+        assert!(matches!(*err, ClientError::NotProcessed(_)));
+        assert_eq!(err.status(), GrpcStatus::Unavailable);
+
+        let err = Error::<ClientError>::from(StreamError::Reset(Reason::CANCEL));
+        assert!(matches!(*err, ClientError::StreamFailed(_)));
+        assert_eq!(err.status(), GrpcStatus::Cancelled);
+
+        let err = Error::<ClientError>::from(StreamError::Disconnected);
+        assert!(matches!(
+            *err,
+            ClientError::Connection {
+                request_sent: true,
+                ..
+            }
+        ));
+        assert_eq!(err.status(), GrpcStatus::Unavailable);
+
+        let err = Error::<ClientError>::from(StreamError::Closed);
+        assert!(matches!(*err, ClientError::StreamFailed(_)));
+        assert_eq!(err.status(), GrpcStatus::Cancelled);
+
+        // the status of the error matches the status of the call it ends
+        for err in [
+            StreamError::Closed,
+            StreamError::Reset(Reason::REFUSED_STREAM),
+            StreamError::Disconnected,
+        ] {
+            let st = err.status();
+            assert_eq!(Error::<ClientError>::from(err).status(), st);
+        }
+    }
+
+    #[test]
+    fn unattached_send_stream() {
+        let tx = SendStream::<()>::new();
+        let cx = Context::from_waker(Waker::noop());
+        // messages wait until the call is opened
+        assert!(tx.poll_ready(&cx).is_pending());
+        assert_eq!(tx.shared.wakers.borrow().len(), 1);
+        assert!(!tx.is_closed());
+        // response headers are server side only
+        assert!(!tx.header(consts::GRPC_STATUS, HeaderValue::from_static("0")));
+
+        let tx2 = tx.clone();
+        drop(tx);
+        assert!(!tx2.is_closed());
+        drop(tx2.clone());
+        assert!(!tx2.is_closed());
+
+        // the last clone closes the stream
+        let shared = tx2.shared.clone();
+        drop(tx2);
+        assert!(shared.flags.get().contains(Flags::CLOSED));
+        assert!(shared.wakers.borrow().is_empty());
+        assert!(matches!(
+            shared.poll_ready(&cx),
+            Poll::Ready(Err(StreamError::Closed))
+        ));
+    }
+
+    #[ntex::test]
+    async fn cancelled_send_stream() {
+        let tx = SendStream::<()>::default();
+        tx.cancel();
+        assert!(tx.is_closed());
+        assert!(matches!(tx.send(&()).await, Err(StreamError::Closed)));
+        assert!(matches!(tx.ready().await, Err(StreamError::Closed)));
+
+        let tx = SendStream::<()>::new();
+        tx.close();
+        tx.close();
+        assert!(tx.is_closed());
+        assert!(matches!(tx.ready().await, Err(StreamError::Closed)));
+    }
+
+    #[ntex::test]
+    async fn server_recv_end() {
+        // the request ended with its headers
+        let mut rx = RecvStream::<()>::server(ServerRecv::new(true), HeaderMap::new(), 64, None);
+        assert_eq!(rx.status(), None);
+        assert!(rx.recv().await.is_none());
+        assert_eq!(rx.status(), Some(GrpcStatus::Ok));
+        assert!(rx.recv().await.is_none());
+
+        // the end of a reset request is reported once
+        let recv = ServerRecv::new(false);
+        let mut rx = RecvStream::<()>::server(recv.clone(), HeaderMap::new(), 64, None);
+        recv.push_end(Err(StreamError::Reset(Reason::CANCEL)));
+        recv.push_end(Ok(HeaderMap::new()));
+        assert!(recv.is_ended());
+        assert!(matches!(
+            rx.recv().await,
+            Some(Err(StreamError::Reset(Reason::CANCEL)))
+        ));
+        assert_eq!(rx.status(), Some(GrpcStatus::Cancelled));
+        assert!(rx.recv().await.is_none());
+
+        let mut trailers = HeaderMap::new();
+        trailers.insert(consts::GRPC_STATUS, HeaderValue::from_static("0"));
+        let recv = ServerRecv::new(false);
+        let mut rx = RecvStream::<()>::server(recv.clone(), HeaderMap::new(), 64, None);
+        recv.push_end(Ok(trailers.clone()));
+        assert!(rx.recv().await.is_none());
+        assert_eq!(rx.trailers(), &trailers);
+    }
+
+    #[ntex::test]
+    async fn server_recv_single() {
+        let rx = RecvStream::<()>::server(ServerRecv::new(true), HeaderMap::new(), 64, None);
+        let err = rx.single().await.unwrap_err();
+        assert_eq!(err.status, GrpcStatus::InvalidArgument);
+
+        let recv = ServerRecv::new(false);
+        let rx = RecvStream::<()>::server(recv.clone(), HeaderMap::new(), 64, None);
+        recv.push_end(Err(StreamError::Disconnected));
+        let err = rx.single().await.unwrap_err();
+        assert_eq!(err.status, GrpcStatus::Unavailable);
+    }
+
+    #[test]
+    fn call_streams_drop_closes_recv() {
+        let recv = ServerRecv::new(false);
+        let streams = CallStreams::new(
+            recv.clone(),
+            HeaderMap::new(),
+            64,
+            None,
+            Rc::new(SendShared::new()),
+        );
+        drop(streams);
+
+        // the handler does not read the request, its end is dropped
+        recv.push_end(Ok(HeaderMap::new()));
+        assert!(recv.is_ended());
+        let mut trailers = HeaderMap::new();
+        let cx = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            recv.poll(&mut trailers, &cx),
+            Poll::Ready(Item::End(Err(StreamError::Closed)))
+        ));
+    }
+
+    #[test]
+    fn call_streams_take() {
+        let recv = ServerRecv::new(false);
+        let mut streams = CallStreams::new(
+            recv.clone(),
+            HeaderMap::new(),
+            64,
+            None,
+            Rc::new(SendShared::new()),
+        );
+        let rx = streams.recv::<()>();
+        let _tx = streams.send::<()>();
+        drop(streams);
+        // the taken stream is still read
+        recv.push_end(Ok(HeaderMap::new()));
+        let cx = Context::from_waker(Waker::noop());
+        let mut trailers = HeaderMap::new();
+        assert!(matches!(
+            recv.poll(&mut trailers, &cx),
+            Poll::Ready(Item::End(Ok(())))
+        ));
+        drop(rx);
     }
 }

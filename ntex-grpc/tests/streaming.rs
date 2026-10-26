@@ -140,6 +140,24 @@ impl Drop for Running {
     }
 }
 
+/// `Svc` added under another name.
+struct Renamed(Svc);
+
+impl ntex_grpc::server::NamedService for Renamed {
+    const NAME: &'static str = "test.Renamed";
+}
+
+impl ServiceFactory<(), ServerRequest> for Renamed {
+    type Res = ntex_grpc::server::ServerResponse;
+    type Error = ServerError;
+    type Service = Svc;
+    type InitError = std::io::Error;
+
+    async fn create(&self, (): &()) -> Result<Svc, std::io::Error> {
+        Ok(self.0.clone())
+    }
+}
+
 #[ntex_grpc::server(Stream)]
 impl Svc {
     /// Echoes every message, `fail` ends the call with `NotFound`, `wait`
@@ -167,6 +185,10 @@ impl Svc {
                     ));
                 }
                 "wait" => std::future::pending::<()>().await,
+                "cancel" => {
+                    tx.cancel();
+                    return Ok(());
+                }
                 _ => {}
             }
             count += 1;
@@ -210,11 +232,14 @@ impl Svc {
 }
 
 fn start(svc: Svc, server: impl FnOnce(GrpcServer) -> GrpcServer) -> SimpleClient {
+    start_server(server(GrpcServer::new(svc)))
+}
+
+fn start_server(server: GrpcServer) -> SimpleClient {
     let (cli, srv) = IoTest::create();
     cli.remote_buffer_cap(64 * 1024 * 1024);
     srv.remote_buffer_cap(64 * 1024 * 1024);
 
-    let server = server(GrpcServer::new(svc));
     let srv = Io::new(srv, SharedCfg::new("SRV").build());
     ntex::rt::spawn(async move {
         let _ = Pipeline::new((), server).call(srv).await;
@@ -522,6 +547,175 @@ async fn unary_and_missing() {
     )
     .await;
     assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "12");
+}
+
+#[ntex::test]
+async fn bidi_as_stream() {
+    let client = client();
+    let (tx, mut rx) = StreamRequest::<_, Echo, _>::bidi(&client)
+        .open()
+        .await
+        .unwrap();
+    tx.send(&string("a")).await.unwrap();
+    tx.close();
+
+    let msg = ntex::util::stream_recv(&mut rx).await.unwrap().unwrap();
+    assert_eq!(msg, string("a"));
+    assert!(ntex::util::stream_recv(&mut rx).await.is_none());
+    assert_eq!(rx.status(), Some(GrpcStatus::Ok));
+}
+
+#[ntex::test]
+async fn bidi_client_cancel() {
+    let svc = Svc::default();
+    let client = start(svc.clone(), |s| s);
+    let (tx, mut rx) = StreamRequest::<_, Echo, _>::bidi(&client)
+        .open()
+        .await
+        .unwrap();
+    tx.send(&string("a")).await.unwrap();
+    assert_eq!(rx.recv().await.unwrap().unwrap(), string("a"));
+    assert_eq!(svc.0.get(), 1);
+
+    // the call is reset, the handler sees the request stream fail
+    tx.cancel();
+    assert!(tx.is_closed());
+    assert!(matches!(
+        tx.send(&string("b")).await,
+        Err(StreamError::Closed)
+    ));
+    wait_idle(&svc).await;
+    let err = rx.recv().await.unwrap().unwrap_err();
+    assert!(
+        matches!(client_error(&err), ClientError::StreamFailed(f) if f.code == GrpcStatus::Cancelled),
+        "{err:?}"
+    );
+    assert!(rx.recv().await.is_none());
+}
+
+#[ntex::test]
+async fn client_streaming_cancel() {
+    let svc = Svc::default();
+    let client = start(svc.clone(), |s| s);
+    let tx = SendStream::new();
+    let (res, ()) = join(
+        StreamRequest::<_, Sum, _>::client_streaming(&client, &tx).send(),
+        async {
+            tx.send(&UInt32Value { value: 1 }).await.unwrap();
+            tx.cancel();
+        },
+    )
+    .await;
+    let err = res.unwrap_err();
+    assert!(
+        matches!(&*err, ClientError::StreamFailed(f) if f.code == GrpcStatus::Cancelled),
+        "{err:?}"
+    );
+}
+
+#[ntex::test]
+async fn bidi_server_cancel() {
+    let svc = Svc::default();
+    let client = start(svc.clone(), |s| s);
+    let (tx, mut rx) = StreamRequest::<_, Echo, _>::bidi(&client)
+        .open()
+        .await
+        .unwrap();
+    tx.send(&string("a")).await.unwrap();
+    assert_eq!(rx.recv().await.unwrap().unwrap(), string("a"));
+    tx.send(&string("cancel")).await.unwrap();
+
+    // the handler resets the call instead of ending it with a status
+    let err = rx.recv().await.unwrap().unwrap_err();
+    assert_eq!(err.status(), GrpcStatus::Cancelled, "{err:?}");
+    assert!(rx.recv().await.is_none());
+    wait_idle(&svc).await;
+}
+
+#[ntex::test]
+async fn bidi_invalid_request() {
+    let client = client();
+    // the message does not decode
+    let (_, data, trailers) = call(
+        &client,
+        "/test.Stream/Echo",
+        req_headers(),
+        &b"\0\0\0\0\x02\x0a\x05"[..],
+    )
+    .await;
+    assert!(data.is_empty());
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "3");
+
+    // the request ends inside a message
+    let (_, data, trailers) = call(
+        &client,
+        "/test.Stream/Echo",
+        req_headers(),
+        &b"\0\0\0\0\x03\x0a\x01a\0\0"[..],
+    )
+    .await;
+    assert_eq!(data, b"\0\0\0\0\x03\x0a\x01a");
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "3");
+
+    // a server streaming request ends inside its second message
+    let (_, data, trailers) = call(
+        &client,
+        "/test.Stream/Count",
+        req_headers(),
+        &b"\0\0\0\0\x02\x08\x01\0\0"[..],
+    )
+    .await;
+    assert!(data.is_empty());
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "3");
+}
+
+#[ntex::test]
+async fn server_send_message_size() {
+    let svc = Svc::default();
+    let client = start(svc.clone(), |s| s.max_send_message_size(4));
+    let (tx, mut rx) = StreamRequest::<_, Echo, _>::bidi(&client)
+        .open()
+        .await
+        .unwrap();
+    tx.send(&string("a")).await.unwrap();
+    assert_eq!(rx.recv().await.unwrap().unwrap(), string("a"));
+    tx.send(&string("larger")).await.unwrap();
+
+    let err = rx.recv().await.unwrap().unwrap_err();
+    assert_eq!(err.status(), GrpcStatus::ResourceExhausted, "{err:?}");
+    assert!(rx.recv().await.is_none());
+    wait_idle(&svc).await;
+}
+
+#[ntex::test]
+async fn streaming_service_named() {
+    // `service_named()` passes every call as a unary one
+    let client = start_server(
+        GrpcServer::new(Renamed(Svc::default())).service_named("test.Stream", Svc::default()),
+    );
+    let (_, _, trailers) = call(
+        &client,
+        "/test.Stream/Echo",
+        req_headers(),
+        &b"\0\0\0\0\0"[..],
+    )
+    .await;
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "12");
+    assert_eq!(
+        trailers.get("grpc-message").unwrap(),
+        "Streaming is not supported for method: Echo"
+    );
+
+    // unary methods work
+    let (_, data, trailers) = call(
+        &client,
+        "/test.Stream/Unary",
+        req_headers(),
+        &b"\0\0\0\0\x02\x08\x01"[..],
+    )
+    .await;
+    assert_eq!(data, b"\0\0\0\0\x02\x08\x02");
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
 }
 
 /// Request headers of a call.

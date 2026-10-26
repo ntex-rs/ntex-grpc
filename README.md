@@ -245,6 +245,9 @@ same on the client and on the server. `SendStream<T>` sends messages with
 the stream too. `RecvStream<T>` gives the messages with `recv().await`, it
 returns `None` at the end of the stream.
 
+The [routeguide](examples/routeguide) example has a server and a client with
+all four kinds of rpcs.
+
 The generated client opens a bidi call with `open()`:
 
 ```rust

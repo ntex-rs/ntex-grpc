@@ -25,6 +25,8 @@ pub trait StreamTransport<M: MethodDef, St = ()> {
     ///
     /// `ctx` holds the headers and timeout set on the [`StreamRequest`]. The
     /// timeout covers the whole call, the time spent opening the stream too.
+    /// A wrapper must adjust the context before delegating to a built-in
+    /// transport, which sends the request headers.
     async fn open(
         &self,
         ctx: &mut RequestContext<'_, St>,
@@ -329,6 +331,10 @@ impl<'a, T, M: MethodDef> StreamRequest<'a, T, M, ServerStreaming<'a, M::Input>>
 
     /// Send the request message, returns the response stream.
     ///
+    /// The transport's final size limit and compression settings are used to
+    /// encode the request. If encoding fails, the opened call is cancelled
+    /// without sending its body.
+    ///
     /// Dropping the response stream before its end cancels the call.
     pub async fn open(self) -> Result<RecvStream<M::Output>, Error<ClientError>>
     where
@@ -347,10 +353,6 @@ impl<'a, T, M: MethodDef> StreamRequest<'a, T, M, ServerStreaming<'a, M::Input>>
         T: StreamTransport<M, St>,
     {
         let mut ctx = self.ctx.build(request_state);
-        // a message that cannot be sent fails the call before it is opened
-        let buf = tr::encode_message(self.kind.0, &ctx)
-            .await
-            .map_err(Error::from)?;
         let StreamCall {
             tx,
             rx,
@@ -358,28 +360,43 @@ impl<'a, T, M: MethodDef> StreamRequest<'a, T, M, ServerStreaming<'a, M::Input>>
             service,
         } = self.transport.open(&mut ctx).await?;
 
-        let res = if let Some(deadline) = deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if let Ok(res) = time::timeout(remaining, tx.send_pages(buf, true)).await {
-                res
-            } else {
+        let deadline_exceeded = || {
+            tx.reset(Reason::CANCEL);
+            tr::deadline_exceeded(tr::TIMEOUT_RAN_OUT, HeaderMap::new()).with_service(service)
+        };
+        let send = async {
+            let buf = tr::encode_message(self.kind.0, &ctx).await.map_err(|err| {
                 tx.reset(Reason::CANCEL);
-                let err = tr::deadline_exceeded(tr::TIMEOUT_RAN_OUT, HeaderMap::new());
-                return Err(err.with_service(service));
+                Error::from(err).with_service(service)
+            })?;
+            // Encoding can finish without yielding to the timeout.
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return Err(deadline_exceeded());
+            }
+            if let Err(err) = tx.send_pages(buf, true).await {
+                // the server can reply and reset the stream before it reads the
+                // whole request, the reply or the reset is in the receive queue
+                if !matches!(
+                    *err,
+                    OperationError::RemoteReset(_) | OperationError::Closed(Some(_))
+                ) {
+                    return Err(tr::operation_error(err, true, HeaderMap::new(), deadline)
+                        .with_service(service));
+                }
+            }
+            Ok(())
+        };
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(deadline_exceeded());
+            }
+            match time::timeout(remaining, send).await {
+                Ok(res) => res?,
+                Err(()) => return Err(deadline_exceeded()),
             }
         } else {
-            tx.send_pages(buf, true).await
-        };
-        if let Err(err) = res {
-            // the server can reply and reset the stream before it reads the
-            // whole request, the reply or the reset is in the receive queue
-            if !matches!(
-                *err,
-                OperationError::RemoteReset(_) | OperationError::Closed(Some(_))
-            ) {
-                return Err(tr::operation_error(err, true, HeaderMap::new(), deadline)
-                    .with_service(service));
-            }
+            send.await?;
         }
         Ok(RecvStream::client(
             ClientRecv::new(rx, deadline, service, None),
@@ -401,9 +418,13 @@ impl<'a, T, M: MethodDef> StreamRequest<'a, T, M, ClientStreaming> {
     ///
     /// Send the request messages on the stream passed to the method while
     /// this future runs, then close the stream or drop it. Messages sent
-    /// before the call is opened wait for it. A stream can be used for one
-    /// call only, a stream used already fails the call with
-    /// [`ClientError::InvalidRequest`].
+    /// before the call is opened wait for it. Once this future is polled,
+    /// the stream belongs to this call, even while opening. Reusing it for
+    /// another call fails with [`ClientError::InvalidRequest`].
+    ///
+    /// An opening error also fails the sender with the same client error.
+    /// Dropping this future while opening closes the sender and wakes
+    /// waiting sends.
     ///
     /// ```rust,ignore
     /// let tx = ntex_grpc::SendStream::new();
@@ -429,16 +450,23 @@ impl<'a, T, M: MethodDef> StreamRequest<'a, T, M, ClientStreaming> {
         T: StreamTransport<M, St>,
     {
         let shared = self.kind.0;
-        if shared.is_attached() {
-            return Err(Error::from(ClientError::InvalidRequest(CallFailure::new(
+        let opening = shared.start_open().ok_or_else(|| {
+            Error::from(ClientError::InvalidRequest(CallFailure::new(
                 GrpcStatus::Internal,
                 STREAM_USED,
-            ))));
-        }
+            )))
+        })?;
         let mut ctx = self.ctx.build(request_state);
-        let call = self.transport.open(&mut ctx).await?;
+        let call = match self.transport.open(&mut ctx).await {
+            Ok(call) => call,
+            Err(err) => {
+                opening.fail(err.clone());
+                return Err(err);
+            }
+        };
         let service = call.service;
         let mut rx = call.attach::<M::Output, St>(&shared, &ctx)?;
+        drop(opening);
 
         let output = match rx.recv().await {
             Some(Ok(output)) => output,

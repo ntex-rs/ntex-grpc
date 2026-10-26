@@ -5,7 +5,7 @@ use ntex::service::{Pipeline, ServiceFactory, cfg::SharedCfg};
 use ntex::testing::IoTest;
 use ntex::util::join;
 use ntex_bytes::{ByteString, Bytes};
-use ntex_grpc::client::{ClientError, Request, StreamRequest};
+use ntex_grpc::client::{Cause, ClientError, Request, StreamRequest};
 use ntex_grpc::google_types::{StringValue, UInt32Value};
 use ntex_grpc::server::{GrpcServer, ServerError, ServerRequest};
 use ntex_grpc::{GrpcStatus, MethodDef, RecvStream, SendStream, ServiceDef, StreamError};
@@ -236,6 +236,10 @@ fn start(svc: Svc, server: impl FnOnce(GrpcServer) -> GrpcServer) -> SimpleClien
 }
 
 fn start_server(server: GrpcServer) -> SimpleClient {
+    start_server_with_cfg(server, SharedCfg::new("CLI").build())
+}
+
+fn start_server_with_cfg(server: GrpcServer, cfg: SharedCfg) -> SimpleClient {
     let (cli, srv) = IoTest::create();
     cli.remote_buffer_cap(64 * 1024 * 1024);
     srv.remote_buffer_cap(64 * 1024 * 1024);
@@ -245,7 +249,7 @@ fn start_server(server: GrpcServer) -> SimpleClient {
         let _ = Pipeline::new((), server).call(srv).await;
     });
 
-    let io = Io::new(cli, SharedCfg::new("CLI").build());
+    let io = Io::new(cli, cfg);
     SimpleClient::new(io, false, "localhost".into())
 }
 
@@ -323,6 +327,62 @@ async fn bidi_error() {
     );
     assert!(rx.recv().await.is_none());
     assert_eq!(rx.status(), Some(GrpcStatus::NotFound));
+}
+
+async fn check_response_headers_failure(send_message: bool) {
+    let svc = Svc::default();
+    let cfg = SharedCfg::new("CLI")
+        .add(h2::ServiceConfig::new().set_max_header_list_size(1024))
+        .build();
+    let client = start_server_with_cfg(GrpcServer::new(svc.clone()), cfg);
+    let mut req = StreamRequest::<_, Echo, _>::bidi(&client);
+    // Accepted as request metadata, but too large to echo to this client.
+    req.header(X_TEST, HeaderValue::try_from("a".repeat(2048)).unwrap());
+    let (tx, mut rx) = req.open().await.unwrap();
+    if send_message {
+        tx.send(&string("a")).await.unwrap();
+    } else {
+        tx.close();
+    }
+
+    ntex::time::timeout(Duration::from_secs(1), async {
+        let err = rx.recv().await.unwrap().unwrap_err();
+        let ClientError::StreamFailed(failure) = client_error(&err) else {
+            panic!("{err:?}");
+        };
+        assert_eq!(failure.code, GrpcStatus::Internal);
+        assert!(
+            matches!(
+                &failure.cause,
+                Some(Cause::Stream(h2::StreamError::Reset(
+                    h2::frame::Reason::INTERNAL_ERROR
+                )))
+            ),
+            "{err:?}"
+        );
+        assert_eq!(rx.status(), Some(GrpcStatus::Internal));
+        assert!(rx.headers().is_empty());
+        assert!(rx.recv().await.is_none());
+        wait_idle(&svc).await;
+
+        let res = Request::<_, Unary>::new(&client, &UInt32Value { value: 1 })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.output, UInt32Value { value: 2 });
+    })
+    .await
+    .expect("response-header failure did not terminate the RPC or left the connection stalled");
+}
+
+#[ntex::test]
+async fn streaming_response_headers_failure() {
+    check_response_headers_failure(true).await;
+}
+
+#[ntex::test]
+async fn empty_streaming_response_headers_failure() {
+    check_response_headers_failure(false).await;
 }
 
 #[ntex::test]
@@ -458,6 +518,85 @@ async fn server_streaming_server_deadline() {
     assert_eq!(data.len(), 5 + 99 * 7);
     assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "4");
     wait_idle(&svc).await;
+}
+
+#[ntex::test]
+async fn zero_server_timeout() {
+    let svc = Svc::default();
+    let client = start(svc.clone(), |s| s);
+    ntex::time::timeout(Duration::from_secs(1), async {
+        for val in ["0H", "0M", "0S", "0m", "0u", "0n"] {
+            for eof in [true, false] {
+                let mut hdrs = req_headers();
+                hdrs.insert(
+                    HeaderName::from_static("grpc-timeout"),
+                    HeaderValue::from_static(val),
+                );
+                // Echo sets this response header as soon as it is called.
+                hdrs.insert(X_TEST, HeaderValue::from_static("handler ran"));
+                let (snd, rcv) = client
+                    .send(Method::POST, Echo::PATH, hdrs, eof)
+                    .await
+                    .unwrap();
+                let (headers, data, trailers) = read(&rcv).await;
+                assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "4", "{val}, {eof}");
+                assert_eq!(trailers.get("grpc-message").unwrap(), "Deadline exceeded");
+                assert!(data.is_empty());
+                assert!(!headers.contains_key(X_TEST));
+                assert!(!trailers.contains_key(X_TEST));
+                assert!(!trailers.contains_key(X_COUNT));
+                assert_eq!(svc.0.get(), 0);
+                if !eof {
+                    while !snd.is_reset() {
+                        snd.on_reset().await;
+                    }
+                }
+            }
+        }
+
+        let res = Request::<_, Unary>::new(&client, &UInt32Value { value: 1 })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.output, UInt32Value { value: 2 });
+    })
+    .await
+    .expect("zero server timeout did not terminate the RPC");
+}
+
+#[ntex::test]
+async fn submillisecond_server_timeout() {
+    let svc = Svc::default();
+    let client = start(svc.clone(), |s| s);
+    ntex::time::timeout(Duration::from_secs(1), async {
+        for val in ["1u", "999u", "1n", "999999n"] {
+            let mut hdrs = req_headers();
+            hdrs.insert(
+                HeaderName::from_static("grpc-timeout"),
+                HeaderValue::from_static(val),
+            );
+            let (snd, rcv) = client
+                .send(Method::POST, Echo::PATH, hdrs, false)
+                .await
+                .unwrap();
+            let (_, data, trailers) = read(&rcv).await;
+            assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "4", "{val}");
+            assert_eq!(trailers.get("grpc-message").unwrap(), "Deadline exceeded");
+            assert!(data.is_empty());
+            assert_eq!(svc.0.get(), 0);
+            while !snd.is_reset() {
+                snd.on_reset().await;
+            }
+        }
+
+        let res = Request::<_, Unary>::new(&client, &UInt32Value { value: 1 })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.output, UInt32Value { value: 2 });
+    })
+    .await
+    .expect("submillisecond server timeout became unlimited");
 }
 
 #[ntex::test]

@@ -8,7 +8,7 @@ use ntex_service::boxed::{self, BoxService, BoxServiceFactory};
 use ntex_service::{Ctx, Pipeline, Service, ServiceFactory, cfg::SharedCfg};
 use ntex_util::{HashMap, future::join_all, time::Millis, time::timeout_checked};
 
-use crate::stream::{CallStreams, SendShared, ServerRecv, StreamError};
+use crate::stream::{CallStreams, SendShared, ServerRecv, StreamError, send_response_headers};
 use crate::utils::{self, Data, Enc};
 use crate::{consts, encode_grpc_message, status::GrpcStatus};
 
@@ -54,6 +54,11 @@ fn not_streaming(_: &str) -> bool {
 ///
 /// A service instance of each registered service is created for every
 /// connection, the connection fails if one of them cannot be created.
+///
+/// The `grpc-timeout` header limits service execution. A zero timeout fails
+/// with `DEADLINE_EXCEEDED` without calling the service. Positive fractional
+/// milliseconds are rounded up to the next millisecond. If the header is
+/// absent, service execution has no timeout.
 pub struct GrpcServer {
     /// Names of the registered services, `names[i]` is served by
     /// `factories[i]`.
@@ -558,9 +563,12 @@ impl PublishService {
             return Ok(());
         }
 
-        let Ok(to) = request_timeout(&req.headers) else {
-            send_error(stream, GrpcStatus::InvalidArgument, ERR_DECODE_TIMEOUT);
-            return Ok(());
+        let to = match request_timeout(&req.headers) {
+            Ok(to) => to,
+            Err((status, msg)) => {
+                send_error(stream, status, msg);
+                return Ok(());
+            }
         };
 
         match timeout_checked(to, ctx.call(&self.services[idx], req)).await {
@@ -620,15 +628,12 @@ impl PublishService {
             eof,
         } = call;
 
-        let Ok(to) = request_timeout(&headers) else {
-            reject(
-                stream,
-                StatusCode::OK,
-                GrpcStatus::InvalidArgument,
-                ERR_DECODE_TIMEOUT,
-                eof,
-            );
-            return;
+        let to = match request_timeout(&headers) {
+            Ok(to) => to,
+            Err((status, msg)) => {
+                reject(stream, StatusCode::OK, status, msg, eof);
+                return;
+            }
         };
 
         let recv = ServerRecv::new(eof);
@@ -670,7 +675,7 @@ impl PublishService {
 
         if let Some((res_headers, extra)) = send.finish() {
             let headers_sent = match res_headers {
-                Some(hdrs) => stream.send_response(StatusCode::OK, hdrs, false).is_ok(),
+                Some(hdrs) => send_response_headers(stream, hdrs).is_ok(),
                 None => true,
             };
             if headers_sent {
@@ -722,11 +727,18 @@ fn response_headers(encoding: Option<Enc>) -> HeaderMap {
     headers
 }
 
-/// Parses the `grpc-timeout` header, no deadline if there is none.
-fn request_timeout(headers: &HeaderMap) -> Result<Millis, ()> {
-    headers
-        .get(consts::GRPC_TIMEOUT)
-        .map_or(Ok(Millis::ZERO), try_parse_grpc_timeout)
+/// Rejects invalid or expired timeouts, zero means no header and no deadline.
+fn request_timeout(headers: &HeaderMap) -> Result<Millis, (GrpcStatus, HeaderValue)> {
+    let Some(value) = headers.get(consts::GRPC_TIMEOUT) else {
+        return Ok(Millis::ZERO);
+    };
+    let timeout = try_parse_grpc_timeout(value)
+        .map_err(|()| (GrpcStatus::InvalidArgument, ERR_DECODE_TIMEOUT))?;
+    if timeout.is_zero() {
+        Err((GrpcStatus::DeadlineExceeded, ERR_DEADLINE))
+    } else {
+        Ok(timeout)
+    }
 }
 
 /// Appends the trailers of the service, except `grpc-status` and
@@ -863,9 +875,9 @@ fn try_parse_grpc_timeout(val: &HeaderValue) -> Result<Millis, ()> {
         // Milliseconds
         b'm' => Millis(u32::try_from(timeout_value).unwrap_or(u32::MAX)),
         // Microseconds
-        b'u' => Millis(u32::try_from(timeout_value / 1000).unwrap_or(u32::MAX)),
+        b'u' => Millis(u32::try_from(timeout_value.div_ceil(1000)).unwrap_or(u32::MAX)),
         // Nanoseconds
-        b'n' => Millis(u32::try_from(timeout_value / 1_000_000).unwrap_or(u32::MAX)),
+        b'n' => Millis(u32::try_from(timeout_value.div_ceil(1_000_000)).unwrap_or(u32::MAX)),
         _ => return Err(()),
     };
 
@@ -1011,10 +1023,19 @@ mod tests {
             ("2M", 2 * 60 * 1000),
             ("3S", 3000),
             ("4m", 4),
-            ("1500u", 1),
-            ("999u", 0),
-            ("2500000n", 2),
+            ("1u", 1),
+            ("999u", 1),
+            ("1000u", 1),
+            ("1001u", 2),
+            ("1500u", 2),
+            ("1n", 1),
+            ("999999n", 1),
+            ("1000000n", 1),
+            ("1000001n", 2),
+            ("2500000n", 3),
             ("0S", 0),
+            ("0u", 0),
+            ("0n", 0),
             // the largest value fits in a u32 of millis
             ("99999999H", u32::MAX),
             ("99999999M", u32::MAX),

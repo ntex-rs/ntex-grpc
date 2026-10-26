@@ -1,5 +1,7 @@
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::future::{Future, poll_fn};
+use std::{cell::RefCell, rc::Rc, task::Poll, time::Duration};
 
+use ntex::channel::oneshot;
 use ntex::util::join;
 
 use ntex::connect::{Connect, ConnectError};
@@ -48,6 +50,7 @@ method!(Compressed, "/test.Svc/Compressed");
 method!(Gzip, "/test.Svc/Gzip");
 method!(Snappy, "/test.Svc/Snappy");
 method!(BadFlag, "/test.Svc/BadFlag");
+method!(BufferedBadFlag, "/test.Svc/BufferedBadFlag");
 method!(UnknownStatus, "/test.Svc/UnknownStatus");
 method!(BadStatus, "/test.Svc/BadStatus");
 method!(UnknownStatusOnly, "/test.Svc/UnknownStatusOnly");
@@ -166,6 +169,10 @@ fn client_with_resets() -> (SimpleClient, Rc<RefCell<Vec<Reason>>>) {
 
 /// Spawns the test server, returns the client side of the connection.
 fn connect() -> (Io, Rc<RefCell<Vec<Reason>>>) {
+    connect_with_cfg(SharedCfg::new("CLI").build())
+}
+
+fn connect_with_cfg(cfg: SharedCfg) -> (Io, Rc<RefCell<Vec<Reason>>>) {
     let (cli, srv) = IoTest::create();
     cli.remote_buffer_cap(64 * 1024 * 1024);
     srv.remote_buffer_cap(64 * 1024 * 1024);
@@ -629,6 +636,16 @@ fn connect() -> (Io, Rc<RefCell<Vec<Reason>>>) {
                         "/test.Svc/BadMessage" => {
                             reply_with(&stream, grpc_headers(), b"\0\0\0\0\x01\xff").await;
                         }
+                        // an invalid flag followed by complete empty messages in one DATA frame
+                        "/test.Svc/BufferedBadFlag" => {
+                            let mut body = vec![0; 16_000];
+                            body[0] = 2;
+                            stream
+                                .send_response(StatusCode::OK, grpc_headers(), false)
+                                .unwrap();
+                            stream.send_payload(Bytes::from(body), false).await.unwrap();
+                            stream.send_trailers(status_ok()).unwrap();
+                        }
                         // content-length on a reply without a body
                         "/test.Svc/BadContentLength" => {
                             let mut hdrs = grpc_headers();
@@ -655,7 +672,7 @@ fn connect() -> (Io, Rc<RefCell<Vec<Reason>>>) {
         .await;
     });
 
-    let io = Io::new(cli, SharedCfg::new("CLI").build());
+    let io = Io::new(cli, cfg);
     (io, resets)
 }
 
@@ -1853,6 +1870,43 @@ async fn streaming_max_message_size() {
 }
 
 #[ntex::test]
+async fn streaming_failure_releases_connection_capacity() {
+    let cfg = SharedCfg::new("CLI")
+        .add(h2::ServiceConfig::new().set_initial_connection_window_size(65_535))
+        .build();
+    let client = SimpleClient::new(connect_with_cfg(cfg).0, false, "localhost".into());
+
+    ntex::time::timeout(Duration::from_secs(1), async {
+        let mut failed = Vec::new();
+        for _ in 0..4 {
+            let mut rx = StreamRequest::<_, BufferedBadFlag, _>::server_streaming(&client, &())
+                .open()
+                .await
+                .unwrap();
+            let err = rx.recv().await.unwrap().unwrap_err();
+            assert_eq!(err.status(), GrpcStatus::Internal);
+            assert_eq!(rx.status(), Some(GrpcStatus::Internal));
+            assert_eq!(rx.headers().get(X_TEST).unwrap(), "headers");
+            assert!(rx.recv().await.is_none());
+            failed.push(rx);
+        }
+
+        // The failed streams must not retain 64,000 bytes of the connection window.
+        // A healthy message larger than the window must still make progress.
+        assert_eq!(
+            server_streaming::<BigGrpc, _>(&client).await,
+            Outcome::Ok(1)
+        );
+        for mut rx in failed {
+            assert_eq!(rx.status(), Some(GrpcStatus::Internal));
+            assert!(rx.recv().await.is_none());
+        }
+    })
+    .await
+    .expect("failed receive streams blocked another RPC");
+}
+
+#[ntex::test]
 async fn streaming_max_send_message_size() {
     let client = client();
     let input = BytesValue {
@@ -1903,6 +1957,139 @@ async fn client_streaming_upload() {
         .unwrap_err();
     assert!(matches!(*err, ClientError::InvalidRequest(_)), "{err:?}");
     assert_eq!(err.message(), "SendStream is used by another call already");
+}
+
+/// Starts a producer and waits until it has registered its own task waker.
+async fn waiting_sender(tx: &SendStream<()>) -> ntex::rt::JoinHandle<Result<(), StreamError>> {
+    let tx = tx.clone();
+    let (started, ready) = oneshot::channel();
+    let task = ntex::rt::spawn(async move {
+        poll_fn(|cx| {
+            assert!(tx.poll_ready(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        started.send(()).unwrap();
+        tx.send(&()).await
+    });
+    ready.await.unwrap();
+    task
+}
+
+#[ntex::test]
+async fn client_streaming_open_failure_wakes_senders() {
+    let client = client();
+    for invalid_header in [true, false] {
+        let tx = SendStream::new();
+        let first = waiting_sender(&tx).await;
+        let second = waiting_sender(&tx).await;
+        let mut req = StreamRequest::<_, Message, _>::client_streaming(&client, &tx);
+        if invalid_header {
+            req.header("x-invalid", "\n");
+        } else {
+            req.timeout(Duration::ZERO);
+        }
+        let err = req.send().await.unwrap_err();
+        if invalid_header {
+            assert!(matches!(*err, ClientError::InvalidRequest(_)));
+        } else {
+            assert!(matches!(*err, ClientError::DeadlineExceeded(_)));
+        }
+        let expected = Outcome::from(&err);
+        let (first, second) = ntex::time::timeout(Duration::from_secs(1), join(first, second))
+            .await
+            .expect("opening failure did not wake the producers");
+        assert_eq!(Outcome::from(first.unwrap().unwrap_err()), expected);
+        assert_eq!(Outcome::from(second.unwrap().unwrap_err()), expected);
+        assert_eq!(Outcome::from(tx.ready().await.unwrap_err()), expected);
+        assert!(tx.is_closed());
+    }
+}
+
+struct DelayedOpen {
+    client: SimpleClient,
+    gate: oneshot::Receiver<()>,
+}
+
+impl<M: MethodDef> StreamTransport<M> for DelayedOpen {
+    async fn open(
+        &self,
+        ctx: &mut RequestContext<'_, ()>,
+    ) -> Result<StreamCall, Error<ClientError>> {
+        self.gate.recv().await.unwrap();
+        StreamTransport::<M>::open(&self.client, ctx).await
+    }
+}
+
+#[ntex::test]
+async fn client_streaming_open_cancel_wakes_sender() {
+    let (_release, gate) = oneshot::channel();
+    let transport = DelayedOpen {
+        client: client(),
+        gate,
+    };
+    let tx = SendStream::new();
+    let producer = waiting_sender(&tx).await;
+    let req = StreamRequest::<_, Message, _>::client_streaming(&transport, &tx);
+    let mut call = Box::pin(req.send());
+    poll_fn(|cx| {
+        assert!(call.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    drop(call);
+
+    let err = ntex::time::timeout(Duration::from_secs(1), producer)
+        .await
+        .expect("dropping the opening future did not wake the producer")
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(err, StreamError::Closed), "{err:?}");
+    assert!(tx.is_closed());
+}
+
+#[ntex::test]
+async fn client_streaming_open_preserves_owner() {
+    let (release, gate) = oneshot::channel();
+    let transport = DelayedOpen {
+        client: client(),
+        gate,
+    };
+    let tx = SendStream::new();
+    let req = StreamRequest::<_, Message, _>::client_streaming(&transport, &tx);
+    let mut call = Box::pin(req.send());
+    poll_fn(|cx| {
+        assert!(call.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+
+    // A competing request must not claim or fail a sender that is still opening.
+    let mut other = StreamRequest::<_, Message, _>::client_streaming(&transport.client, &tx);
+    other.header("x-invalid", "\n");
+    let err = other.send().await.unwrap_err();
+    assert!(matches!(*err, ClientError::InvalidRequest(_)));
+    assert_eq!(err.message(), "SendStream is used by another call already");
+    assert!(!tx.is_closed());
+
+    release.send(()).unwrap();
+    let (res, ()) = ntex::time::timeout(
+        Duration::from_secs(1),
+        join(call, async {
+            tx.ready().await.unwrap();
+            // Rejecting reuse after attachment must not cancel the original call either.
+            let err = StreamRequest::<_, Message, _>::client_streaming(&transport.client, &tx)
+                .send()
+                .await
+                .unwrap_err();
+            assert_eq!(err.message(), "SendStream is used by another call already");
+            tx.send(&()).await.unwrap();
+            tx.close();
+        }),
+    )
+    .await
+    .expect("rejecting reuse disrupted the original call");
+    assert_eq!(res.unwrap().res_size, 5);
 }
 
 #[ntex::test]
@@ -1969,6 +2156,14 @@ impl Custom {
                 assert!(!ctx.get_disconnect_on_drop());
                 ctx.disconnect_on_drop();
                 assert!(ctx.get_disconnect_on_drop());
+            }
+            #[cfg(feature = "compression")]
+            "gzip" => {
+                ctx.compression(ntex_grpc::Compression::Gzip);
+            }
+            #[cfg(feature = "compression")]
+            "zstd" => {
+                ctx.compression(ntex_grpc::Compression::Zstd);
             }
             _ => {}
         }
@@ -2115,4 +2310,114 @@ async fn custom_stream_transport() {
         .await
         .unwrap_err();
     assert!(matches!(*err, ClientError::InvalidRequest(_)), "{err:?}");
+}
+
+#[ntex::test]
+async fn custom_stream_transport_send_limit() {
+    let (client, resets) = client_with_resets();
+    let custom = Custom {
+        client,
+        seen: RefCell::default(),
+    };
+
+    ntex::time::timeout(Duration::from_secs(1), async {
+        let input = BytesValue {
+            value: Bytes::from_static(b"abc"),
+        };
+        let mut req = StreamRequest::<_, Upload, _>::server_streaming(&custom, &input);
+        req.disconnect_on_drop();
+        let err = req.open_with(&"limit").await.unwrap_err();
+        assert!(matches!(*err, ClientError::InvalidRequest(_)), "{err:?}");
+        assert_eq!(err.status(), GrpcStatus::ResourceExhausted);
+        assert_eq!(
+            err.message(),
+            "trying to send message larger than max (5 vs. 4)"
+        );
+
+        // The transport can relax the caller's limit too.
+        let input = BytesValue {
+            value: Bytes::from_static(b"ab"),
+        };
+        let mut req = StreamRequest::<_, Upload, _>::server_streaming(&custom, &input);
+        req.max_send_message_size(1);
+        let mut rx = req.open_with(&"limit").await.unwrap();
+        assert!(rx.recv().await.unwrap().is_ok());
+        assert!(rx.recv().await.is_none());
+        assert_eq!(rx.status(), Some(GrpcStatus::Ok));
+        assert_eq!(*resets.borrow(), [Reason::CANCEL]);
+    })
+    .await
+    .expect("encoding failure left the RPC open or closed the connection");
+}
+
+#[cfg(feature = "compression")]
+#[ntex::test]
+async fn custom_stream_transport_compression() {
+    use ntex_grpc::Compression;
+
+    let custom = Custom {
+        client: client(),
+        seen: RefCell::default(),
+    };
+    let input = BytesValue {
+        value: Bytes::from(vec![b'a'; 1000]),
+    };
+    for (initial, selected) in [
+        (Compression::Gzip, Compression::Zstd),
+        (Compression::Zstd, Compression::Gzip),
+    ] {
+        let mut req = StreamRequest::<_, EchoBody, _>::server_streaming(&custom, &input);
+        req.compression(initial);
+        let mut rx = req.open_with(&selected.name()).await.unwrap();
+        assert_eq!(rx.recv().await.unwrap().unwrap(), input);
+        assert_eq!(rx.headers().get(GRPC_ENCODING).unwrap(), selected.name());
+        assert!(rx.recv().await.is_none());
+        assert_eq!(rx.status(), Some(GrpcStatus::Ok));
+    }
+}
+
+#[ntex::test]
+async fn server_streaming_encoding_deadline() {
+    #[derive(Debug, Default)]
+    struct SlowMessage;
+
+    impl ntex_grpc::Message for SlowMessage {
+        fn read(src: &mut Bytes) -> Result<Self, ntex_grpc::DecodeError> {
+            <() as ntex_grpc::Message>::read(src).map(|()| Self)
+        }
+
+        fn write(&self, _: &mut ntex_bytes::BytePages) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        fn encoded_len(&self) -> usize {
+            0
+        }
+    }
+
+    struct SlowUpload;
+
+    impl MethodDef for SlowUpload {
+        const NAME: &'static str = "SlowUpload";
+        const PATH: ByteString = Message::PATH;
+        type Input = SlowMessage;
+        type Output = ();
+    }
+
+    let (client, resets) = client_with_resets();
+    ntex::time::timeout(Duration::from_secs(1), async {
+        let mut req = StreamRequest::<_, SlowUpload, _>::server_streaming(&client, &SlowMessage);
+        req.timeout(Duration::from_millis(50));
+        let err = req.open().await.unwrap_err();
+        assert!(matches!(*err, ClientError::DeadlineExceeded(_)), "{err:?}");
+        assert_eq!(err.message(), "Request timeout ran out");
+
+        assert_eq!(
+            server_streaming::<Message, _>(&client).await,
+            Outcome::Ok(1)
+        );
+        assert_eq!(*resets.borrow(), [Reason::CANCEL]);
+    })
+    .await
+    .expect("encoding past the deadline stalled the connection");
 }

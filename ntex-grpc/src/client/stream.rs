@@ -43,7 +43,7 @@ impl StreamCall {
     /// The `SendStream` and `RecvStream` of the call.
     fn attach<Out, St>(
         self,
-        shared: &SendShared,
+        shared: &Rc<SendShared>,
         ctx: &RequestContext<'_, St>,
     ) -> Result<RecvStream<Out>, Error<ClientError>> {
         let StreamCall {
@@ -62,7 +62,7 @@ impl StreamCall {
             .attach_client(tx, cfg)
             .map_err(|e| Error::<ClientError>::from(e).with_service(service))?;
         Ok(RecvStream::client(
-            ClientRecv::new(rx, deadline, service),
+            ClientRecv::new(rx, deadline, service, Some(shared.clone())),
             ctx.get_max_message_size(),
         ))
     }
@@ -382,7 +382,7 @@ impl<'a, T, M: MethodDef> StreamRequest<'a, T, M, ServerStreaming<'a, M::Input>>
             }
         }
         Ok(RecvStream::client(
-            ClientRecv::new(rx, deadline, service),
+            ClientRecv::new(rx, deadline, service, None),
             ctx.get_max_message_size(),
         ))
     }

@@ -255,8 +255,11 @@ async fn send_request<T: MethodDef, St>(
                 return Err(invalid_response(st, msg, trailers));
             }
             let resp_size = data.len();
-            if resp_size < 5 {
+            if resp_size == 0 {
                 return Err(invalid_response(GrpcStatus::Internal, NO_MESSAGE, trailers));
+            }
+            if resp_size < 5 {
+                return Err(invalid_response(GrpcStatus::Internal, TRUNCATED, trailers));
             }
             let flag = data.get_u8();
             let len = data.get_u32();
@@ -306,6 +309,7 @@ pub(crate) const NO_TRAILERS: &str = "Response ended without trailers";
 pub(crate) const NO_GRPC_STATUS: &str = "Response trailers have no grpc-status";
 pub(crate) const NO_MESSAGE: &str = "Response has no message";
 pub(crate) const TRUNCATED: &str = "Response message is truncated";
+pub(crate) const CANCELLED: &str = "Call is cancelled by the client";
 pub(crate) const STREAM_CLOSED: &str = "Stream closed before the response ended";
 pub(crate) const EXTRA_DATA: &str = "cardinality violation: expected <EOF> for non server-streaming RPCs, but received another message";
 
@@ -490,13 +494,20 @@ fn check_message(
     let data = payload.as_slice();
     let len = u32::from_be_bytes(data.get(1..5)?.try_into().ok()?) as usize;
     if len > max_size {
-        let msg = format!("Received message larger than max ({len} vs. {max_size})");
-        Some((GrpcStatus::ResourceExhausted, msg.into()))
+        Some((
+            GrpcStatus::ResourceExhausted,
+            too_large(len, max_size).into(),
+        ))
     } else if data.len() - 5 > len {
         Some((GrpcStatus::Internal, EXTRA_DATA.into()))
     } else {
         None
     }
+}
+
+/// The error message of a response message over the size limit.
+pub(crate) fn too_large(len: usize, max_size: usize) -> String {
+    format!("Received message larger than max ({len} vs. {max_size})")
 }
 
 /// Encodes the request message with its length prefix.

@@ -1,5 +1,7 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
+use ntex::util::join;
+
 use ntex::connect::{Connect, ConnectError};
 use ntex::io::Io;
 use ntex::service::{Pipeline, cfg::SharedCfg, fn_service};
@@ -7,9 +9,11 @@ use ntex::testing::IoTest;
 use ntex_bytes::{ByteString, Bytes};
 use ntex_error::Error;
 use ntex_grpc::client::{
-    CallFailure, Cause, Client as GrpcClient, ClientError, NotGrpc, Request, Response, Status,
+    CallFailure, Cause, Client as GrpcClient, ClientError, NotGrpc, Request, RequestContext,
+    Response, Status, StreamCall, StreamRequest, StreamTransport, Transport,
 };
-use ntex_grpc::{GrpcStatus, HashMap, MethodDef, google_types::BytesValue};
+use ntex_grpc::google_types::BytesValue;
+use ntex_grpc::{GrpcStatus, HashMap, MethodDef, SendStream, StreamError};
 use ntex_grpc::{decode_binary_header, encode_binary_header};
 use ntex_h2::{self as h2, client::SimpleClient, frame::Reason, frame::StreamId};
 use ntex_http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
@@ -72,6 +76,7 @@ method!(TrailersOnly, "/test.Svc/TrailersOnly");
 method!(DeadlineTrailers, "/test.Svc/DeadlineTrailers");
 method!(BadLength, "/test.Svc/BadLength");
 method!(BadContentLength, "/test.Svc/BadContentLength");
+method!(Empty, "/test.Svc/Empty");
 
 /// Replies with a message that is not a valid `BytesValue`.
 struct BadMessage;
@@ -215,7 +220,10 @@ fn connect() -> (Io, Rc<RefCell<Vec<Reason>>>) {
                         .extend_from_slice(&data);
                 }
                 h2::MessageKind::Eof(eof) => {
-                    let (path, req) = paths.borrow_mut().remove(&stream.id()).unwrap();
+                    // the stream is answered on its headers already
+                    let Some((path, req)) = paths.borrow_mut().remove(&stream.id()) else {
+                        return Ok(());
+                    };
                     let mut body = bodies.borrow_mut().remove(&stream.id()).unwrap_or_default();
                     if let h2::StreamEof::Data(data, _) = eof {
                         body.extend_from_slice(&data);
@@ -594,6 +602,12 @@ fn connect() -> (Io, Rc<RefCell<Vec<Reason>>>) {
                         }
                         // never replies
                         "/test.Svc/Silent" => {}
+                        // headers only, an OK status but no message
+                        "/test.Svc/Empty" => {
+                            let mut hdrs = grpc_headers();
+                            hdrs.insert(GRPC_STATUS, HeaderValue::from_static("0"));
+                            stream.send_response(StatusCode::OK, hdrs, true).unwrap();
+                        }
                         // headers only, with a grpc content-type but no status
                         "/test.Svc/TrailersOnly" => {
                             stream
@@ -911,7 +925,7 @@ async fn short_body() {
     let client = client();
     let err = send::<Short>(&client).await.unwrap_err();
     assert_eq!(invalid_response(&err).code, GrpcStatus::Internal);
-    assert_eq!(err.message(), "Response has no message");
+    assert_eq!(err.message(), "Response message is truncated");
 }
 
 #[ntex::test]
@@ -1544,4 +1558,561 @@ async fn compression() {
     assert_eq!(res.output, input);
     assert_eq!(res.req_size, 1008);
     assert_eq!(res.headers().get(GRPC_ENCODING).unwrap(), "identity");
+}
+
+/// How a call ended, to compare unary and streaming calls.
+#[derive(Debug, PartialEq)]
+enum Outcome {
+    /// The number of messages received.
+    Ok(usize),
+    Err(&'static str, GrpcStatus, String),
+}
+
+impl From<&Error<ClientError>> for Outcome {
+    fn from(err: &Error<ClientError>) -> Self {
+        let kind = match **err {
+            ClientError::Status(_) => "Status",
+            ClientError::NotGrpc(_) => "NotGrpc",
+            ClientError::InvalidRequest(_) => "InvalidRequest",
+            ClientError::NotProcessed(_) => "NotProcessed",
+            ClientError::Connection {
+                request_sent: true, ..
+            } => "Connection(sent)",
+            ClientError::Connection { .. } => "Connection",
+            ClientError::StreamFailed(_) => "StreamFailed",
+            ClientError::InvalidResponse(_) => "InvalidResponse",
+            ClientError::DeadlineExceeded(_) => "DeadlineExceeded",
+            _ => unreachable!(),
+        };
+        Outcome::Err(kind, err.status(), err.message().into_owned())
+    }
+}
+
+impl From<StreamError> for Outcome {
+    fn from(err: StreamError) -> Self {
+        let StreamError::Client(err) = err else {
+            panic!("not a client error: {err:?}");
+        };
+        Outcome::from(&err)
+    }
+}
+
+async fn unary<M: MethodDef, T>(client: &T) -> Outcome
+where
+    M::Input: Default,
+    T: Transport<M, Error = Error<ClientError>>,
+{
+    match Request::<_, M>::new(client, &M::Input::default())
+        .send()
+        .await
+    {
+        Ok(_) => Outcome::Ok(1),
+        Err(err) => Outcome::from(&err),
+    }
+}
+
+async fn server_streaming<M: MethodDef, T: StreamTransport<M>>(client: &T) -> Outcome
+where
+    M::Input: Default,
+{
+    let input = M::Input::default();
+    let mut rx = match StreamRequest::<_, M, _>::server_streaming(client, &input)
+        .open()
+        .await
+    {
+        Ok(rx) => rx,
+        Err(err) => return Outcome::from(&err),
+    };
+    let mut count = 0;
+    while let Some(res) = rx.recv().await {
+        match res {
+            Ok(_) => count += 1,
+            Err(err) => {
+                // the status of the stream is the status of the error
+                assert_eq!(rx.status(), Some(err.status()));
+                return Outcome::from(err);
+            }
+        }
+    }
+    assert_eq!(rx.status(), Some(GrpcStatus::Ok));
+    Outcome::Ok(count)
+}
+
+async fn client_streaming<M: MethodDef, T: StreamTransport<M>>(client: &T) -> Outcome
+where
+    M::Input: Default,
+{
+    let tx = SendStream::new();
+    let req = StreamRequest::<_, M, _>::client_streaming(client, &tx);
+    let (res, ()) = join(req.send(), async {
+        // the server can end the call before it reads the request
+        let _ = tx.send(&M::Input::default()).await;
+        tx.close();
+    })
+    .await;
+    match res {
+        Ok(_) => Outcome::Ok(1),
+        Err(err) => Outcome::from(&err),
+    }
+}
+
+/// A streaming call fails as a unary call does for the same reply.
+#[ntex::test]
+async fn streaming_errors_match_unary() {
+    macro_rules! check {
+        ($($m:ident),+ $(,)?) => {$(
+            let expected = unary::<$m, _>(&client()).await;
+            let name = stringify!($m);
+            assert_eq!(server_streaming::<$m, _>(&client()).await, expected, "{name}");
+            assert_eq!(client_streaming::<$m, _>(&client()).await, expected, "{name}");
+        )+};
+    }
+    check!(
+        Message,
+        Short,
+        Deadline,
+        NoStatus,
+        NoTrailers,
+        Html,
+        HtmlError,
+        NoContentType,
+        Proto,
+        Busy,
+        Missing,
+        ProxyError,
+        Compressed,
+        Gzip,
+        Snappy,
+        BadFlag,
+        UnknownStatus,
+        BadStatus,
+        UnknownStatusOnly,
+        Accepted,
+        NoContent,
+        Refused,
+        Cancel,
+        ResetAfterHeaders,
+        Large,
+        BigError,
+        LimitError,
+        BigHtml,
+        BigGrpc,
+        Sized,
+        SizedHtml,
+        SizedNoTrailers,
+        Disconnect,
+        GoAway,
+        TrailersOnly,
+        DeadlineTrailers,
+        BadLength,
+        BadContentLength,
+        BadMessage,
+        EarlyStatus,
+        DisconnectUpload,
+    );
+}
+
+/// A response without a message ends a server stream, other calls expect one.
+#[ntex::test]
+async fn streaming_no_message() {
+    assert_eq!(
+        server_streaming::<Empty, _>(&client()).await,
+        Outcome::Ok(0)
+    );
+    let expected = Outcome::Err(
+        "InvalidResponse",
+        GrpcStatus::Internal,
+        "Response has no message".into(),
+    );
+    assert_eq!(unary::<Empty, _>(&client()).await, expected);
+    assert_eq!(client_streaming::<Empty, _>(&client()).await, expected);
+}
+
+#[ntex::test]
+async fn streaming_metadata() {
+    let client = client();
+    let mut req = StreamRequest::<_, Echo, _>::server_streaming(&client, &());
+    req.header("x-a", "1")
+        .header("x-a", "2")
+        .append_header("x-tag", "a")
+        .append_header("x-tag", "b")
+        .disconnect_on_drop();
+    let mut rx = req.open().await.unwrap();
+    assert!(rx.recv().await.unwrap().is_ok());
+    assert!(rx.recv().await.is_none());
+    let get_all = |name| {
+        let mut vals: Vec<_> = rx.headers().get_all(name).cloned().collect();
+        vals.sort();
+        vals
+    };
+    assert_eq!(get_all("x-a"), ["2"]);
+    assert_eq!(get_all("x-tag"), ["a", "b"]);
+}
+
+#[ntex::test]
+async fn streaming_invalid_header() {
+    let client = client();
+    let mut req = StreamRequest::<_, Message, _>::server_streaming(&client, &());
+    req.header("x-a", "\n");
+    let err = req.open().await.unwrap_err();
+    assert!(matches!(*err, ClientError::InvalidRequest(_)), "{err:?}");
+
+    let mut req = StreamRequest::<_, Message, _>::bidi(&client);
+    req.header("bad name", "1");
+    let err = req.open().await.unwrap_err();
+    assert!(matches!(*err, ClientError::InvalidRequest(_)), "{err:?}");
+
+    // nothing is sent, the connection stays usable
+    assert_eq!(
+        server_streaming::<Message, _>(&client).await,
+        Outcome::Ok(1)
+    );
+}
+
+#[ntex::test]
+async fn streaming_timeout() {
+    let (client, resets) = client_with_resets();
+    let expected = Outcome::Err(
+        "DeadlineExceeded",
+        GrpcStatus::DeadlineExceeded,
+        "Request timeout ran out".into(),
+    );
+
+    let mut req = StreamRequest::<_, Silent, _>::server_streaming(&client, &());
+    req.timeout(Duration::from_millis(50));
+    let mut rx = req.open().await.unwrap();
+    let err = rx.recv().await.unwrap().unwrap_err();
+    assert_eq!(Outcome::from(err), expected);
+    // the stream ends with its error
+    assert!(rx.recv().await.is_none());
+
+    let mut req = StreamRequest::<_, Silent, _>::bidi(&client);
+    req.timeout(Duration::from_millis(50));
+    let (tx, mut rx) = req.open().await.unwrap();
+    let err = rx.recv().await.unwrap().unwrap_err();
+    assert_eq!(Outcome::from(err), expected);
+    // the request stream fails too
+    assert!(tx.send(&()).await.is_err());
+
+    let tx = SendStream::new();
+    let mut req = StreamRequest::<_, Silent, _>::client_streaming(&client, &tx);
+    req.timeout(Duration::from_millis(50));
+    let err = req.send().await.unwrap_err();
+    assert_eq!(Outcome::from(&err), expected);
+
+    // the server sees the streams reset, the connection stays usable
+    assert_eq!(
+        server_streaming::<Message, _>(&client).await,
+        Outcome::Ok(1)
+    );
+    assert_eq!(*resets.borrow(), [Reason::CANCEL; 3]);
+}
+
+#[ntex::test]
+async fn streaming_zero_timeout() {
+    let (client, resets) = client_with_resets();
+    let mut req = StreamRequest::<_, Silent, _>::server_streaming(&client, &());
+    req.timeout(Duration::ZERO);
+    let err = req.open().await.unwrap_err();
+    assert!(matches!(*err, ClientError::DeadlineExceeded(_)), "{err:?}");
+    assert_eq!(err.message(), "Request timeout is zero");
+
+    // nothing is sent
+    assert_eq!(
+        server_streaming::<Message, _>(&client).await,
+        Outcome::Ok(1)
+    );
+    assert!(resets.borrow().is_empty());
+}
+
+#[ntex::test]
+async fn streaming_max_message_size() {
+    let expected = Outcome::Err(
+        "InvalidResponse",
+        GrpcStatus::ResourceExhausted,
+        "Received message larger than max (3 vs. 2)".into(),
+    );
+    let client = client();
+    let mut req = Request::<_, Sized>::new(&client, &());
+    req.max_message_size(2);
+    assert_eq!(Outcome::from(&req.send().await.unwrap_err()), expected);
+
+    let mut req = StreamRequest::<_, Sized, _>::server_streaming(&client, &());
+    req.max_message_size(2);
+    let mut rx = req.open().await.unwrap();
+    assert_eq!(
+        Outcome::from(rx.recv().await.unwrap().unwrap_err()),
+        expected
+    );
+
+    let mut req = StreamRequest::<_, Sized, _>::server_streaming(&client, &());
+    req.max_message_size(3);
+    let mut rx = req.open().await.unwrap();
+    assert!(rx.recv().await.unwrap().is_ok());
+    assert!(rx.recv().await.is_none());
+}
+
+#[ntex::test]
+async fn streaming_max_send_message_size() {
+    let client = client();
+    let input = BytesValue {
+        value: Bytes::from_static(b"abc"),
+    };
+    let mut req = StreamRequest::<_, Upload, _>::server_streaming(&client, &input);
+    req.max_send_message_size(4);
+    let err = req.open().await.unwrap_err();
+    assert!(matches!(*err, ClientError::InvalidRequest(_)), "{err:?}");
+    assert_eq!(err.status(), GrpcStatus::ResourceExhausted);
+
+    // the message is checked before it is sent on a request stream
+    let mut req = StreamRequest::<_, Upload, _>::bidi(&client);
+    req.max_send_message_size(4);
+    let (tx, _rx) = req.open().await.unwrap();
+    let err = tx.send(&input).await.unwrap_err();
+    assert_eq!(err.status(), GrpcStatus::ResourceExhausted);
+    // the stream stays usable
+    tx.send(&BytesValue::default()).await.unwrap();
+}
+
+#[ntex::test]
+async fn client_streaming_upload() {
+    let client = client();
+    let tx = SendStream::new();
+    let req = StreamRequest::<_, Upload, _>::client_streaming(&client, &tx);
+    let (res, ()) = join(req.send(), async {
+        for val in [&b"abc"[..], b"de"] {
+            let msg = BytesValue {
+                value: Bytes::from_static(val),
+            };
+            tx.send(&msg).await.unwrap();
+        }
+        tx.close();
+    })
+    .await;
+    let res = res.unwrap();
+    // two prefixed messages, each a tagged and length-prefixed field
+    assert_eq!(res.req_size, (5 + 2 + 3) + (5 + 2 + 2));
+    assert_eq!(res.res_size, 5);
+    assert_eq!(res.headers().get(X_TEST).unwrap(), "headers");
+    assert_eq!(res.trailers().get(GRPC_STATUS).unwrap(), "0");
+
+    // a stream is used for one call only
+    let err = StreamRequest::<_, Upload, _>::client_streaming(&client, &tx)
+        .send()
+        .await
+        .unwrap_err();
+    assert!(matches!(*err, ClientError::InvalidRequest(_)), "{err:?}");
+    assert_eq!(err.message(), "SendStream is used by another call already");
+}
+
+#[ntex::test]
+async fn pooled_streaming() {
+    let pool = pool();
+    assert_eq!(server_streaming::<Message, _>(&pool).await, Outcome::Ok(1));
+    assert_eq!(client_streaming::<Message, _>(&pool).await, Outcome::Ok(1));
+
+    let client = GrpcClient::new(pool.clone());
+    assert_eq!(
+        server_streaming::<Message, _>(&client).await,
+        Outcome::Ok(1)
+    );
+    let (tx, mut rx) = StreamRequest::<_, Message, _>::bidi(&client)
+        .open()
+        .await
+        .unwrap();
+    tx.send(&()).await.unwrap();
+    tx.close();
+    assert!(rx.recv().await.unwrap().is_ok());
+    assert!(rx.recv().await.is_none());
+    assert_eq!(rx.status(), Some(GrpcStatus::Ok));
+    assert_eq!(client.get_ref().stat_total_connections(), 1);
+
+    // the timeout covers waiting for a connection
+    let mut req = StreamRequest::<_, Silent, _>::server_streaming(&client, &());
+    req.timeout(Duration::from_millis(100));
+    let mut rx = req.open().await.unwrap();
+    let err = rx.recv().await.unwrap().unwrap_err();
+    assert_eq!(err.status(), GrpcStatus::DeadlineExceeded);
+}
+
+/// A transport that changes the call on behalf of the caller, as told by
+/// the request state, then hands it to the built-in transport.
+struct Custom {
+    client: SimpleClient,
+    /// The header names of the last call, as passed to the transport.
+    seen: RefCell<Vec<String>>,
+}
+
+impl Custom {
+    fn adjust(&self, ctx: &mut RequestContext<'_, &'static str>) {
+        self.seen
+            .replace(ctx.headers().map(|(name, _)| name.to_string()).collect());
+        match *ctx.request_state() {
+            "tag" => {
+                ctx.header("x-a", "2").append_header("x-state", "tag");
+            }
+            "clear" => {
+                assert!(ctx.get_timeout().is_some());
+                ctx.clear();
+            }
+            "limit" => {
+                assert_eq!(ctx.get_max_message_size(), 4 * 1024 * 1024);
+                ctx.max_message_size(2).max_send_message_size(4);
+            }
+            "timeout" => {
+                ctx.timeout(Duration::from_millis(50));
+            }
+            "invalid" => {
+                ctx.header("x-a", "\n");
+            }
+            "drop" => {
+                assert!(!ctx.get_disconnect_on_drop());
+                ctx.disconnect_on_drop();
+                assert!(ctx.get_disconnect_on_drop());
+            }
+            _ => {}
+        }
+    }
+}
+
+impl<M: MethodDef> Transport<M, &'static str> for Custom {
+    type Error = Error<ClientError>;
+
+    async fn request(
+        &self,
+        args: &M::Input,
+        ctx: &mut RequestContext<'_, &'static str>,
+    ) -> Result<Response<M>, Self::Error> {
+        self.adjust(ctx);
+        Transport::<M, _>::request(&self.client, args, ctx).await
+    }
+}
+
+impl<M: MethodDef> StreamTransport<M, &'static str> for Custom {
+    async fn open(
+        &self,
+        ctx: &mut RequestContext<'_, &'static str>,
+    ) -> Result<StreamCall, Error<ClientError>> {
+        self.adjust(ctx);
+        StreamTransport::<M, _>::open(&self.client, ctx).await
+    }
+}
+
+#[ntex::test]
+async fn custom_transport() {
+    let custom = Custom {
+        client: client(),
+        seen: RefCell::default(),
+    };
+    let req_header = |res: &Response<EchoAll>, name: &str| {
+        res.headers()
+            .get(format!("req-{name}").as_str())
+            .map(|val| val.to_str().unwrap().to_owned())
+    };
+
+    // the transport sees the caller's headers and adds its own
+    let mut req = Request::<_, EchoAll>::new(&custom, &());
+    req.header("x-a", "1").timeout(Duration::from_secs(10));
+    let res = req.send_with(&"tag").await.unwrap();
+    let mut seen = custom.seen.take();
+    seen.sort();
+    assert_eq!(seen, ["grpc-timeout", "x-a"]);
+    assert_eq!(req_header(&res, "x-a").as_deref(), Some("2"));
+    assert_eq!(req_header(&res, "x-state").as_deref(), Some("tag"));
+    assert_eq!(
+        req_header(&res, "grpc-timeout").as_deref(),
+        Some("10000000u")
+    );
+
+    // clearing drops the headers and the timeout
+    let mut req = Request::<_, EchoAll>::new(&custom, &());
+    req.header("x-a", "1").timeout(Duration::from_secs(10));
+    let res = req.send_with(&"clear").await.unwrap();
+    assert_eq!(req_header(&res, "x-a"), None);
+    assert_eq!(req_header(&res, "grpc-timeout"), None);
+
+    // the transport sets the size limits
+    let err = Request::<_, Sized>::new(&custom, &())
+        .send_with(&"limit")
+        .await
+        .unwrap_err();
+    assert_eq!(err.message(), "Received message larger than max (3 vs. 2)");
+    let input = BytesValue {
+        value: Bytes::from_static(b"abc"),
+    };
+    let err = Request::<_, Upload>::new(&custom, &input)
+        .send_with(&"limit")
+        .await
+        .unwrap_err();
+    assert_eq!(err.status(), GrpcStatus::ResourceExhausted);
+
+    // a timeout set by the transport is enforced
+    let err = Request::<_, Silent>::new(&custom, &())
+        .send_with(&"timeout")
+        .await
+        .unwrap_err();
+    assert!(matches!(*err, ClientError::DeadlineExceeded(_)), "{err:?}");
+
+    // an invalid header set by the transport fails the call
+    let err = Request::<_, Message>::new(&custom, &())
+        .send_with(&"invalid")
+        .await
+        .unwrap_err();
+    assert!(matches!(*err, ClientError::InvalidRequest(_)), "{err:?}");
+
+    let res = Request::<_, Message>::new(&custom, &())
+        .send_with(&"drop")
+        .await
+        .unwrap();
+    assert_eq!(res.res_size, 5);
+}
+
+#[ntex::test]
+async fn custom_stream_transport() {
+    let custom = Custom {
+        client: client(),
+        seen: RefCell::default(),
+    };
+
+    let mut req = StreamRequest::<_, Echo, _>::server_streaming(&custom, &());
+    req.header("x-a", "1");
+    let mut rx = req.open_with(&"tag").await.unwrap();
+    assert!(rx.recv().await.unwrap().is_ok());
+    assert_eq!(custom.seen.take(), ["x-a"]);
+    assert_eq!(rx.headers().get("x-a").unwrap(), "2");
+    assert_eq!(rx.headers().get("x-state").unwrap(), "tag");
+
+    // the transport sets the size limits of both streams
+    let (tx, mut rx) = StreamRequest::<_, Upload, _>::bidi(&custom)
+        .open_with(&"limit")
+        .await
+        .unwrap();
+    let input = BytesValue {
+        value: Bytes::from_static(b"abc"),
+    };
+    let err = tx.send(&input).await.unwrap_err();
+    assert_eq!(err.status(), GrpcStatus::ResourceExhausted);
+    tx.close();
+    assert!(rx.recv().await.unwrap().is_ok());
+
+    let mut rx = StreamRequest::<_, Sized, _>::server_streaming(&custom, &())
+        .open_with(&"limit")
+        .await
+        .unwrap();
+    let err = rx.recv().await.unwrap().unwrap_err();
+    assert_eq!(err.status(), GrpcStatus::ResourceExhausted);
+
+    let tx = SendStream::new();
+    tx.close();
+    let err = StreamRequest::<_, Silent, _>::client_streaming(&custom, &tx)
+        .send_with(&"timeout")
+        .await
+        .unwrap_err();
+    assert!(matches!(*err, ClientError::DeadlineExceeded(_)), "{err:?}");
+
+    let err = StreamRequest::<_, Message, _>::bidi(&custom)
+        .open_with(&"invalid")
+        .await
+        .unwrap_err();
+    assert!(matches!(*err, ClientError::InvalidRequest(_)), "{err:?}");
 }

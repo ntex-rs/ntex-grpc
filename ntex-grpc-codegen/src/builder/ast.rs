@@ -229,6 +229,10 @@ pub(crate) struct Method {
     pub(crate) output_type: String,
     /// Identifies if input type is external type
     pub(crate) input_type_extern: bool,
+    /// The client sends a stream of messages.
+    pub(crate) client_streaming: bool,
+    /// The server sends a stream of messages.
+    pub(crate) server_streaming: bool,
 }
 
 #[cfg(test)]

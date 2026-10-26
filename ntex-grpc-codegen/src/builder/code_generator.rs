@@ -1137,6 +1137,8 @@ impl CodeGenerator<'_> {
                     input_type,
                     output_type,
                     input_type_extern,
+                    client_streaming: method.client_streaming(),
+                    server_streaming: method.server_streaming(),
                 }
             })
             .collect();

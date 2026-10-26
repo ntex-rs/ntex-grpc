@@ -6,9 +6,12 @@ use ntex_http::{HeaderMap, HeaderName, HeaderValue};
 mod error;
 mod service;
 
-pub use self::error::{MethodResult, ServerError};
+pub use self::error::{MethodResult, ServerError, StreamResult};
 pub use self::service::GrpcServer;
 pub use crate::GrpcStatus;
+
+use crate::stream::CallStreams;
+use crate::{MethodDef, RecvStream, SendStream};
 
 /// A service that serves one gRPC service, such as `helloworld.Greeter`.
 ///
@@ -19,6 +22,65 @@ pub use crate::GrpcStatus;
 pub trait NamedService {
     /// Full service name with the package, e.g. `helloworld.Greeter`.
     const NAME: &'static str;
+
+    /// Returns `true` if `method` is a streaming method.
+    ///
+    /// The server passes a streaming call to the service as soon as its
+    /// headers arrive, with the request and response streams in
+    /// [`ServerRequest::streams`]. The other calls are passed once the
+    /// request message is read. `#[server]` implements it for the streaming
+    /// methods, the default returns `false`.
+    fn is_streaming(method: &str) -> bool {
+        let _ = method;
+        false
+    }
+}
+
+/// Helpers for the code `#[server]` generates.
+#[doc(hidden)]
+pub mod __private {
+    use super::{
+        CallStreams, GrpcStatus, MethodDef, RecvStream, SendStream, ServerError, ServerRequest,
+    };
+
+    /// Takes the streams of a streaming call.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the call is not passed as a streaming call, e.g. the
+    /// service is added with `GrpcServer::service_named()`.
+    pub fn streams(req: &mut ServerRequest) -> Result<CallStreams, ServerError> {
+        req.streams.take().ok_or_else(|| {
+            ServerError::new(
+                GrpcStatus::Unimplemented,
+                crate::encode_grpc_message(&format!(
+                    "Streaming is not supported for method: {}",
+                    req.name
+                )),
+                None,
+            )
+        })
+    }
+
+    /// The request stream of method `M`.
+    pub fn recv<M: MethodDef>(_: &M, streams: &mut CallStreams) -> RecvStream<M::Input> {
+        streams.recv()
+    }
+
+    /// The response stream of method `M`.
+    pub fn send<M: MethodDef>(_: &M, streams: &mut CallStreams) -> SendStream<M::Output> {
+        streams.send()
+    }
+
+    /// Fails to compile if the handler kind does not match method `M`.
+    pub const fn check_kind<M: MethodDef, const CLIENT: bool, const SERVER: bool>(_: &M) {
+        const {
+            assert!(
+                M::CLIENT_STREAMING == CLIENT && M::SERVER_STREAMING == SERVER,
+                "The method signature does not match the streaming kind of the rpc"
+            );
+        }
+    }
 }
 
 /// A call as [`GrpcServer`] receives it, before the message is decoded.
@@ -34,15 +96,22 @@ pub struct ServerRequest {
     /// Method name without the service, e.g. `SayHello`.
     pub name: ByteString,
     /// The encoded request message, without the 5-byte message prefix.
+    /// Empty for a streaming call.
     pub payload: Bytes,
-    /// Request headers, plus the trailers if the client sent any.
+    /// Request headers, plus the trailers if the client sent any. Only the
+    /// headers for a streaming call.
     pub headers: HeaderMap,
+    /// The request and response streams of a streaming call, `None` for a
+    /// unary call.
+    #[doc(hidden)]
+    pub streams: Option<CallStreams>,
 }
 
 /// Successful answer to a [`ServerRequest`].
 #[derive(Debug)]
 pub struct ServerResponse {
     /// The encoded reply message, the server adds the message prefix.
+    /// Ignored for a streaming call, its messages are sent on its stream.
     pub payload: BytePages,
     /// Extra trailers, sent after `grpc-status`. `grpc-status` and
     /// `grpc-message` are ignored, the status is `OK`.
@@ -208,6 +277,7 @@ mod tests {
             name: ByteString::from_static("SayHello"),
             payload: Bytes::from_static(b"x"),
             headers: HeaderMap::new(),
+            streams: None,
         };
         assert!(format!("{req:?}").contains("SayHello"));
     }

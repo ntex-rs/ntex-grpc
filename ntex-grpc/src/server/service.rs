@@ -2,15 +2,14 @@ use std::{cell::RefCell, error::Error, hash::Hash, rc::Rc};
 
 use ntex_bytes::{Buf, ByteString, Bytes};
 use ntex_h2::{self as h2, StreamRef, frame::Reason, frame::StreamId};
-use ntex_http::{HeaderMap, HeaderValue, Method, StatusCode, header::CONTENT_TYPE};
+use ntex_http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header::CONTENT_TYPE};
 use ntex_io::{Filter, Io, IoBoxed};
 use ntex_service::boxed::{self, BoxService, BoxServiceFactory};
 use ntex_service::{Ctx, Pipeline, Service, ServiceFactory, cfg::SharedCfg};
 use ntex_util::{HashMap, future::join_all, time::Millis, time::timeout_checked};
 
-#[cfg(feature = "compression")]
-use crate::Compression;
-use crate::utils::{self, Data};
+use crate::stream::{CallStreams, SendShared, ServerRecv, StreamError};
+use crate::utils::{self, Data, Enc};
 use crate::{consts, encode_grpc_message, status::GrpcStatus};
 
 use super::{NamedService, ServerError, ServerRequest, ServerResponse};
@@ -38,6 +37,12 @@ const MILLIS_IN_MINUTE: u64 = 60 * 1000;
 
 type Factory = BoxServiceFactory<(), ServerRequest, ServerResponse, ServerError, Box<dyn Error>>;
 type BoxedService = BoxService<(), ServerRequest, ServerResponse, ServerError>;
+/// Tells if a method of a service is a streaming one.
+type IsStreaming = fn(&str) -> bool;
+
+fn not_streaming(_: &str) -> bool {
+    false
+}
 
 /// Grpc server
 ///
@@ -53,6 +58,8 @@ pub struct GrpcServer {
     /// Names of the registered services, `names[i]` is served by
     /// `factories[i]`.
     names: Rc<[ByteString]>,
+    /// `streaming[i]` tells the streaming methods of `names[i]`.
+    streaming: Rc<[IsStreaming]>,
     factories: Vec<Factory>,
     default: Option<Factory>,
     max_message_size: usize,
@@ -74,6 +81,7 @@ impl GrpcServer {
     {
         Self {
             names: Rc::new([]),
+            streaming: Rc::new([]),
             factories: Vec::new(),
             default: None,
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
@@ -98,23 +106,33 @@ impl GrpcServer {
             + 'static,
         T::InitError: Into<Box<dyn Error>>,
     {
-        self.service_named(ByteString::from_static(T::NAME), factory)
+        self.add(ByteString::from_static(T::NAME), T::is_streaming, factory)
     }
 
     #[must_use]
     /// Add a service that takes the calls for the service `name`, the full
     /// service name with the package, e.g. `helloworld.Greeter`.
     ///
+    /// All its methods are unary ones, use [`service()`](Self::service)
+    /// for a service with streaming methods.
+    ///
     /// # Panics
     ///
     /// Panics if `name` is empty or contains `/`, or if a service with the
     /// same name is already added.
-    pub fn service_named<T>(mut self, name: impl Into<ByteString>, factory: T) -> Self
+    pub fn service_named<T>(self, name: impl Into<ByteString>, factory: T) -> Self
     where
         T: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError> + 'static,
         T::InitError: Into<Box<dyn Error>>,
     {
-        let name = name.into();
+        self.add(name.into(), not_streaming, factory)
+    }
+
+    fn add<T>(mut self, name: ByteString, streaming: IsStreaming, factory: T) -> Self
+    where
+        T: ServiceFactory<(), ServerRequest, Res = ServerResponse, Error = ServerError> + 'static,
+        T::InitError: Into<Box<dyn Error>>,
+    {
         assert!(
             !name.is_empty() && !name.contains('/'),
             "invalid grpc service name: {name:?}"
@@ -124,13 +142,14 @@ impl GrpcServer {
             "grpc service {name} is already added"
         );
         self.names = self.names.iter().cloned().chain([name]).collect();
+        self.streaming = self.streaming.iter().copied().chain([streaming]).collect();
         self.factories.push(box_factory(factory));
         self
     }
 
     #[must_use]
     /// Set the service that takes the calls for the services that are not
-    /// added, whatever their service name.
+    /// added, whatever their service name. All its methods are unary ones.
     ///
     /// # Panics
     ///
@@ -188,6 +207,7 @@ impl GrpcServer {
                 PublishService {
                     cfg,
                     names: self.names.clone(),
+                    streaming: self.streaming.clone(),
                     services,
                     max_size: self.max_message_size,
                     max_send_size: self.max_send_message_size,
@@ -249,6 +269,8 @@ struct PublishService {
     /// Names of the registered services, `names[i]` is served by
     /// `services[i]`.
     names: Rc<[ByteString]>,
+    /// `streaming[i]` tells the streaming methods of `names[i]`.
+    streaming: Rc<[IsStreaming]>,
     /// The registered services, followed by the default one if there is one.
     services: Vec<BoxedService>,
     max_size: usize,
@@ -256,21 +278,30 @@ struct PublishService {
     streams: RefCell<HashMap<StreamId, Inflight>>,
 }
 
-struct Inflight {
-    /// The request path without the leading `/`, `service/method`.
-    path: ByteString,
-    data: Data,
-    headers: HeaderMap,
+enum Inflight {
+    /// A unary request, read before the service is called.
+    Unary {
+        /// The request path without the leading `/`, `service/method`.
+        path: ByteString,
+        data: Data,
+        headers: HeaderMap,
+    },
+    /// A streaming request, the service reads it as it arrives.
+    Stream(Rc<ServerRecv>),
 }
 
 impl PublishService {
-    /// Returns the service that serves `service`, the default service
-    /// serves the names that are not registered.
-    fn route(&self, service: &str) -> Option<&BoxedService> {
+    /// Returns the index of the service that serves `service`, the default
+    /// service serves the names that are not registered.
+    fn route(&self, service: &str) -> Option<usize> {
         match self.names.iter().position(|name| name == service) {
-            Some(idx) => Some(&self.services[idx]),
-            None => self.services.get(self.names.len()),
+            Some(idx) => Some(idx),
+            None => (self.services.len() > self.names.len()).then_some(self.names.len()),
         }
+    }
+
+    fn is_streaming(&self, idx: usize, method: &str) -> bool {
+        self.streaming.get(idx).is_some_and(|f| f(method))
     }
 
     /// Checks the request message as data arrives, so a message over the
@@ -314,7 +345,7 @@ impl PublishService {
         // a message in an unknown encoding is unimplemented
         utils::read_message(
             flag,
-            headers,
+            headers.get(consts::GRPC_ENCODING).cloned(),
             data,
             self.max_size,
             GrpcStatus::Unimplemented,
@@ -366,10 +397,24 @@ impl Service<(), h2::Message> for PublishService {
                     return Ok(());
                 };
                 // the request is not read for an unknown service
-                if self.route(&path[..n]).is_none() {
+                let Some(idx) = self.route(&path[..n]) else {
                     let msg =
                         encode_grpc_message(&format!("grpc: unknown service {}", &path[..n]));
                     reject(&stream, StatusCode::OK, GrpcStatus::Unimplemented, msg, eof);
+                    return Ok(());
+                };
+
+                let (service, name) = split_path(path.clone());
+                if self.is_streaming(idx, &name) {
+                    let call = StreamCall {
+                        stream: &stream,
+                        svc: &self.services[idx],
+                        service,
+                        name,
+                        headers,
+                        eof,
+                    };
+                    self.call_stream(call, ctx).await;
                     return Ok(());
                 }
 
@@ -383,193 +428,325 @@ impl Service<(), h2::Message> for PublishService {
 
                 let _ = self.streams.borrow_mut().insert(
                     stream.id(),
-                    Inflight {
+                    Inflight::Unary {
                         headers,
                         data: Data::Empty,
                         path,
                     },
                 );
             }
-            h2::MessageKind::Data(data, _cap) => {
+            h2::MessageKind::Data(chunk, cap) => {
                 let mut streams = self.streams.borrow_mut();
-                if let Some(inflight) = streams.get_mut(&id) {
-                    inflight.data.push(data, self.max_size);
-                    if let Err((status, msg)) = self.check_request(inflight.data.as_slice()) {
-                        remove(&mut streams, &id);
-                        drop(streams);
-                        if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
-                            send_error(&stream, status, msg);
-                        }
-                        // the client stops sending the rest of the request
-                        stream.reset(Reason::NO_ERROR);
-                    }
-                }
-            }
-            h2::MessageKind::Eof(data) => {
-                let inflight = remove(&mut self.streams.borrow_mut(), &id);
-                if let Some(mut inflight) = inflight {
-                    match data {
-                        h2::StreamEof::Data(chunk, _cap) => {
-                            inflight.data.push(chunk, self.max_size);
-                        }
-                        h2::StreamEof::Trailers(hdrs) => {
-                            for (name, val) in &hdrs {
-                                inflight.headers.insert(name.clone(), val.clone());
-                            }
-                        }
-                        h2::StreamEof::Error(err) => return Err(err.into_error()),
-                    }
-
-                    let data = match self
-                        .read_request(&inflight.headers, inflight.data.get())
-                        .await
-                    {
-                        Ok(data) => data,
-                        Err((status, msg)) => {
+                match streams.get_mut(&id) {
+                    Some(Inflight::Stream(recv)) => recv.push_data(chunk, cap),
+                    Some(Inflight::Unary { data, .. }) => {
+                        data.push(chunk, self.max_size);
+                        if let Err((status, msg)) = self.check_request(data.as_slice()) {
+                            remove(&mut streams, &id);
+                            drop(streams);
                             if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
                                 send_error(&stream, status, msg);
                             }
-                            return Ok(());
+                            // the client stops sending the rest of the request
+                            stream.reset(Reason::NO_ERROR);
                         }
-                    };
-
-                    let (service, name) = split_path(inflight.path);
-                    // the service is known, it is checked with the headers
-                    let Some(svc) = self.route(&service) else {
-                        if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
-                            let msg =
-                                encode_grpc_message(&format!("grpc: unknown service {service}"));
-                            send_error(&stream, GrpcStatus::Unimplemented, msg);
-                        }
-                        return Ok(());
-                    };
-                    log::debug!("{}: Call service {service} method {name}", self.cfg.tag());
-                    let req = ServerRequest {
-                        payload: data,
-                        service,
-                        name,
-                        headers: inflight.headers,
-                    };
-                    // the response is compressed like the request
-                    #[cfg(feature = "compression")]
-                    let encoding = Compression::of_response(&req.headers);
-                    #[cfg(feature = "compression")]
-                    let headers = {
-                        let mut headers = hdrs();
-                        if let Some(enc) = encoding {
-                            headers.insert(consts::GRPC_ENCODING, enc.header());
-                        }
-                        headers
-                    };
-                    #[cfg(not(feature = "compression"))]
-                    let headers = hdrs();
-                    if stream
-                        .send_response(StatusCode::OK, headers, false)
-                        .is_err()
-                    {
-                        return Ok(());
                     }
-
-                    // GRPC Timeout
-                    let to = if let Some(to) = req.headers.get(consts::GRPC_TIMEOUT) {
-                        if let Ok(to) = try_parse_grpc_timeout(to) {
-                            to
-                        } else {
-                            send_error(&stream, GrpcStatus::InvalidArgument, ERR_DECODE_TIMEOUT);
-                            return Ok(());
-                        }
-                    } else {
-                        Millis::ZERO
-                    };
-
-                    match timeout_checked(to, ctx.call(svc, req)).await {
-                        Ok(Ok(mut res)) => {
-                            log::debug!("{}: Response is received {res:?}", self.cfg.tag());
-                            if res.payload.is_empty() {
-                                // an empty message is never compressed
-                                let _ = stream
-                                    .send_payload(Bytes::from_static(EMPTY_MESSAGE), false)
-                                    .await;
-                            } else {
-                                #[cfg(not(feature = "compression"))]
-                                let compressed = false;
-                                // a small message, or one that does not get
-                                // smaller, is sent uncompressed
-                                #[cfg(feature = "compression")]
-                                let compressed = match encoding {
-                                    Some(enc) => {
-                                        // the uncompressed message must fit
-                                        // the length prefix too
-                                        if let Err(msg) = send_size(res.payload.len(), usize::MAX)
-                                        {
-                                            send_error(
-                                                &stream,
-                                                GrpcStatus::ResourceExhausted,
-                                                msg,
-                                            );
-                                            return Ok(());
-                                        }
-                                        match enc.compress(&mut res.payload).await {
-                                            Ok(compressed) => compressed,
-                                            Err((status, msg)) => {
-                                                send_error(&stream, status, msg);
-                                                return Ok(());
-                                            }
-                                        }
-                                    }
-                                    None => false,
-                                };
-                                let len = match send_size(res.payload.len(), self.max_send_size) {
-                                    Ok(len) => len,
-                                    Err(msg) => {
-                                        send_error(&stream, GrpcStatus::ResourceExhausted, msg);
-                                        return Ok(());
-                                    }
-                                };
-                                utils::prepend_prefix(&mut res.payload, compressed, len);
-                                let _ = stream.send_pages(res.payload, false).await;
+                    None => {}
+                }
+            }
+            h2::MessageKind::Eof(eof) => {
+                let inflight = remove(&mut self.streams.borrow_mut(), &id);
+                match inflight {
+                    Some(Inflight::Stream(recv)) => {
+                        let end = match eof {
+                            h2::StreamEof::Data(chunk, cap) => {
+                                recv.push_data(chunk, cap);
+                                Ok(HeaderMap::new())
                             }
-
-                            let mut trailers = HeaderMap::default();
-                            trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
-                            for (name, val) in res.headers {
-                                // the call succeeded, whatever the service says
-                                if name != consts::GRPC_STATUS && name != consts::GRPC_MESSAGE {
-                                    trailers.append(name, val);
+                            h2::StreamEof::Trailers(hdrs) => Ok(hdrs),
+                            h2::StreamEof::Error(err) => Err(match *err {
+                                h2::StreamError::Reset(r) => StreamError::Reset(r),
+                                _ => StreamError::Closed,
+                            }),
+                        };
+                        recv.push_end(end);
+                    }
+                    Some(Inflight::Unary {
+                        path,
+                        mut data,
+                        mut headers,
+                    }) => {
+                        match eof {
+                            h2::StreamEof::Data(chunk, _cap) => {
+                                data.push(chunk, self.max_size);
+                            }
+                            h2::StreamEof::Trailers(hdrs) => {
+                                for (name, val) in &hdrs {
+                                    headers.insert(name.clone(), val.clone());
                                 }
                             }
-
-                            send_trailers(&stream, trailers);
+                            h2::StreamEof::Error(err) => return Err(err.into_error()),
                         }
-                        Ok(Err(err)) => {
-                            log::debug!(
-                                "{}: Failure during service call: {:?}",
-                                self.cfg.tag(),
-                                err.message
-                            );
-                            let mut trailers = err.headers;
-                            trailers.insert(consts::GRPC_STATUS, err.status.into());
-                            trailers.insert(consts::GRPC_MESSAGE, err.message);
-                            send_trailers(&stream, trailers);
-                        }
-                        Err(()) => {
-                            log::debug!(
-                                "{}: Deadline exceeded failure during service call",
-                                self.cfg.tag()
-                            );
-                            send_error(&stream, GrpcStatus::DeadlineExceeded, ERR_DEADLINE);
-                        }
+                        return self.call_unary(&stream, path, data, headers, ctx).await;
                     }
-
-                    return Ok(());
+                    None => {}
                 }
             }
             h2::MessageKind::Disconnect(_) => {
-                remove(&mut self.streams.borrow_mut(), &id);
+                if let Some(Inflight::Stream(recv)) = remove(&mut self.streams.borrow_mut(), &id) {
+                    recv.push_end(Err(StreamError::Disconnected));
+                }
             }
         }
         Ok(())
     }
+}
+
+/// A streaming call, passed to the service once its headers arrive.
+struct StreamCall<'a> {
+    stream: &'a StreamRef,
+    svc: &'a BoxedService,
+    service: ByteString,
+    name: ByteString,
+    headers: HeaderMap,
+    /// The client sent no request messages.
+    eof: bool,
+}
+
+impl PublishService {
+    async fn call_unary(
+        &self,
+        stream: &StreamRef,
+        path: ByteString,
+        mut data: Data,
+        headers: HeaderMap,
+        ctx: Ctx<'_, Self, ()>,
+    ) -> Result<(), h2::StreamError> {
+        let data = match self.read_request(&headers, data.get()).await {
+            Ok(data) => data,
+            Err((status, msg)) => {
+                if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
+                    send_error(stream, status, msg);
+                }
+                return Ok(());
+            }
+        };
+
+        let (service, name) = split_path(path);
+        // the service is known, it is checked with the headers
+        let Some(idx) = self.route(&service) else {
+            if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
+                let msg = encode_grpc_message(&format!("grpc: unknown service {service}"));
+                send_error(stream, GrpcStatus::Unimplemented, msg);
+            }
+            return Ok(());
+        };
+        log::debug!("{}: Call service {service} method {name}", self.cfg.tag());
+        let req = ServerRequest {
+            payload: data,
+            service,
+            name,
+            headers,
+            streams: None,
+        };
+        // the response is compressed like the request
+        let encoding = Enc::of_response(&req.headers);
+        if stream
+            .send_response(StatusCode::OK, response_headers(encoding), false)
+            .is_err()
+        {
+            return Ok(());
+        }
+
+        let Ok(to) = request_timeout(&req.headers) else {
+            send_error(stream, GrpcStatus::InvalidArgument, ERR_DECODE_TIMEOUT);
+            return Ok(());
+        };
+
+        match timeout_checked(to, ctx.call(&self.services[idx], req)).await {
+            Ok(Ok(res)) => {
+                log::debug!("{}: Response is received {res:?}", self.cfg.tag());
+                if res.payload.is_empty() {
+                    // an empty message is never compressed
+                    let _ = stream
+                        .send_payload(Bytes::from_static(EMPTY_MESSAGE), false)
+                        .await;
+                } else {
+                    match utils::frame_message(res.payload, self.max_send_size, encoding).await {
+                        Ok(buf) => {
+                            let _ = stream.send_pages(buf, false).await;
+                        }
+                        Err((status, msg)) => {
+                            send_error(stream, status, msg);
+                            return Ok(());
+                        }
+                    }
+                }
+
+                let mut trailers = HeaderMap::default();
+                trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
+                append_trailers(&mut trailers, res.headers);
+                send_trailers(stream, trailers);
+            }
+            Ok(Err(err)) => {
+                log::debug!(
+                    "{}: Failure during service call: {:?}",
+                    self.cfg.tag(),
+                    err.message
+                );
+                send_trailers(stream, error_trailers(err));
+            }
+            Err(()) => {
+                log::debug!(
+                    "{}: Deadline exceeded failure during service call",
+                    self.cfg.tag()
+                );
+                send_error(stream, GrpcStatus::DeadlineExceeded, ERR_DEADLINE);
+            }
+        }
+        Ok(())
+    }
+
+    /// Calls the service with the streams of the call, the request messages
+    /// are pushed to it as they arrive. The call ends when the service
+    /// returns.
+    async fn call_stream(&self, call: StreamCall<'_>, ctx: Ctx<'_, Self, ()>) {
+        let StreamCall {
+            stream,
+            svc,
+            service,
+            name,
+            headers,
+            eof,
+        } = call;
+
+        let Ok(to) = request_timeout(&headers) else {
+            reject(
+                stream,
+                StatusCode::OK,
+                GrpcStatus::InvalidArgument,
+                ERR_DECODE_TIMEOUT,
+                eof,
+            );
+            return;
+        };
+
+        let recv = ServerRecv::new(eof);
+        if !eof {
+            let _ = self
+                .streams
+                .borrow_mut()
+                .insert(stream.id(), Inflight::Stream(recv.clone()));
+        }
+
+        // the response is compressed like the request, the headers are sent
+        // with the first message or when the call ends
+        let encoding = Enc::of_response(&headers);
+        let send = SendShared::server(
+            stream.clone(),
+            response_headers(encoding),
+            self.max_send_size,
+            encoding,
+        );
+        let streams = CallStreams::new(
+            recv.clone(),
+            headers.clone(),
+            self.max_size,
+            headers.get(consts::GRPC_ENCODING).cloned(),
+            send.clone(),
+        );
+        log::debug!(
+            "{}: Call streaming service {service} method {name}",
+            self.cfg.tag()
+        );
+        let req = ServerRequest {
+            payload: Bytes::new(),
+            service,
+            name,
+            headers,
+            streams: Some(streams),
+        };
+        let result = timeout_checked(to, ctx.call(svc, req)).await;
+
+        if let Some((res_headers, extra)) = send.finish() {
+            let headers_sent = match res_headers {
+                Some(hdrs) => stream.send_response(StatusCode::OK, hdrs, false).is_ok(),
+                None => true,
+            };
+            if headers_sent {
+                let mut trailers = match result {
+                    Ok(Ok(res)) => {
+                        let mut trailers = HeaderMap::default();
+                        trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
+                        append_trailers(&mut trailers, res.headers);
+                        trailers
+                    }
+                    Ok(Err(err)) => {
+                        log::debug!(
+                            "{}: Failure during service call: {:?}",
+                            self.cfg.tag(),
+                            err.message
+                        );
+                        error_trailers(err)
+                    }
+                    Err(()) => {
+                        log::debug!(
+                            "{}: Deadline exceeded failure during service call",
+                            self.cfg.tag()
+                        );
+                        let mut trailers = HeaderMap::default();
+                        trailers.insert(consts::GRPC_STATUS, GrpcStatus::DeadlineExceeded.into());
+                        trailers.insert(consts::GRPC_MESSAGE, ERR_DEADLINE);
+                        trailers
+                    }
+                };
+                let extra = extra.iter().map(|(n, v)| (n.clone(), v.clone()));
+                append_trailers(&mut trailers, extra);
+                send_trailers(stream, trailers);
+                // the call is over, the client stops sending the request
+                if !recv.is_ended() {
+                    stream.reset(Reason::NO_ERROR);
+                }
+            }
+        }
+        remove(&mut self.streams.borrow_mut(), &stream.id());
+    }
+}
+
+/// The response headers, with the encoding of the response messages.
+fn response_headers(encoding: Option<Enc>) -> HeaderMap {
+    let mut headers = hdrs();
+    if let Some(enc) = encoding {
+        headers.insert(consts::GRPC_ENCODING, enc.header());
+    }
+    headers
+}
+
+/// Parses the `grpc-timeout` header, no deadline if there is none.
+fn request_timeout(headers: &HeaderMap) -> Result<Millis, ()> {
+    headers
+        .get(consts::GRPC_TIMEOUT)
+        .map_or(Ok(Millis::ZERO), try_parse_grpc_timeout)
+}
+
+/// Appends the trailers of the service, except `grpc-status` and
+/// `grpc-message`, the call succeeded whatever the service says.
+fn append_trailers<I>(trailers: &mut HeaderMap, extra: I)
+where
+    I: IntoIterator<Item = (HeaderName, HeaderValue)>,
+{
+    for (name, val) in extra {
+        if name != consts::GRPC_STATUS && name != consts::GRPC_MESSAGE {
+            trailers.append(name, val);
+        }
+    }
+}
+
+fn error_trailers(err: ServerError) -> HeaderMap {
+    let mut trailers = err.headers;
+    trailers.insert(consts::GRPC_STATUS, err.status.into());
+    trailers.insert(consts::GRPC_MESSAGE, err.message);
+    trailers
 }
 
 /// Capacity of the streams map that is kept however few streams are open.
@@ -639,20 +816,6 @@ fn hdrs() -> HeaderMap {
     hdrs
 }
 
-/// Returns the length prefix of a response message, or the error message if
-/// the message must not be sent.
-fn send_size(len: usize, max_size: usize) -> Result<u32, HeaderValue> {
-    let msg = if len > max_size {
-        format!("grpc: trying to send message larger than max ({len} vs. {max_size})")
-    } else if let Ok(len) = u32::try_from(len) {
-        return Ok(len);
-    } else {
-        format!("grpc: message too large ({len} bytes)")
-    };
-    Err(HeaderValue::try_from(msg)
-        .unwrap_or_else(|_| HeaderValue::from_static("grpc: message too large")))
-}
-
 fn send_error(stream: &StreamRef, st: GrpcStatus, msg: HeaderValue) {
     let mut trailers = HeaderMap::default();
     trailers.insert(consts::GRPC_STATUS, st.into());
@@ -712,6 +875,7 @@ fn try_parse_grpc_timeout(val: &HeaderValue) -> Result<Millis, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::send_size;
 
     #[test]
     fn content_type() {

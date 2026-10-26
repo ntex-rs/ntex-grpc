@@ -11,7 +11,8 @@
 //!   implement,
 //! - [`google_types`] has the protobuf well-known types.
 //!
-//! Only unary calls are supported, streaming methods are not generated.
+//! Streaming calls send and receive messages with [`SendStream`] and
+//! [`RecvStream`], on the client and on the server.
 #![deny(clippy::pedantic)]
 #![allow(
     clippy::assert_is_empty,
@@ -27,6 +28,7 @@ mod consts;
 mod format;
 mod service;
 mod status;
+mod stream;
 mod utils;
 
 /// gRPC client.
@@ -51,6 +53,9 @@ pub use crate::compression::Compression;
 pub use crate::encoding::DecodeError;
 pub use crate::service::{MethodDef, ServiceDef};
 pub use crate::status::GrpcStatus;
+#[doc(hidden)]
+pub use crate::stream::CallStreams;
+pub use crate::stream::{RecvStream, SendStream, StreamError};
 pub use crate::types::{Message, NativeType};
 pub use crate::utils::{
     decode_binary_header, decode_binary_header_values, encode_binary_header, encode_grpc_message,

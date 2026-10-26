@@ -1,5 +1,12 @@
 # Changes
 
+## [0.6.0] - Unreleased
+
+* Generate streaming client methods, a client, server or bidi streaming rpc
+  returns a `StreamRequest`, it was generated as a unary method. Method
+  definitions have the `CLIENT_STREAMING` and `SERVER_STREAMING` consts.
+  Generated code requires ntex-grpc 3.5.0
+
 ## [0.5.0] - 2026-10-15
 
 * Merge ntex-prost-build into ntex-grpc-codegen

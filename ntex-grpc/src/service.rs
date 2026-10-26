@@ -28,6 +28,12 @@ pub trait MethodDef {
     /// Reply message.
     type Output: Message;
 
+    /// The client sends a stream of request messages.
+    const CLIENT_STREAMING: bool = false;
+
+    /// The server sends a stream of reply messages.
+    const SERVER_STREAMING: bool = false;
+
     #[inline]
     /// Decode a request message.
     fn decode(&self, buf: &mut Bytes) -> Result<Self::Input, DecodeError> {

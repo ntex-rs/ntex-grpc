@@ -57,23 +57,63 @@ pub trait ClientInformation<T> {
 
 /// [`Transport`] on top of an `ntex-h2` connection pool.
 ///
-/// Cloning is cheap and clones share the pool. The pool itself,
-/// [`ntex_h2::client::Client`], is a transport as well, this type only gives
-/// it a name in this crate.
+/// Cloning is cheap and clones share the pool, copying the message-size
+/// defaults. [`max_message_size()`](Self::max_message_size) and
+/// [`max_send_message_size()`](Self::max_send_message_size) set defaults for
+/// unary and streaming calls; explicit per-request limits take precedence.
+/// The pool itself, [`ntex_h2::client::Client`], is a transport as well, but
+/// does not carry these gRPC defaults.
 #[derive(Clone)]
-pub struct Client(client::Client);
+pub struct Client {
+    pool: client::Client,
+    max_message_size: usize,
+    max_send_message_size: usize,
+}
 
 impl Client {
     #[inline]
     /// Create grpc client transport from h2 client
     pub fn new(client: client::Client) -> Self {
-        Self(client)
+        Self {
+            pool: client,
+            max_message_size: request::DEFAULT_MAX_MESSAGE_SIZE,
+            max_send_message_size: request::DEFAULT_MAX_SEND_MESSAGE_SIZE,
+        }
+    }
+
+    #[must_use]
+    /// Set the default size limit of each response message, in bytes.
+    ///
+    /// The default is 4 MiB. Both the received and decompressed message
+    /// must fit. A larger message fails the call with
+    /// [`GrpcStatus::ResourceExhausted`].
+    ///
+    /// [`Request::max_message_size()`] and
+    /// [`StreamRequest::max_message_size()`] override this for one call.
+    pub fn max_message_size(mut self, size: usize) -> Self {
+        self.max_message_size = size;
+        self
+    }
+
+    #[must_use]
+    /// Set the default size limit of each request message, in bytes.
+    ///
+    /// The default is 2 GiB - 1. The limit applies after compression. A
+    /// larger message is not sent and fails with
+    /// [`GrpcStatus::ResourceExhausted`]. Messages of 4 GiB or larger cannot
+    /// be sent, regardless of this limit.
+    ///
+    /// [`Request::max_send_message_size()`] and
+    /// [`StreamRequest::max_send_message_size()`] override this for one call.
+    pub fn max_send_message_size(mut self, size: usize) -> Self {
+        self.max_send_message_size = size;
+        self
     }
 
     #[inline]
     /// Get reference to h2 client
     pub fn get_ref(&self) -> &client::Client {
-        &self.0
+        &self.pool
     }
 }
 

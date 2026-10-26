@@ -2,6 +2,10 @@
 
 ## [4.0.0] - Unreleased
 
+* `client::Client::max_message_size()` and `max_send_message_size()` set
+  client-wide defaults for unary and streaming calls. Explicit limits on
+  `Request`, `StreamRequest` or `RequestContext` override these defaults
+
 * Client, server and bidirectional streaming calls. `SendStream<T>` and
   `RecvStream<T>` send and receive the messages, the same types on the
   client and the server. Generated clients return a `StreamRequest`, its

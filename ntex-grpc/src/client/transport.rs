@@ -23,7 +23,8 @@ impl<St, T: MethodDef> Transport<T, St> for Client {
         val: &T::Input,
         ctx: &mut RequestContext<'_, St>,
     ) -> Result<Response<T>, Self::Error> {
-        Transport::request(&self.0, val, ctx).await
+        ctx.message_size_defaults(self.max_message_size, self.max_send_message_size);
+        Transport::request(&self.pool, val, ctx).await
     }
 }
 

@@ -1187,6 +1187,157 @@ async fn max_message_size() {
     }
 }
 
+#[ntex::test]
+async fn client_receive_message_size_defaults() {
+    let client = GrpcClient::new(pool()).max_message_size(2);
+    for (limit, override_limit, accepted) in [
+        (2, None, false),
+        (3, None, true),
+        (2, Some(3), true),
+        (3, Some(2), false),
+        (3, Some(0), false),
+        (0, Some(4 * 1024 * 1024), true),
+    ] {
+        let client = client.clone().max_message_size(limit);
+        for kind in 0..4 {
+            let result = match kind {
+                0 => {
+                    let mut req = Request::<_, Sized>::new(&client, &());
+                    if let Some(limit) = override_limit {
+                        req.max_message_size(limit);
+                    }
+                    req.send().await.map(drop)
+                }
+                1 => {
+                    let mut req = StreamRequest::<_, Sized, _>::server_streaming(&client, &());
+                    if let Some(limit) = override_limit {
+                        req.max_message_size(limit);
+                    }
+                    let mut rx = req.open().await.unwrap();
+                    rx.recv().await.unwrap().map_err(Error::from)
+                }
+                2 => {
+                    let tx = SendStream::new();
+                    let mut req = StreamRequest::<_, Sized, _>::client_streaming(&client, &tx);
+                    if let Some(limit) = override_limit {
+                        req.max_message_size(limit);
+                    }
+                    let (result, ()) = join(req.send(), async {
+                        tx.send(&()).await.unwrap();
+                        tx.close();
+                    })
+                    .await;
+                    result.map(drop)
+                }
+                _ => {
+                    let mut req = StreamRequest::<_, Sized, _>::bidi(&client);
+                    if let Some(limit) = override_limit {
+                        req.max_message_size(limit);
+                    }
+                    let (tx, mut rx) = req.open().await.unwrap();
+                    tx.send(&()).await.unwrap();
+                    tx.close();
+                    rx.recv().await.unwrap().map_err(Error::from)
+                }
+            };
+            if accepted {
+                result.unwrap();
+            } else {
+                assert_eq!(
+                    invalid_response(&result.unwrap_err()).code,
+                    GrpcStatus::ResourceExhausted
+                );
+            }
+        }
+    }
+    // Changing a clone or overriding one request must not change the original.
+    let err = Request::<_, Sized>::new(&client, &())
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(invalid_response(&err).code, GrpcStatus::ResourceExhausted);
+}
+
+#[ntex::test]
+async fn client_send_message_size_defaults() {
+    let client = GrpcClient::new(pool()).max_send_message_size(3);
+    let input = BytesValue {
+        value: Bytes::from_static(b"ab"),
+    };
+    for (limit, override_limit, accepted) in [
+        (3, None, false),
+        (4, None, true),
+        (3, Some(4), true),
+        (4, Some(3), false),
+        (4, Some(0), false),
+        (0, Some(i32::MAX as usize), true),
+    ] {
+        let client = client.clone().max_send_message_size(limit);
+        for kind in 0..4 {
+            let result = match kind {
+                0 => {
+                    let mut req = Request::<_, Upload>::new(&client, &input);
+                    if let Some(limit) = override_limit {
+                        req.max_send_message_size(limit);
+                    }
+                    req.send().await.map(drop)
+                }
+                1 => {
+                    let mut req = StreamRequest::<_, Upload, _>::server_streaming(&client, &input);
+                    if let Some(limit) = override_limit {
+                        req.max_send_message_size(limit);
+                    }
+                    match req.open().await {
+                        Ok(mut rx) => rx.recv().await.unwrap().map_err(Error::from),
+                        Err(err) => Err(err),
+                    }
+                }
+                2 => {
+                    let tx = SendStream::new();
+                    let mut req = StreamRequest::<_, Upload, _>::client_streaming(&client, &tx);
+                    if let Some(limit) = override_limit {
+                        req.max_send_message_size(limit);
+                    }
+                    let (response, result) = join(req.send(), async {
+                        let result = tx.send(&input).await;
+                        tx.close();
+                        result.map_err(Error::from)
+                    })
+                    .await;
+                    response.unwrap();
+                    result
+                }
+                _ => {
+                    let mut req = StreamRequest::<_, Upload, _>::bidi(&client);
+                    if let Some(limit) = override_limit {
+                        req.max_send_message_size(limit);
+                    }
+                    let (tx, mut rx) = req.open().await.unwrap();
+                    let result = tx.send(&input).await.map_err(Error::from);
+                    if result.is_err() {
+                        tx.send(&BytesValue::default()).await.unwrap();
+                    }
+                    tx.close();
+                    rx.recv().await.unwrap().unwrap();
+                    result
+                }
+            };
+            if accepted {
+                result.unwrap();
+            } else {
+                let err = result.unwrap_err();
+                assert!(matches!(*err, ClientError::InvalidRequest(_)), "{err:?}");
+                assert_eq!(err.status(), GrpcStatus::ResourceExhausted);
+            }
+        }
+    }
+    let err = Request::<_, Upload>::new(&client, &input)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(err.status(), GrpcStatus::ResourceExhausted);
+}
+
 const EXTRA_DATA: &str = "cardinality violation: expected <EOF> for non server-streaming RPCs, but received another message";
 
 #[ntex::test]

@@ -127,6 +127,8 @@ bitflags::bitflags! {
         const ATTACHED      = 0b0001_0000;
         /// The h2 stream is reset with `CANCEL`.
         const RESET         = 0b0010_0000;
+        /// A client-streaming call has claimed the sender.
+        const CLAIMED       = 0b0100_0000;
     }
 }
 
@@ -246,6 +248,20 @@ impl SendShared {
         self.flags.get().contains(Flags::ATTACHED)
     }
 
+    /// Claims an unattached sender for one client-streaming call.
+    pub(crate) fn start_open(&self) -> Option<SendOpenGuard<'_>> {
+        if self
+            .flags
+            .get()
+            .intersects(Flags::ATTACHED | Flags::CLAIMED)
+        {
+            None
+        } else {
+            self.insert(Flags::CLAIMED);
+            Some(SendOpenGuard(self))
+        }
+    }
+
     pub(crate) fn sent(&self) -> usize {
         self.sent.get()
     }
@@ -342,7 +358,7 @@ impl SendShared {
             Backend::Server(stream) => {
                 let headers = self.headers.borrow_mut().take();
                 if let Some(hdrs) = headers
-                    && let Err(err) = stream.send_response(StatusCode::OK, hdrs, false)
+                    && let Err(err) = send_response_headers(stream, hdrs)
                 {
                     Err(StreamError::from_send(&err))
                 } else {
@@ -438,6 +454,36 @@ impl SendShared {
             self.headers.borrow_mut().take(),
             mem::take(&mut *self.trailers.borrow_mut()),
         ))
+    }
+}
+
+/// Starts a streaming response, resetting the stream if its headers cannot be sent.
+pub(crate) fn send_response_headers(
+    stream: &StreamRef,
+    headers: HeaderMap,
+) -> Result<(), Error<OperationError>> {
+    stream
+        .send_response(StatusCode::OK, headers, false)
+        .inspect_err(|err| {
+            log::debug!("{}: Cannot send response headers: {err:?}", stream.tag());
+            stream.reset(Reason::INTERNAL_ERROR);
+        })
+}
+
+/// Cancels an unattached sender when opening fails or is dropped.
+pub(crate) struct SendOpenGuard<'a>(&'a SendShared);
+
+impl SendOpenGuard<'_> {
+    pub(crate) fn fail(self, err: Error<ClientError>) {
+        self.0.set_error(StreamError::Client(err));
+    }
+}
+
+impl Drop for SendOpenGuard<'_> {
+    fn drop(&mut self) {
+        if !self.0.is_attached() {
+            self.0.cancel();
+        }
     }
 }
 
@@ -542,6 +588,9 @@ impl<T> SendStream<T> {
     ///
     /// Returns false if the headers are sent already, with the first
     /// message, or on the client.
+    ///
+    /// Headers exceeding the peer's limit reset the call with
+    /// `INTERNAL_ERROR` when the response starts.
     pub fn header(&self, name: HeaderName, value: HeaderValue) -> bool {
         if let Some(hdrs) = self.shared.headers.borrow_mut().as_mut() {
             hdrs.append(name, value);
@@ -1001,6 +1050,9 @@ type Decompress = Pin<Box<dyn Future<Output = Result<Bytes, (GrpcStatus, HeaderV
 /// stream ends with `None` once the peer ends it, or with an error. The
 /// messages received before an error are read first.
 ///
+/// A decoding error discards the remaining buffered data and releases its
+/// flow-control capacity.
+///
 /// The client reports the status of the call as [`StreamError::Client`].
 /// Dropping the stream on the client before its end cancels the call.
 pub struct RecvStream<T> {
@@ -1105,6 +1157,8 @@ impl<T> RecvStream<T> {
         self.decompress = None;
         self.end = Some(Err(err.clone()));
         self.close_source();
+        self.decoder.data = Data::Empty;
+        self.decoder.caps.clear();
         err
     }
 
@@ -1566,6 +1620,35 @@ mod tests {
         recv.push_end(Ok(trailers.clone()));
         assert!(rx.recv().await.is_none());
         assert_eq!(rx.trailers(), &trailers);
+    }
+
+    #[ntex::test]
+    async fn server_recv_failure_clears_buffered_data() {
+        use crate::google_types::BytesValue;
+
+        for (invalid, status) in [
+            (frame(2, b""), GrpcStatus::Internal),
+            (frame(0, b"\xff"), GrpcStatus::InvalidArgument),
+            (frame(0, &[0; 65]), GrpcStatus::ResourceExhausted),
+        ] {
+            let mut data = frame(0, b"");
+            data.extend(invalid);
+            data.extend(frame(0, b""));
+            let mut rx = RecvStream::<BytesValue>::server(
+                ServerRecv::new(true),
+                HeaderMap::new(),
+                64,
+                None,
+            );
+            rx.decoder.data.push(Bytes::from(data), 64);
+
+            assert_eq!(rx.recv().await.unwrap().unwrap(), BytesValue::default());
+            let err = rx.recv().await.unwrap().unwrap_err();
+            assert_eq!(err.status(), status);
+            assert_eq!(rx.status(), Some(status));
+            assert!(!rx.decoder.has_data());
+            assert!(rx.recv().await.is_none());
+        }
     }
 
     #[ntex::test]

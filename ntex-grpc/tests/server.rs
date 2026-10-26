@@ -682,6 +682,73 @@ async fn deadline_exceeded() {
 }
 
 #[ntex::test]
+async fn zero_server_timeout() {
+    use std::{cell::Cell, rc::Rc, time::Duration};
+
+    let calls = Rc::new(Cell::new(0));
+    let count = calls.clone();
+    let factory = fn_factory(async move |&()| {
+        let count = count.clone();
+        Ok::<_, std::io::Error>(fn_service(move |req| {
+            count.set(count.get() + 1);
+            handle(req)
+        }))
+    });
+    let client = connect(
+        GrpcServer::new(Svc).service_named("test.Deadline", factory),
+        false,
+    );
+
+    ntex::time::timeout(Duration::from_secs(1), async {
+        for val in ["0H", "0M", "0S", "0m", "0u", "0n"] {
+            let mut hdrs = req_headers(None);
+            hdrs.insert(GRPC_TIMEOUT, HeaderValue::from_static(val));
+            let (_, data, trailers) =
+                call_to(&client, "/test.Deadline/Call", hdrs, message(0, b"x")).await;
+            assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "4", "{val}");
+            assert_eq!(trailers.get(GRPC_MESSAGE).unwrap(), "Deadline exceeded");
+            assert!(data.is_empty());
+            assert_eq!(calls.get(), 0);
+        }
+
+        let (_, data, trailers) = call_to(
+            &client,
+            "/test.Deadline/Call",
+            req_headers(None),
+            message(0, b"x"),
+        )
+        .await;
+        assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+        assert_eq!(data, message(0, b"x"));
+        assert_eq!(calls.get(), 1);
+    })
+    .await
+    .expect("zero server timeout did not terminate the RPC");
+}
+
+#[ntex::test]
+async fn submillisecond_server_timeout() {
+    let client = client();
+    ntex::time::timeout(std::time::Duration::from_secs(1), async {
+        for val in ["1u", "999u", "1n", "999999n"] {
+            let mut hdrs = req_headers(None);
+            hdrs.insert(GRPC_TIMEOUT, HeaderValue::from_static(val));
+            let (_, data, trailers) =
+                call_to(&client, "/test.Svc/Slow", hdrs, message(0, b"x")).await;
+            assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "4", "{val}");
+            assert_eq!(trailers.get(GRPC_MESSAGE).unwrap(), "Deadline exceeded");
+            assert!(data.is_empty());
+        }
+
+        let (_, data, trailers) = call(&client, None, message(0, b"x")).await;
+        assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+        assert_eq!(data, message(0, b"x"));
+    })
+    .await
+    .expect("submillisecond server timeout became unlimited");
+}
+
+#[ntex::test]
 async fn boxed_io() {
     let client = client_boxed();
     let (headers, data, trailers) = call(&client, None, message(0, b"body")).await;

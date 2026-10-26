@@ -165,7 +165,8 @@ pub(crate) struct SendShared {
     flags: Cell<Flags>,
     /// The number of `SendStream` handles, the last one closes the stream.
     handles: Cell<usize>,
-    wakers: RefCell<Vec<Waker>>,
+    ready_wakers: RefCell<Vec<Waker>>,
+    send_waiters: RefCell<VecDeque<Rc<LocalWaker>>>,
     max_size: Cell<usize>,
     enc: Cell<Option<Enc>>,
     deadline: Cell<Option<Instant>>,
@@ -184,7 +185,8 @@ impl SendShared {
             backend: OnceCell::new(),
             flags: Cell::new(Flags::empty()),
             handles: Cell::new(0),
-            wakers: RefCell::new(Vec::new()),
+            ready_wakers: RefCell::new(Vec::new()),
+            send_waiters: RefCell::new(VecDeque::new()),
             max_size: Cell::new(usize::MAX),
             enc: Cell::new(None),
             deadline: Cell::new(None),
@@ -229,8 +231,25 @@ impl SendShared {
         self.flags.set(flags);
     }
 
-    fn wake_all(&self) {
-        let wakers = mem::take(&mut *self.wakers.borrow_mut());
+    fn wake_sender(&self) {
+        if matches!(self.check_ready(), Poll::Ready(Ok(()))) {
+            let waker = self.send_waiters.borrow().front().and_then(|w| w.take());
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+    }
+
+    fn wake_waiters(&self) {
+        if self.flags.get().contains(Flags::CLOSED) || self.error.borrow().is_some() {
+            let waiters = mem::take(&mut *self.send_waiters.borrow_mut());
+            for waiter in waiters {
+                waiter.wake();
+            }
+        } else {
+            self.wake_sender();
+        }
+        let wakers = mem::take(&mut *self.ready_wakers.borrow_mut());
         for waker in wakers {
             waker.wake();
         }
@@ -295,7 +314,7 @@ impl SendShared {
         if self.flags.get().contains(Flags::CLOSED) {
             self.half_close();
         }
-        self.wake_all();
+        self.wake_waiters();
         Ok(())
     }
 
@@ -320,7 +339,7 @@ impl SendShared {
         }
     }
 
-    fn poll_ready(&self, cx: &Context<'_>) -> Poll<Result<(), StreamError>> {
+    fn check_ready(&self) -> Poll<Result<(), StreamError>> {
         if let Some(err) = self.error.borrow().as_ref() {
             return Poll::Ready(Err(err.clone()));
         }
@@ -330,18 +349,23 @@ impl SendShared {
         } else if flags.contains(Flags::ATTACHED) && !flags.contains(Flags::BUSY) {
             Poll::Ready(Ok(()))
         } else {
-            let mut wakers = self.wakers.borrow_mut();
-            if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
-                wakers.push(cx.waker().clone());
-            }
             Poll::Pending
         }
     }
 
+    fn poll_ready(&self, cx: &Context<'_>) -> Poll<Result<(), StreamError>> {
+        let ready = self.check_ready();
+        if ready.is_pending() {
+            let mut wakers = self.ready_wakers.borrow_mut();
+            if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
+                wakers.push(cx.waker().clone());
+            }
+        }
+        ready
+    }
+
     async fn send<T: Message>(&self, msg: &T) -> Result<(), StreamError> {
-        poll_fn(|cx| self.poll_ready(cx)).await?;
-        self.insert(Flags::BUSY);
-        let _guard = SendGuard(self);
+        let _guard = SendWait::new(self).await?;
 
         let mut buf = BytePages::default();
         msg.write(&mut buf);
@@ -424,14 +448,14 @@ impl SendShared {
                 self.half_close();
             }
         }
-        self.wake_all();
+        self.wake_waiters();
     }
 
     fn cancel(&self) {
         self.insert(Flags::CLOSED);
         self.set_error(StreamError::Closed);
         self.reset();
-        self.wake_all();
+        self.wake_waiters();
     }
 
     /// Ends a server call, returns the response headers if no message was
@@ -446,7 +470,7 @@ impl SendShared {
             self.set_error(StreamError::Closed);
             self.reset();
         }
-        self.wake_all();
+        self.wake_waiters();
         if self.error.borrow().is_some() {
             return None;
         }
@@ -487,6 +511,76 @@ impl Drop for SendOpenGuard<'_> {
     }
 }
 
+/// Reserves the queue head until it acquires the send slot or is dropped.
+struct SendWait<'a> {
+    shared: &'a SendShared,
+    waiter: Option<Rc<LocalWaker>>,
+}
+
+impl<'a> SendWait<'a> {
+    fn new(shared: &'a SendShared) -> Self {
+        Self {
+            shared,
+            waiter: None,
+        }
+    }
+}
+
+impl<'a> Future for SendWait<'a> {
+    type Output = Result<SendGuard<'a>, StreamError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        match this.shared.check_ready() {
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            Poll::Ready(Ok(())) => {
+                let mut waiters = this.shared.send_waiters.borrow_mut();
+                if waiters
+                    .front()
+                    .is_none_or(|front| this.waiter.as_ref().is_some_and(|w| Rc::ptr_eq(w, front)))
+                {
+                    waiters.pop_front();
+                    this.shared.insert(Flags::BUSY);
+                    let guard = SendGuard(this.shared);
+                    drop(waiters);
+                    this.waiter = None;
+                    return Poll::Ready(Ok(guard));
+                }
+            }
+            Poll::Pending => {}
+        }
+        let waiter = this.waiter.get_or_insert_with(|| {
+            let waiter = Rc::new(LocalWaker::new());
+            this.shared
+                .send_waiters
+                .borrow_mut()
+                .push_back(waiter.clone());
+            waiter
+        });
+        waiter.register(cx.waker());
+        Poll::Pending
+    }
+}
+
+impl Drop for SendWait<'_> {
+    fn drop(&mut self) {
+        if let Some(waiter) = &self.waiter {
+            let first = {
+                let mut waiters = self.shared.send_waiters.borrow_mut();
+                if let Some(idx) = waiters.iter().position(|w| Rc::ptr_eq(w, waiter)) {
+                    waiters.remove(idx);
+                    idx == 0
+                } else {
+                    false
+                }
+            };
+            if first {
+                self.shared.wake_sender();
+            }
+        }
+    }
+}
+
 /// Clears the busy state when `send()` completes or is dropped.
 struct SendGuard<'a>(&'a SendShared);
 
@@ -507,7 +601,7 @@ impl Drop for SendGuard<'_> {
                 shared.half_close();
             }
         }
-        shared.wake_all();
+        shared.wake_waiters();
     }
 }
 
@@ -518,10 +612,11 @@ impl Drop for SendGuard<'_> {
 /// bidi call.
 ///
 /// The stream is shared, clones send on the same stream. Messages are sent
-/// one at a time, `send()` waits for the one in progress. Dropping the last
+/// one at a time, `send()` waits for the one in progress. Concurrent sends
+/// queue in the order their futures are first polled. Dropping the last
 /// clone or calling [`close()`](Self::close) ends the stream, the client
-/// half-closes its request then. The server ends the stream when the
-/// handler returns.
+/// half-closes its request then. The server ends the stream when the handler
+/// returns.
 pub struct SendStream<T> {
     shared: Rc<SendShared>,
     _t: PhantomData<fn(&T)>,
@@ -552,7 +647,7 @@ impl<T> SendStream<T> {
     ///
     /// Ready once the stream is open and no message is being sent, fails if
     /// the stream is closed. Does not wait for flow-control capacity,
-    /// `send()` does.
+    /// `send()` does. Readiness does not reserve a turn to send.
     pub fn poll_ready(&self, cx: &Context<'_>) -> Poll<Result<(), StreamError>> {
         self.shared.poll_ready(cx)
     }
@@ -616,7 +711,9 @@ impl<T: Message> SendStream<T> {
     /// limit fails with [`StreamError::Status`] and is not sent, the stream
     /// stays usable. Other errors end the stream.
     ///
-    /// Dropping the future while the message is written cancels the call.
+    /// Dropping the future while it waits for its turn removes it from the
+    /// queue without cancelling the call. Dropping the future while the
+    /// message is written cancels the call.
     pub async fn send(&self, msg: &T) -> Result<(), StreamError> {
         self.shared.send(msg).await
     }
@@ -1412,7 +1509,32 @@ impl fmt::Debug for CallStreams {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Wake;
+
     use super::*;
+
+    #[derive(Default)]
+    struct WakeCount(AtomicUsize);
+
+    impl WakeCount {
+        fn waker() -> (Arc<Self>, Waker) {
+            let count = Arc::new(Self::default());
+            let waker = Waker::from(count.clone());
+            (count, waker)
+        }
+
+        fn take(&self) -> usize {
+            self.0.swap(0, Ordering::Relaxed)
+        }
+    }
+
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     fn frame(flag: u8, payload: &[u8]) -> Vec<u8> {
         let mut buf = vec![flag];
@@ -1554,7 +1676,7 @@ mod tests {
         let cx = Context::from_waker(Waker::noop());
         // messages wait until the call is opened
         assert!(tx.poll_ready(&cx).is_pending());
-        assert_eq!(tx.shared.wakers.borrow().len(), 1);
+        assert_eq!(tx.shared.ready_wakers.borrow().len(), 1);
         assert!(!tx.is_closed());
         // response headers are server side only
         assert!(!tx.header(consts::GRPC_STATUS, HeaderValue::from_static("0")));
@@ -1569,7 +1691,7 @@ mod tests {
         let shared = tx2.shared.clone();
         drop(tx2);
         assert!(shared.flags.get().contains(Flags::CLOSED));
-        assert!(shared.wakers.borrow().is_empty());
+        assert!(shared.ready_wakers.borrow().is_empty());
         assert!(matches!(
             shared.poll_ready(&cx),
             Poll::Ready(Err(StreamError::Closed))
@@ -1589,6 +1711,156 @@ mod tests {
         tx.close();
         assert!(tx.is_closed());
         assert!(matches!(tx.ready().await, Err(StreamError::Closed)));
+    }
+
+    #[test]
+    fn send_waiter_handoff() {
+        let shared = SendShared::new();
+        shared.insert(Flags::ATTACHED | Flags::BUSY);
+        let active = SendGuard(&shared);
+        let (first_count, first_waker) = WakeCount::waker();
+        let (second_count, second_waker) = WakeCount::waker();
+        let (observer_count, observer_waker) = WakeCount::waker();
+        let mut first_cx = Context::from_waker(&first_waker);
+        let mut second_cx = Context::from_waker(&second_waker);
+        let observer_cx = Context::from_waker(&observer_waker);
+        let mut first = std::pin::pin!(SendWait::new(&shared));
+        let mut second = std::pin::pin!(SendWait::new(&shared));
+        assert!(first.as_mut().poll(&mut first_cx).is_pending());
+        assert!(second.as_mut().poll(&mut second_cx).is_pending());
+        assert!(shared.poll_ready(&observer_cx).is_pending());
+
+        // A queued future can move to a different task.
+        let (moved_count, moved_waker) = WakeCount::waker();
+        let mut moved_cx = Context::from_waker(&moved_waker);
+        assert!(first.as_mut().poll(&mut moved_cx).is_pending());
+        drop(active);
+        assert_eq!(first_count.take(), 0);
+        assert_eq!(moved_count.take(), 1);
+        assert_eq!(second_count.take(), 0);
+        assert_eq!(observer_count.take(), 1);
+
+        // Readiness does not take the slot, and a new sender cannot jump the queue.
+        assert!(matches!(
+            shared.poll_ready(&observer_cx),
+            Poll::Ready(Ok(()))
+        ));
+        let (last_count, last_waker) = WakeCount::waker();
+        let mut last_cx = Context::from_waker(&last_waker);
+        let mut last = std::pin::pin!(SendWait::new(&shared));
+        assert!(last.as_mut().poll(&mut last_cx).is_pending());
+        let Poll::Ready(Ok(first)) = first.as_mut().poll(&mut moved_cx) else {
+            panic!("selected sender did not acquire the slot");
+        };
+        assert!(second.as_mut().poll(&mut second_cx).is_pending());
+        drop(first);
+        assert_eq!(second_count.take(), 1);
+        assert_eq!(last_count.take(), 0);
+        let Poll::Ready(Ok(second)) = second.as_mut().poll(&mut second_cx) else {
+            panic!("second sender did not acquire the slot");
+        };
+        drop(second);
+        assert_eq!(last_count.take(), 1);
+        let Poll::Ready(Ok(last)) = last.as_mut().poll(&mut last_cx) else {
+            panic!("last sender did not acquire the slot");
+        };
+        drop(last);
+        assert!(matches!(
+            shared.poll_ready(&observer_cx),
+            Poll::Ready(Ok(()))
+        ));
+    }
+
+    #[test]
+    fn cancelled_send_waiters() {
+        for selected in [false, true] {
+            let shared = SendShared::new();
+            shared.insert(Flags::ATTACHED | Flags::BUSY);
+            let active = SendGuard(&shared);
+            let (count, waker) = WakeCount::waker();
+            let mut cx = Context::from_waker(&waker);
+            let mut first = Box::pin(SendWait::new(&shared));
+            let mut middle = Box::pin(SendWait::new(&shared));
+            let mut last = Box::pin(SendWait::new(&shared));
+            // Separate futures may share the same task waker.
+            assert!(first.as_mut().poll(&mut cx).is_pending());
+            assert!(middle.as_mut().poll(&mut cx).is_pending());
+            assert!(last.as_mut().poll(&mut cx).is_pending());
+            drop(middle);
+            assert_eq!(count.take(), 0);
+            if selected {
+                drop(active);
+                assert_eq!(count.take(), 1);
+                drop(first);
+            } else {
+                drop(first);
+                assert_eq!(count.take(), 0);
+                drop(active);
+            }
+            assert_eq!(count.take(), 1);
+            let Poll::Ready(Ok(last)) = last.as_mut().poll(&mut cx) else {
+                panic!("cancelled sender stranded its successor");
+            };
+            drop(last);
+            assert!(shared.send_waiters.borrow().is_empty());
+            assert!(matches!(shared.poll_ready(&cx), Poll::Ready(Ok(()))));
+        }
+    }
+
+    #[test]
+    fn send_waiters_terminal_wakeups() {
+        let transitions: [fn(&SendShared); 5] = [
+            SendShared::close,
+            SendShared::cancel,
+            |shared| {
+                shared.finish();
+            },
+            |shared| {
+                shared.set_error(StreamError::Disconnected);
+                drop(SendGuard(shared));
+            },
+            |shared| {
+                shared.insert(Flags::SENDING);
+                drop(SendGuard(shared));
+            },
+        ];
+        for attached in [false, true] {
+            for transition in transitions {
+                let shared = SendShared::new();
+                if attached {
+                    shared.insert(Flags::ATTACHED | Flags::BUSY);
+                }
+                let (first_count, first_waker) = WakeCount::waker();
+                let (second_count, second_waker) = WakeCount::waker();
+                let (observer_count, observer_waker) = WakeCount::waker();
+                let mut first_cx = Context::from_waker(&first_waker);
+                let mut second_cx = Context::from_waker(&second_waker);
+                let observer_cx = Context::from_waker(&observer_waker);
+                let mut first = std::pin::pin!(shared.send(&()));
+                let mut second = std::pin::pin!(shared.send(&()));
+                assert!(first.as_mut().poll(&mut first_cx).is_pending());
+                assert!(second.as_mut().poll(&mut second_cx).is_pending());
+                assert!(shared.poll_ready(&observer_cx).is_pending());
+
+                transition(&shared);
+                assert_eq!(first_count.take(), 1);
+                assert_eq!(second_count.take(), 1);
+                assert_eq!(observer_count.take(), 1);
+                assert!(matches!(
+                    first.as_mut().poll(&mut first_cx),
+                    Poll::Ready(Err(_))
+                ));
+                assert!(matches!(
+                    second.as_mut().poll(&mut second_cx),
+                    Poll::Ready(Err(_))
+                ));
+                assert!(matches!(
+                    shared.poll_ready(&observer_cx),
+                    Poll::Ready(Err(_))
+                ));
+                assert!(shared.send_waiters.borrow().is_empty());
+            }
+        }
     }
 
     #[ntex::test]

@@ -1,6 +1,6 @@
 # Changes
 
-## [0.6.0] - Unreleased
+## [1.0.0] - 2026-10-27
 
 * Generate streaming client methods, a client, server or bidi streaming rpc
   returns a `StreamRequest`, it was generated as a unary method. Method

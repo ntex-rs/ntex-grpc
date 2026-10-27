@@ -1,6 +1,6 @@
 # Changes
 
-## [4.0.0] - Unreleased
+## [4.0.0] - 2026-10-27
 
 * `client::Client::max_message_size()` and `max_send_message_size()` set
   client-wide defaults for unary and streaming calls. Explicit limits on

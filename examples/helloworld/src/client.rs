@@ -1,5 +1,4 @@
 #![allow(
-    deprecated,
     clippy::never_loop,
     clippy::expect_fun_call,
     clippy::let_underscore_future
@@ -162,16 +161,6 @@ impl PerfCounters {
     pub fn register_latency(&self, nanos: u64) {
         let nanos = nanos as usize;
         self.lat.fetch_add(nanos, Ordering::SeqCst);
-        loop {
-            let current = self.lat_max.load(Ordering::SeqCst);
-            if current >= nanos
-                || self
-                    .lat_max
-                    .compare_and_swap(current, nanos, Ordering::SeqCst)
-                    == current
-            {
-                break;
-            }
-        }
+        self.lat_max.fetch_max(nanos, Ordering::SeqCst);
     }
 }

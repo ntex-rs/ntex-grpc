@@ -45,7 +45,7 @@ impl ntex_grpc::NativeType for UniqueId {
 
     #[inline]
     fn encode_value(&self, dst: &mut BytePages) {
-        dst.extend_from_slice(self.0.as_bytes())
+        dst.extend_from_slice(self.as_bytes())
     }
 
     #[inline]

@@ -53,8 +53,7 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
                 let result = #ty::#fn_name(self, ::ntex_grpc::server::FromRequest::from(req)).await;
 
-                let res = method.server_result(result);
-                let response = ::ntex_grpc::server::Response::from(res);
+                let response = method.server_result(result)?;
                 let mut buf = ::ntex_grpc::BytePages::default();
                 method.encode(response.message, &mut buf);
 
@@ -84,8 +83,12 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let tx = ::ntex_grpc::server::__private::send(&method, &mut streams);
 
                 let result = #ty::#fn_name(self, rx).await;
-                tx.send(&method.server_result(result)).await?;
-                Ok(::ntex_grpc::server::ServerResponse::new(::ntex_grpc::BytePages::default()))
+                let response = method.server_result(result)?;
+                tx.send(&response.message).await?;
+                Ok(::ntex_grpc::server::ServerResponse::with_headers(
+                    ::ntex_grpc::BytePages::default(),
+                    response.headers,
+                ))
             },
             Kind::Bidi => quote::quote_spanned! {span=>
                 ::ntex_grpc::server::__private::check_kind::<_, true, true>(&method);

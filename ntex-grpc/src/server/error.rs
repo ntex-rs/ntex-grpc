@@ -1,12 +1,15 @@
 use ntex_http::{HeaderMap, HeaderValue};
 
+use super::Response;
 use crate::{DecodeError, GrpcStatus};
 
 /// Error answer to a call.
 ///
 /// It is sent as trailers: `grpc-status`, `grpc-message` and any extra
-/// headers. Hand-written services return it directly. With `#[server]` it is
-/// produced for unknown methods and requests that cannot be decoded.
+/// headers. Hand-written services return it directly. With `#[server]`, a
+/// method returns it to fail the call (see [`MethodResult`] and
+/// [`StreamResult`]); it is also produced for unknown methods and requests
+/// that cannot be decoded.
 #[derive(thiserror::Error, Clone, Debug)]
 #[error("{status:?}: {message:?}")]
 pub struct ServerError {
@@ -41,30 +44,52 @@ impl From<DecodeError> for ServerError {
     }
 }
 
-/// Return types a `#[server]` method can have.
+/// Return types a unary or client-streaming `#[server]` method can have.
 ///
-/// A method returns its reply message, or `Result<Reply, E>` where
-/// `E: Into<Reply>`. The error is turned into a reply message and sent like
-/// any other reply, with status `OK`.
+/// - `Reply`, the reply message.
+/// - `Result<Reply, E>` where `E: Into<Reply>`. The error is turned into a
+///   reply message and sent like any other reply, with status `OK`.
+/// - [`Response<Reply>`](super::Response), the reply message plus extra
+///   trailers.
+/// - `Result<Response<Reply>, E>` where `E: Into<ServerError>`. The error
+///   ends the call with its status, `grpc-message` and trailers.
 pub trait MethodResult<T> {
-    /// Turn into the reply message.
-    fn into(self) -> T;
+    /// Turn into the reply, or the error the call ends with.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error the call ends with.
+    fn into_response(self) -> Result<Response<T>, ServerError>;
 }
 
 impl<T> MethodResult<T> for T {
     #[inline]
-    fn into(self) -> T {
-        self
+    fn into_response(self) -> Result<Response<T>, ServerError> {
+        Ok(Response::new(self))
     }
 }
 
 impl<T, E: Into<T>> MethodResult<T> for Result<T, E> {
     #[inline]
-    fn into(self) -> T {
+    fn into_response(self) -> Result<Response<T>, ServerError> {
         match self {
-            Ok(res) => res,
-            Err(e) => e.into(),
+            Ok(res) => Ok(Response::new(res)),
+            Err(e) => Ok(Response::new(e.into())),
         }
+    }
+}
+
+impl<T> MethodResult<T> for Response<T> {
+    #[inline]
+    fn into_response(self) -> Result<Response<T>, ServerError> {
+        Ok(self)
+    }
+}
+
+impl<T, E: Into<ServerError>> MethodResult<T> for Result<Response<T>, E> {
+    #[inline]
+    fn into_response(self) -> Result<Response<T>, ServerError> {
+        self.map_err(Into::into)
     }
 }
 
@@ -147,14 +172,47 @@ mod tests {
         assert!(err.headers.is_empty());
     }
 
+    /// STATEMENT: Every `MethodResult` return type turns into the reply or
+    /// the error the call ends with.
+    ///
+    /// HOW:
+    /// - Convert a plain reply and both arms of `Result<Reply, E: Into<Reply>>`,
+    ///   and confirm each is an `OK` reply with no trailers.
+    /// - Convert a `Response` with a trailer and confirm the trailer is kept.
+    /// - Convert both arms of `Result<Response<Reply>, ServerError>` and
+    ///   confirm the error keeps its status.
     #[test]
     fn method_result_conversion() {
-        assert_eq!(<u32 as MethodResult<u32>>::into(5), 5);
+        fn reply<R: MethodResult<u32>>(res: R) -> u32 {
+            let res = res.into_response().unwrap();
+            assert!(res.headers.is_empty());
+            res.message
+        }
 
-        let ok: Result<u32, u8> = Ok(7);
-        assert_eq!(<Result<u32, u8> as MethodResult<u32>>::into(ok), 7);
+        assert_eq!(reply(5), 5);
+        assert_eq!(reply(Ok::<u32, u8>(7)), 7);
+        assert_eq!(reply(Err::<u32, u8>(3)), 3);
 
-        let err: Result<u32, u8> = Err(3);
-        assert_eq!(<Result<u32, u8> as MethodResult<u32>>::into(err), 3);
+        let res = Response {
+            message: 9_u32,
+            headers: vec![(
+                HeaderName::from_static("x-test"),
+                HeaderValue::from_static("1"),
+            )],
+        };
+        let res = MethodResult::<u32>::into_response(res).unwrap();
+        assert_eq!(res.message, 9);
+        assert_eq!(res.headers.len(), 1);
+
+        let ok: Result<Response<u32>, ServerError> = Ok(Response::new(4));
+        assert_eq!(MethodResult::<u32>::into_response(ok).unwrap().message, 4);
+
+        let err: Result<Response<u32>, ServerError> = Err(ServerError::new(
+            GrpcStatus::NotFound,
+            HeaderValue::from_static("nope"),
+            None,
+        ));
+        let err = MethodResult::<u32>::into_response(err).err().unwrap();
+        assert_eq!(err.status, GrpcStatus::NotFound);
     }
 }

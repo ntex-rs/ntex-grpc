@@ -212,9 +212,9 @@ impl<T> ops::DerefMut for Request<T> {
 
 /// Reply message plus extra trailers.
 ///
-/// The `#[server]` attribute wraps each method's return value in one and
-/// sends `headers` after `grpc-status`. Methods return the plain message,
-/// so for now `headers` is always empty there.
+/// A unary or client-streaming `#[server]` method can return it, or
+/// `Result<Response<T>, E>`, to send `headers` after `grpc-status`. See
+/// [`MethodResult`].
 pub struct Response<T> {
     /// The reply message.
     pub message: T,

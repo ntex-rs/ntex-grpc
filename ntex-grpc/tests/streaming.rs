@@ -7,7 +7,7 @@ use ntex::util::join;
 use ntex_bytes::{ByteString, Bytes};
 use ntex_grpc::client::{Cause, ClientError, Request, StreamRequest};
 use ntex_grpc::google_types::{StringValue, UInt32Value};
-use ntex_grpc::server::{GrpcServer, ServerError, ServerRequest};
+use ntex_grpc::server::{GrpcServer, Response, ServerError, ServerRequest};
 use ntex_grpc::{GrpcStatus, MethodDef, RecvStream, SendStream, ServiceDef, StreamError};
 use ntex_h2::{self as h2, client::SimpleClient};
 use ntex_http::{HeaderMap, HeaderName, HeaderValue, Method};
@@ -213,21 +213,48 @@ impl Svc {
         }
     }
 
-    /// Replies with the sum of the request messages.
+    /// Replies with the sum of the request messages and an `x-count` trailer,
+    /// a sum over 1000 ends the call with `ResourceExhausted`.
     #[method(Sum)]
-    async fn sum(&self, mut rx: RecvStream<UInt32Value>) -> UInt32Value {
-        let mut value = 0;
+    async fn sum(
+        &self,
+        mut rx: RecvStream<UInt32Value>,
+    ) -> Result<Response<UInt32Value>, ServerError> {
+        let (mut value, mut count) = (0, 0);
         while let Some(Ok(msg)) = rx.recv().await {
             value += msg.value;
+            count += 1;
         }
-        UInt32Value { value }
+        if value > 1000 {
+            return Err(ServerError::new(
+                GrpcStatus::ResourceExhausted,
+                HeaderValue::from_static("too large"),
+                None,
+            ));
+        }
+        Ok(Response {
+            message: UInt32Value { value },
+            headers: vec![(X_COUNT, HeaderValue::from(count))],
+        })
     }
 
+    /// Replies with `value + 1`, `0` ends the call with `NotFound` and an
+    /// `x-test` trailer.
     #[method(Unary)]
-    async fn unary(&self, req: UInt32Value) -> UInt32Value {
-        UInt32Value {
+    async fn unary(&self, req: UInt32Value) -> Result<Response<UInt32Value>, ServerError> {
+        if req.value == 0 {
+            let mut headers = HeaderMap::new();
+            headers.insert(X_TEST, HeaderValue::from_static("zero"));
+            return Err(ServerError::new(
+                GrpcStatus::NotFound,
+                HeaderValue::from_static("no zero"),
+                Some(headers),
+            ));
+        }
+        Ok(UInt32Value {
             value: req.value + 1,
         }
+        .into())
     }
 }
 
@@ -722,6 +749,58 @@ async fn client_streaming() {
         .await
         .unwrap();
     assert_eq!(res.output, UInt32Value { value: 0 });
+}
+
+/// STATEMENT: Unary and client-streaming `#[server]` methods can end a call
+/// with a status other than `OK`, or send extra trailers with the reply.
+///
+/// HOW:
+/// - Call `Unary` with `0` and confirm the client gets `NotFound` with the
+///   method's `grpc-message` and `x-test` trailer.
+/// - Stream values summing over 1000 to `Sum` and confirm `ResourceExhausted`.
+/// - Stream two small values to `Sum` and confirm the reply carries the
+///   method's `x-count` trailer next to `grpc-status: 0`.
+#[ntex::test]
+async fn method_status_and_trailers() {
+    let client = client();
+    let err = Request::<_, Unary>::new(&client, &UInt32Value { value: 0 })
+        .send()
+        .await
+        .unwrap_err();
+    let ClientError::Status(st) = &*err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(st.code, GrpcStatus::NotFound);
+    assert_eq!(st.metadata.get("grpc-message").unwrap(), "no zero");
+    assert_eq!(st.metadata.get(X_TEST).unwrap(), "zero");
+
+    for (values, count) in [(&[600, 500][..], None), (&[1, 2][..], Some("2"))] {
+        let tx = SendStream::new();
+        let (res, sent) = join(
+            StreamRequest::<_, Sum, _>::client_streaming(&client, &tx).send(),
+            async {
+                for value in values {
+                    tx.send(&UInt32Value { value: *value }).await?;
+                }
+                tx.close();
+                Ok::<_, StreamError>(())
+            },
+        )
+        .await;
+        sent.unwrap();
+        match count {
+            None => {
+                let err = res.unwrap_err();
+                assert_eq!(err.status(), GrpcStatus::ResourceExhausted, "{err:?}");
+            }
+            Some(count) => {
+                let res = res.unwrap();
+                assert_eq!(res.output, UInt32Value { value: 3 });
+                assert_eq!(res.trailers.get(GRPC_STATUS).unwrap(), "0");
+                assert_eq!(res.trailers.get(X_COUNT).unwrap(), count);
+            }
+        }
+    }
 }
 
 #[ntex::test]

@@ -1,6 +1,8 @@
 use ntex_bytes::{BytePages, ByteString, Bytes};
 
-use crate::{encoding::DecodeError, server::MethodResult, types::Message};
+use crate::encoding::DecodeError;
+use crate::server::{MethodResult, Response, ServerError};
+use crate::types::Message;
 
 /// A gRPC service, generated for each `service` in a `.proto` file.
 pub trait ServiceDef {
@@ -48,8 +50,11 @@ pub trait MethodDef {
 
     #[doc(hidden)]
     #[inline]
-    fn server_result<T: MethodResult<Self::Output>>(&self, val: T) -> Self::Output {
-        val.into()
+    fn server_result<T: MethodResult<Self::Output>>(
+        &self,
+        val: T,
+    ) -> Result<Response<Self::Output>, ServerError> {
+        val.into_response()
     }
 }
 
@@ -145,14 +150,34 @@ mod tests {
         assert_eq!(Message::encoded_len(&Msg::default()), 0);
     }
 
+    /// STATEMENT: `server_result()` turns a method's return value into the
+    /// reply message, or into the error that ends the call.
+    ///
+    /// HOW:
+    /// - Pass a plain reply and both arms of `Result<Msg, Failure>`, and
+    ///   confirm the replies, with `Failure` turned into its reply message.
+    /// - Pass an `Err(ServerError)` for a `Result<Response<Msg>, _>` and
+    ///   confirm it comes back as the error.
     #[test]
     fn server_result_conversion() {
-        assert_eq!(Ping.server_result(Msg { value: 1 }), Msg { value: 1 });
+        let reply = |res: Result<Response<Msg>, ServerError>| res.unwrap().message;
+
+        assert_eq!(
+            reply(Ping.server_result(Msg { value: 1 })),
+            Msg { value: 1 }
+        );
 
         let ok: Result<Msg, Failure> = Ok(Msg { value: 2 });
-        assert_eq!(Ping.server_result(ok), Msg { value: 2 });
+        assert_eq!(reply(Ping.server_result(ok)), Msg { value: 2 });
 
         let err: Result<Msg, Failure> = Err(Failure);
-        assert_eq!(Ping.server_result(err), Msg { value: 0xff });
+        assert_eq!(reply(Ping.server_result(err)), Msg { value: 0xff });
+
+        let err: Result<Response<Msg>, ServerError> = Err(ServerError::new(
+            crate::GrpcStatus::Aborted,
+            ntex_http::HeaderValue::from_static("stop"),
+            None,
+        ));
+        assert!(Ping.server_result(err).is_err());
     }
 }

@@ -1661,8 +1661,10 @@ fn build_enum_value_mappings<'a>(
     let mut numbers = HashSet::new();
     let mut generated_names = HashMap::new();
     let mut mappings = Vec::new();
-    let enum_name_lowercase = generated_enum_name.to_lowercase();
-    let enum_name_snek = generated_enum_name.to_snek_case().to_lowercase();
+    let prefixes = [
+        generated_enum_name.to_snek_case().to_lowercase(),
+        generated_enum_name.to_lowercase(),
+    ];
 
     for (idx, value) in enum_values.iter().enumerate() {
         // Skip duplicate enum values. Protobuf allows this when the
@@ -1683,31 +1685,43 @@ fn build_enum_value_mappings<'a>(
             );
         }
 
-        let mut val = value.name();
-        let val_lower = val.to_lowercase();
-        let val = if val_lower.starts_with(&enum_name_lowercase) {
-            val.split_at(generated_enum_name.len()).1
-        } else if val_lower.starts_with(&enum_name_snek) {
-            val = val.split_at(enum_name_snek.len()).1;
-            val = val.strip_prefix('_').unwrap_or(val);
-            if val.chars().next().is_some_and(char::is_alphanumeric) {
-                val
-            } else {
-                value.name()
-            }
-        } else {
-            val
-        };
-
         mappings.push(EnumVariantMapping {
             path_idx: idx,
             proto_name: value.name(),
             proto_number: value.number(),
-            proto_value: val,
+            proto_value: strip_enum_value_prefix(&prefixes, value.name()),
             generated_variant_name,
         });
     }
     mappings
+}
+
+/// Strips a lowercase enum name prefix from a protobuf enum value name.
+///
+/// The prefix is removed only at a word boundary: an `_` separator, or an
+/// uppercase letter in a mixed-case name. The full name is kept if nothing
+/// alphanumeric would remain.
+fn strip_enum_value_prefix<'a>(prefixes: &[String], name: &'a str) -> &'a str {
+    let lower = name.to_lowercase();
+    let mixed_case = name.chars().any(char::is_lowercase);
+
+    for prefix in prefixes {
+        if !lower.starts_with(prefix.as_str()) {
+            continue;
+        }
+        let rest = &name[prefix.len()..];
+        let stripped = if let Some(rest) = rest.strip_prefix('_') {
+            rest
+        } else if mixed_case && rest.starts_with(char::is_uppercase) {
+            rest
+        } else {
+            continue;
+        };
+        if stripped.starts_with(char::is_alphanumeric) {
+            return stripped;
+        }
+    }
+    name
 }
 
 /// Rust literals of a field default value
@@ -1847,6 +1861,38 @@ mod tests {
         assert_eq!(strip_enum_prefix("Foo", "Foo"), "Foo");
         assert_eq!(strip_enum_prefix("Foo", "Bar"), "Bar");
         assert_eq!(strip_enum_prefix("Foo", "Foo1"), "Foo1");
+    }
+
+    /// STATEMENT: `to_str_name()` values drop the enum name prefix only at a
+    /// word boundary and never keep a leading `_`.
+    ///
+    /// HOW:
+    /// - Strip `Color` and `ColorScheme` prefixes from `UPPER_SNAKE`,
+    ///   run-together and `CamelCase` value names.
+    /// - Confirm names without a boundary, or with nothing alphanumeric left,
+    ///   are returned unchanged.
+    #[test]
+    fn test_strip_enum_value_prefix() {
+        let color = ["color".to_string(), "color".to_string()];
+        let scheme = ["color_scheme".to_string(), "colorscheme".to_string()];
+
+        assert_eq!(
+            strip_enum_value_prefix(&color, "COLOR_UNSPECIFIED"),
+            "UNSPECIFIED"
+        );
+        assert_eq!(strip_enum_value_prefix(&color, "ColorRed"), "Red");
+        assert_eq!(strip_enum_value_prefix(&color, "COLOR_2"), "2");
+        assert_eq!(
+            strip_enum_value_prefix(&scheme, "COLOR_SCHEME_DARK"),
+            "DARK"
+        );
+        assert_eq!(strip_enum_value_prefix(&scheme, "COLORSCHEME_DARK"), "DARK");
+
+        assert_eq!(strip_enum_value_prefix(&color, "COLORED"), "COLORED");
+        assert_eq!(strip_enum_value_prefix(&color, "Colored"), "Colored");
+        assert_eq!(strip_enum_value_prefix(&color, "COLOR"), "COLOR");
+        assert_eq!(strip_enum_value_prefix(&color, "COLOR__X"), "COLOR__X");
+        assert_eq!(strip_enum_value_prefix(&color, "RED"), "RED");
     }
 
     fn field(name: &str, ty: &str, label: Label) -> FieldDescriptorProto {

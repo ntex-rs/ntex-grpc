@@ -12,6 +12,11 @@ The generated code has the messages, a typed client and the service definition
 used by the server. Messages are encoded by generated code that writes straight
 into ntex buffers. ntex-grpc doesn't depend on `prost` at runtime.
 
+The [gRPC chapter](https://docs.ntex.rs/11-grpc.html) of the ntex guide walks
+through code generation, custom field types, the client and its transports,
+and the server, with runnable examples in
+[ntex-rs/examples](https://github.com/ntex-rs/examples/tree/main/protocols).
+
 | Crate | What it is |
 |-------|------------|
 | [`ntex-grpc`](https://github.com/ntex-rs/ntex-grpc/tree/main/ntex-grpc) | Runtime: client, server, message encoding, well-known types |
@@ -442,6 +447,7 @@ either encoding.
 
 * [`examples/helloworld`](https://github.com/ntex-rs/ntex-grpc/tree/main/examples/helloworld): a server and a multi-threaded load-generating client.
 * [`examples/custom`](https://github.com/ntex-rs/ntex-grpc/tree/main/examples/custom): a custom field type.
+* [ntex-rs/examples](https://github.com/ntex-rs/examples/tree/main/protocols): the `grpc-*` examples from the [guide chapter](https://docs.ntex.rs/11-grpc.html), covering streaming, custom transports, server configuration and TLS.
 
 Run the helloworld pair from the repository root, each in its own terminal:
 

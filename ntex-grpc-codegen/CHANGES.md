@@ -1,5 +1,11 @@
 # Changes
 
+## [1.1.0] - 2026-11-04
+
+* Fix enum `to_str_name()` values: the enum name prefix is stripped only at
+  a word boundary, so `COLOR_RED` gives `"RED"` instead of `"_RED"` and
+  `COLORED` is no longer cut to `"ED"`
+
 ## [1.0.0] - 2026-10-27
 
 * Generate streaming client methods, a client, server or bidi streaming rpc

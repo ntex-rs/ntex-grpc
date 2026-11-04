@@ -50,6 +50,6 @@ impl ntex_grpc::NativeType for UniqueId {
 
     #[inline]
     fn is_default(&self) -> bool {
-        self.as_bytes().is_empty()
+        *self == Self::nil()
     }
 }

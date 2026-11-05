@@ -38,7 +38,7 @@ struct Args {
     #[clap(short, long, value_parser, name = "RUSTFMT-PATH")]
     rustfmt_path: Option<path::PathBuf>,
 
-    /// Generate google types
+    /// Generate google types (for the `ntex-grpc` crate, uses `crate::` paths)
     #[clap(short, long, value_parser, name = "WELL-KNOWN-TYPES")]
     well_known_types: bool,
 

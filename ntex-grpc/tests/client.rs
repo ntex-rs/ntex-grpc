@@ -80,6 +80,7 @@ method!(DeadlineTrailers, "/test.Svc/DeadlineTrailers");
 method!(BadLength, "/test.Svc/BadLength");
 method!(BadContentLength, "/test.Svc/BadContentLength");
 method!(Empty, "/test.Svc/Empty");
+method!(NoMessage, "/test.Svc/NoMessage");
 
 /// Replies with a message that is not a valid `BytesValue`.
 struct BadMessage;
@@ -614,6 +615,13 @@ fn connect_with_cfg(cfg: SharedCfg) -> (Io, Rc<RefCell<Vec<Reason>>>) {
                             let mut hdrs = grpc_headers();
                             hdrs.insert(GRPC_STATUS, HeaderValue::from_static("0"));
                             stream.send_response(StatusCode::OK, hdrs, true).unwrap();
+                        }
+                        // headers, then an ok status without a message
+                        "/test.Svc/NoMessage" => {
+                            stream
+                                .send_response(StatusCode::OK, grpc_headers(), false)
+                                .unwrap();
+                            stream.send_trailers(status_ok()).unwrap();
                         }
                         // headers only, with a grpc content-type but no status
                         "/test.Svc/TrailersOnly" => {
@@ -1880,20 +1888,102 @@ async fn streaming_errors_match_unary() {
     );
 }
 
-/// A response without a message ends a server stream, other calls expect one.
+/// STATEMENT: A response without a message ends a server stream, other calls
+/// expect one.
+///
+/// HOW:
+/// - Call `Empty`, a trailers-only response, and `NoMessage`, headers and
+///   trailers without data, both with an ok status.
+/// - Confirm a server-streaming call ends with no messages.
+/// - Confirm unary and client-streaming calls fail with `InvalidResponse`,
+///   "Response has no message".
 #[ntex::test]
 async fn streaming_no_message() {
-    assert_eq!(
-        server_streaming::<Empty, _>(&client()).await,
-        Outcome::Ok(0)
-    );
     let expected = Outcome::Err(
         "InvalidResponse",
         GrpcStatus::Internal,
         "Response has no message".into(),
     );
-    assert_eq!(unary::<Empty, _>(&client()).await, expected);
-    assert_eq!(client_streaming::<Empty, _>(&client()).await, expected);
+    macro_rules! check {
+        ($($m:ident),+) => {$(
+            assert_eq!(server_streaming::<$m, _>(&client()).await, Outcome::Ok(0));
+            assert_eq!(unary::<$m, _>(&client()).await, expected);
+            assert_eq!(client_streaming::<$m, _>(&client()).await, expected);
+        )+};
+    }
+    check!(Empty, NoMessage);
+}
+
+/// STATEMENT: A client-streaming reply with more than one message is rejected
+/// as a unary reply is.
+///
+/// HOW:
+/// - Call `TwoMessages`, two complete messages and an error status, as a
+///   unary and as a client-streaming call.
+/// - Confirm both fail with the same `InvalidResponse` cardinality violation.
+#[ntex::test]
+async fn client_streaming_extra_messages() {
+    let expected = Outcome::Err("InvalidResponse", GrpcStatus::Internal, EXTRA_DATA.into());
+    assert_eq!(unary::<TwoMessages, _>(&client()).await, expected);
+    assert_eq!(
+        client_streaming::<TwoMessages, _>(&client()).await,
+        expected
+    );
+}
+
+/// STATEMENT: Opening a streaming call on a closed connection fails as a
+/// unary call does.
+///
+/// HOW:
+/// - Close the connection of the client with `force_close()` and wait until
+///   it is closed.
+/// - Run unary, server-streaming and client-streaming `Message` calls on it.
+/// - Confirm the unary call fails with `Unavailable` and both streaming
+///   calls fail the same way.
+#[ntex::test]
+async fn streaming_closed_connection() {
+    let client = client();
+    client.force_close();
+    client.on_disconnect().await;
+    let expected = unary::<Message, _>(&client).await;
+    assert!(
+        matches!(expected, Outcome::Err(_, GrpcStatus::Unavailable, _)),
+        "{expected:?}"
+    );
+    assert_eq!(server_streaming::<Message, _>(&client).await, expected);
+    assert_eq!(client_streaming::<Message, _>(&client).await, expected);
+}
+
+/// STATEMENT: A server-streaming request cut off by a lost connection fails
+/// as a unary request does.
+///
+/// HOW:
+/// - Send an 8 MiB `DisconnectUpload` request, larger than the flow control
+///   window, as a unary and as a server-streaming call.
+/// - The server closes the connection before it reads the request.
+/// - Confirm both calls fail with `Connection` after the request was sent,
+///   `Unavailable`, "Connection is closed".
+#[ntex::test]
+async fn server_streaming_upload_disconnect() {
+    let input = BytesValue {
+        value: Bytes::from(vec![0; 8 * 1024 * 1024]),
+    };
+    let expected = Outcome::Err(
+        "Connection(sent)",
+        GrpcStatus::Unavailable,
+        "Connection is closed".into(),
+    );
+    let err = Request::<_, DisconnectUpload>::new(&client(), &input)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(Outcome::from(&err), expected);
+
+    let err = StreamRequest::<_, DisconnectUpload, _>::server_streaming(&client(), &input)
+        .open()
+        .await
+        .unwrap_err();
+    assert_eq!(Outcome::from(&err), expected);
 }
 
 #[ntex::test]

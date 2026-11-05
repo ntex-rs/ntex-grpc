@@ -7,7 +7,7 @@ mod path;
 
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
-use std::{collections::HashMap, default, env, fmt, fs, process::Command};
+use std::{collections::HashMap, default, env, fs, process::Command};
 
 use log::trace;
 use prost::Message;
@@ -26,12 +26,6 @@ pub(crate) trait ServiceGenerator {
     /// Generates a Rust interface or implementation for a service, writing the
     /// result to `buf`.
     fn generate(&mut self, service: Service, buf: &mut String, priv_buf: &mut String);
-
-    /// Finalizes generation for a `.proto` file.
-    fn finalize(&mut self, _buf: &mut String) {}
-
-    /// Finalizes generation for an entire protobuf package.
-    fn finalize_package(&mut self, _package: &str, _buf: &mut String) {}
 }
 
 /// Configuration options for Protobuf code generation.
@@ -41,7 +35,7 @@ pub(crate) struct Config {
     prost_types: bool,
     optional_messages: bool,
     open_enums: bool,
-    out_dir: Option<PathBuf>,
+    out_dir: PathBuf,
     default_package_filename: String,
 }
 
@@ -103,13 +97,11 @@ impl Config {
     }
 
     /// Configures the output directory where generated Rust files will be written.
-    ///
-    /// If unset, defaults to the `OUT_DIR` environment variable.
     pub(crate) fn out_dir<P>(&mut self, path: P) -> &mut Self
     where
         P: Into<PathBuf>,
     {
-        self.out_dir = Some(path.into());
+        self.out_dir = path.into();
         self
     }
 
@@ -128,15 +120,6 @@ impl Config {
         protos: &[impl AsRef<Path>],
         includes: &[impl AsRef<Path>],
     ) -> Result<()> {
-        let target: PathBuf = self.out_dir.clone().map_or_else(
-            || {
-                env::var_os("OUT_DIR")
-                    .ok_or_else(|| Error::other("OUT_DIR environment variable is not set"))
-                    .map(Into::into)
-            },
-            Ok,
-        )?;
-
         let tmp = tempfile::Builder::new().prefix("prost-build").tempdir()?;
         let file_descriptor_set_path = tmp.path().join("prost-descriptor-set");
 
@@ -200,7 +183,7 @@ impl Config {
             })
             .collect::<HashMap<Module, String>>();
 
-        let modules = self.generate(requests)?;
+        let modules = self.generate(requests);
 
         for (module, content) in &modules {
             let mut file_name = file_names
@@ -212,7 +195,7 @@ impl Config {
                 }
                 file_name = &self.default_package_filename;
             }
-            let output_path = target.join(file_name);
+            let output_path = self.out_dir.join(file_name);
             let previous_content = fs::read(&output_path);
 
             if previous_content
@@ -232,20 +215,12 @@ impl Config {
     pub(crate) fn generate(
         &mut self,
         requests: Vec<(Module, FileDescriptorProto)>,
-    ) -> Result<HashMap<Module, String>> {
+    ) -> HashMap<Module, String> {
         let mut modules = HashMap::new();
-        let mut packages = HashMap::new();
-
-        let extern_paths = ExternPaths::new(&[], self.prost_types)
-            .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
+        let extern_paths = ExternPaths::new(self.prost_types);
         let enums = enum_values(requests.iter().map(|request| &request.1));
 
         for request in requests {
-            // Only record packages that have services
-            if !request.1.service.is_empty() {
-                packages.insert(request.0.clone(), request.1.package().to_string());
-            }
-
             if !modules.contains_key(&request.0) {
                 let mut buf = String::new();
                 buf.insert_str(
@@ -259,14 +234,7 @@ impl Config {
             CodeGenerator::generate(self, &extern_paths, &enums, request.1, buf);
         }
 
-        if let Some(ref mut service_generator) = self.service_generator {
-            for (module, package) in packages {
-                let buf = modules.get_mut(&module).unwrap();
-                service_generator.finalize_package(&package, buf);
-            }
-        }
-
-        Ok(modules)
+        modules
     }
 }
 
@@ -278,23 +246,9 @@ impl default::Default for Config {
             prost_types: true,
             optional_messages: false,
             open_enums: false,
-            out_dir: None,
+            out_dir: PathBuf::new(),
             default_package_filename: "_".to_string(),
         }
-    }
-}
-
-impl fmt::Debug for Config {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt.debug_struct("Config")
-            .field("service_generator", &self.service_generator.is_some())
-            .field("types_map", &self.types_map)
-            .field("prost_types", &self.prost_types)
-            .field("optional_messages", &self.optional_messages)
-            .field("open_enums", &self.open_enums)
-            .field("out_dir", &self.out_dir)
-            .field("default_package_filename", &self.default_package_filename)
-            .finish()
     }
 }
 

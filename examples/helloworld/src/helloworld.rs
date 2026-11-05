@@ -102,6 +102,8 @@ impl ::ntex_grpc::MethodDef for GreeterSayHelloMethod {
         ::ntex_grpc::ByteString::from_static("/helloworld.Greeter/SayHello");
     type Input = HelloRequest;
     type Output = HelloReply;
+    const CLIENT_STREAMING: bool = false;
+    const SERVER_STREAMING: bool = false;
 }
 
 mod _priv_impl_helloworld {
@@ -456,7 +458,7 @@ mod _priv_impl_helloworld {
         }
     }
 
-    impl<T: ::ntex_grpc::client::Transport<GreeterSayHelloMethod>> GreeterClient<T> {
+    impl<T> GreeterClient<T> {
         ///  Sends a greeting
         pub fn say_hello<'a>(
             &'a self,

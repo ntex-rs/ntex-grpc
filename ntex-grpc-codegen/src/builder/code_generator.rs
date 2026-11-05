@@ -282,10 +282,6 @@ impl CodeGenerator<'_> {
                 code_gen.path.pop();
             }
 
-            if let Some(service_generator) = code_gen.config.service_generator.as_mut() {
-                service_generator.finalize(code_gen.buf);
-            }
-
             code_gen.path.pop();
         }
 
@@ -2000,7 +1996,7 @@ mod tests {
         let mut buf = String::new();
         CodeGenerator::generate(
             &mut Config::default(),
-            &ExternPaths::new(&[], false).unwrap(),
+            &ExternPaths::new(false),
             &EnumValues::new(),
             file,
             &mut buf,
@@ -2073,7 +2069,7 @@ mod tests {
         let mut code = String::new();
         CodeGenerator::generate(
             &mut Config::default(),
-            &ExternPaths::new(&[], false).unwrap(),
+            &ExternPaths::new(false),
             &EnumValues::new(),
             file,
             &mut code,

@@ -23,6 +23,7 @@ fn client_error(err: &StreamError) -> &ClientError {
 const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
 const X_TEST: HeaderName = HeaderName::from_static("x-test");
 const X_COUNT: HeaderName = HeaderName::from_static("x-count");
+const X_TRAILER: HeaderName = HeaderName::from_static("x-trailer");
 
 macro_rules! method {
     ($name:ident, $path:literal, $in:ty, $out:ty, $client:literal, $server:literal) => {
@@ -161,7 +162,8 @@ impl ServiceFactory<(), ServerRequest> for Renamed {
 #[ntex_grpc::server(Stream)]
 impl Svc {
     /// Echoes every message, `fail` ends the call with `NotFound`, `wait`
-    /// waits forever.
+    /// waits forever. The `x-test` request header is sent back as a header,
+    /// `x-trailer` as a trailer.
     #[method(Echo)]
     async fn echo(
         &self,
@@ -195,6 +197,9 @@ impl Svc {
             tx.send(&msg).await?;
         }
         tx.trailer(X_COUNT, HeaderValue::from(count));
+        if let Some(val) = rx.headers().get(X_TRAILER) {
+            tx.trailer(X_TRAILER, val.clone());
+        }
         Ok(())
     }
 
@@ -993,6 +998,146 @@ async fn streaming_service_named() {
 }
 
 /// Request headers of a call.
+/// STATEMENT: Trailers that end a streaming request are accepted as the end of
+/// the request.
+///
+/// HOW:
+/// - Send a `Sum` request with raw h2: headers, a message of `5`, then
+///   trailers instead of an end-of-stream data frame.
+/// - Confirm the reply is the sum `5` with an ok status and an `x-count`
+///   trailer of `1`.
+#[ntex::test]
+async fn client_streaming_request_trailers() {
+    let client = client();
+    let (snd, rcv) = client
+        .send(
+            Method::POST,
+            "/test.Stream/Sum".into(),
+            req_headers(),
+            false,
+        )
+        .await
+        .unwrap();
+    snd.send_payload(Bytes::from_static(b"\0\0\0\0\x02\x08\x05"), false)
+        .await
+        .unwrap();
+    let mut trailers = HeaderMap::new();
+    trailers.insert(X_TEST, HeaderValue::from_static("1"));
+    snd.send_trailers(trailers).unwrap();
+
+    let (_, data, trailers) = read(&rcv).await;
+    assert_eq!(data, b"\0\0\0\0\x02\x08\x05");
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+    assert_eq!(trailers.get(X_COUNT).unwrap(), "1");
+}
+
+/// STATEMENT: A streaming request whose headers end the stream is a request
+/// without messages.
+///
+/// HOW:
+/// - Send `Echo` request headers with end-of-stream set and no body.
+/// - Confirm the call ends with no messages, an ok status and an `x-count`
+///   trailer of `0`.
+#[ntex::test]
+async fn streaming_request_headers_only() {
+    let svc = Svc::default();
+    let client = start(svc.clone(), |s| s);
+    let (_snd, rcv) = client
+        .send(
+            Method::POST,
+            "/test.Stream/Echo".into(),
+            req_headers(),
+            true,
+        )
+        .await
+        .unwrap();
+    let (_, data, trailers) = read(&rcv).await;
+    assert!(data.is_empty());
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+    assert_eq!(trailers.get(X_COUNT).unwrap(), "0");
+    wait_idle(&svc).await;
+}
+
+/// STATEMENT: A lost connection ends the streaming calls in flight on both
+/// sides.
+///
+/// HOW:
+/// - Open a bidi `Echo` call and exchange a message, the handler is running.
+/// - Close the client connection with `force_close()`.
+/// - Confirm the client stream fails with `Unavailable` and the handler
+///   stops.
+#[ntex::test]
+async fn streaming_connection_lost() {
+    let svc = Svc::default();
+    let client = start(svc.clone(), |s| s);
+    let (tx, mut rx) = StreamRequest::<_, Echo, _>::bidi(&client)
+        .open()
+        .await
+        .unwrap();
+    tx.send(&string("a")).await.unwrap();
+    assert_eq!(rx.recv().await.unwrap().unwrap(), string("a"));
+    assert_eq!(svc.0.get(), 1);
+
+    client.force_close();
+    let err = rx.recv().await.unwrap().unwrap_err();
+    assert_eq!(err.status(), GrpcStatus::Unavailable, "{err:?}");
+    assert!(rx.recv().await.is_none());
+    wait_idle(&svc).await;
+}
+
+/// STATEMENT: Trailers too large for the client reset the call instead of
+/// leaving it open.
+///
+/// HOW:
+/// - Limit the client to a 1024 byte header list, then open a bidi `Echo`
+///   call with a 2048 byte `x-trailer` header, which the handler sends back
+///   as a trailer.
+/// - Exchange a message and end the request.
+/// - Confirm the call fails with an `INTERNAL_ERROR` reset after the reply
+///   headers and message, and the connection still serves calls.
+#[ntex::test]
+async fn streaming_trailers_failure() {
+    let svc = Svc::default();
+    let cfg = SharedCfg::new("CLI")
+        .add(h2::ServiceConfig::new().set_max_header_list_size(1024))
+        .build();
+    let client = start_server_with_cfg(GrpcServer::new(svc.clone()), cfg);
+    let mut req = StreamRequest::<_, Echo, _>::bidi(&client);
+    req.header(X_TRAILER, HeaderValue::try_from("a".repeat(2048)).unwrap());
+    let (tx, mut rx) = req.open().await.unwrap();
+    tx.send(&string("a")).await.unwrap();
+    assert_eq!(rx.recv().await.unwrap().unwrap(), string("a"));
+    tx.close();
+
+    ntex::time::timeout(Duration::from_secs(1), async {
+        let err = rx.recv().await.unwrap().unwrap_err();
+        let ClientError::StreamFailed(failure) = client_error(&err) else {
+            panic!("{err:?}");
+        };
+        assert_eq!(failure.code, GrpcStatus::Internal);
+        assert!(
+            matches!(
+                &failure.cause,
+                Some(Cause::Stream(h2::StreamError::Reset(
+                    h2::frame::Reason::INTERNAL_ERROR
+                )))
+            ),
+            "{err:?}"
+        );
+        assert!(!rx.headers().is_empty());
+        assert!(rx.recv().await.is_none());
+        wait_idle(&svc).await;
+
+        let res = Request::<_, Unary>::new(&client, &UInt32Value { value: 1 })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.output, UInt32Value { value: 2 });
+    })
+    .await
+    .expect("trailers failure did not terminate the call");
+}
+
 fn req_headers() -> HeaderMap {
     let mut hdrs = HeaderMap::new();
     hdrs.insert(

@@ -1,20 +1,8 @@
-use std::collections::{HashMap, hash_map};
+use std::collections::HashMap;
 
 use itertools::Itertools;
 
 use super::ident::{to_snake, to_upper_camel};
-
-fn validate_proto_path(path: &str) -> Result<(), String> {
-    if !path.starts_with('.') {
-        return Err(format!(
-            "Protobuf paths must be fully qualified (begin with a leading '.'): {path}"
-        ));
-    }
-    if path.split('.').skip(1).any(str::is_empty) {
-        return Err(format!("invalid fully-qualified Protobuf path: {path}"));
-    }
-    Ok(())
-}
 
 #[derive(Debug)]
 pub(crate) struct ExternPaths {
@@ -22,85 +10,69 @@ pub(crate) struct ExternPaths {
 }
 
 impl ExternPaths {
-    pub(crate) fn new(
-        paths: &[(String, String)],
-        prost_types: bool,
-    ) -> Result<ExternPaths, String> {
+    /// Maps the well-known types to `ntex_grpc::google_types` if `prost_types` is set.
+    pub(crate) fn new(prost_types: bool) -> ExternPaths {
         let mut extern_paths = ExternPaths {
             extern_paths: HashMap::new(),
         };
-
-        for (proto_path, rust_path) in paths {
-            extern_paths.insert(proto_path.clone(), rust_path.clone())?;
-        }
 
         if prost_types {
             extern_paths.insert(
                 ".google.protobuf".to_string(),
                 "::ntex_grpc::google_types".to_string(),
-            )?;
+            );
             extern_paths.insert(
                 ".google.protobuf.Duration".to_string(),
                 "::ntex_grpc::google_types::Duration".to_string(),
-            )?;
+            );
             extern_paths.insert(
                 ".google.protobuf.Timestamp".to_string(),
                 "::ntex_grpc::google_types::Timestamp".to_string(),
-            )?;
+            );
             extern_paths.insert(
                 ".google.protobuf.BoolValue".to_string(),
                 "::ntex_grpc::google_types::BoolValue".to_string(),
-            )?;
+            );
             extern_paths.insert(
                 ".google.protobuf.BytesValue".to_string(),
                 "::ntex_grpc::google_types::BytesValue".into(),
-            )?;
+            );
             extern_paths.insert(
                 ".google.protobuf.DoubleValue".to_string(),
                 "::ntex_grpc::google_types::DoubleValue".to_string(),
-            )?;
-            extern_paths.insert(".google.protobuf.Empty".to_string(), "()".to_string())?;
+            );
+            extern_paths.insert(".google.protobuf.Empty".to_string(), "()".to_string());
             extern_paths.insert(
                 ".google.protobuf.FloatValue".to_string(),
                 "::ntex_grpc::google_types::FloatValue".to_string(),
-            )?;
+            );
             extern_paths.insert(
                 ".google.protobuf.Int32Value".to_string(),
                 "::ntex_grpc::google_types::Int32Value".to_string(),
-            )?;
+            );
             extern_paths.insert(
                 ".google.protobuf.Int64Value".to_string(),
                 "::ntex_grpc::google_types::Int64Value".to_string(),
-            )?;
+            );
             extern_paths.insert(
                 ".google.protobuf.StringValue".to_string(),
                 "::ntex_grpc::google_types::StringValue".to_string(),
-            )?;
+            );
             extern_paths.insert(
                 ".google.protobuf.UInt32Value".to_string(),
                 "::ntex_grpc::google_types::UInt32Value".to_string(),
-            )?;
+            );
             extern_paths.insert(
                 ".google.protobuf.UInt64Value".to_string(),
                 "::ntex_grpc::google_types::UInt64Value".to_string(),
-            )?;
+            );
         }
 
-        Ok(extern_paths)
+        extern_paths
     }
 
-    fn insert(&mut self, proto_path: String, rust_path: String) -> Result<(), String> {
-        validate_proto_path(&proto_path)?;
-        match self.extern_paths.entry(proto_path) {
-            hash_map::Entry::Occupied(occupied) => {
-                return Err(format!(
-                    "duplicate extern Protobuf path: {}",
-                    occupied.key()
-                ));
-            }
-            hash_map::Entry::Vacant(vacant) => vacant.insert(rust_path),
-        };
-        Ok(())
+    fn insert(&mut self, proto_path: String, rust_path: String) {
+        self.extern_paths.insert(proto_path, rust_path);
     }
 
     pub(crate) fn is_extern_ident(&self, pb_ident: &str) -> bool {
@@ -128,16 +100,7 @@ impl ExternPaths {
                     rust_path
                         .split("::")
                         .chain(segments)
-                        .enumerate()
-                        .map(|(idx, segment)| {
-                            if idx == 0 && segment == "crate" {
-                                // If the first segment of the path is 'crate', then do not escape
-                                // it into a raw identifier, since it's being used as the keyword.
-                                segment.to_owned()
-                            } else {
-                                to_snake(segment)
-                            }
-                        })
+                        .map(to_snake)
                         .chain(ident_type)
                         .join("::"),
                 );
@@ -150,46 +113,20 @@ impl ExternPaths {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
 
-    #[test]
-    fn test_extern_paths() {
-        let paths = ExternPaths::new(
-            &[
-                (".foo".to_string(), "::foo1".to_string()),
-                (".foo.bar".to_string(), "::foo2".to_string()),
-                (".foo.baz".to_string(), "::foo3".to_string()),
-                (".foo.Fuzz".to_string(), "::foo4::Fuzz".to_string()),
-                (".a.b.c.d.e.f".to_string(), "::abc::def".to_string()),
-            ],
-            false,
-        )
-        .unwrap();
-
-        let case = |proto_ident: &str, resolved_ident: &str| {
-            assert_eq!(paths.resolve_ident(proto_ident).unwrap(), resolved_ident);
-        };
-
-        case(".foo", "::foo1");
-        case(".foo.Foo", "::foo1::Foo");
-        case(".foo.bar", "::foo2");
-        case(".foo.Bas", "::foo1::Bas");
-
-        case(".foo.bar.Bar", "::foo2::Bar");
-        case(".foo.Fuzz.Bar", "::foo4::fuzz::Bar");
-
-        case(".a.b.c.d.e.f", "::abc::def");
-        case(".a.b.c.d.e.f.g.FooBar.Baz", "::abc::def::g::foo_bar::Baz");
-
-        assert!(paths.resolve_ident(".a").is_none());
-        assert!(paths.resolve_ident(".a.b").is_none());
-        assert!(paths.resolve_ident(".a.c").is_none());
-    }
-
+    /// STATEMENT: Well-known types resolve to `ntex_grpc::google_types`, nested
+    /// types through the `.google.protobuf` prefix, and other packages stay local.
+    ///
+    /// HOW:
+    /// - Build `ExternPaths` with `prost_types` set.
+    /// - Resolve an exact entry, `Empty`, a type covered only by the package
+    ///   prefix and a nested type, and check the Rust paths.
+    /// - Check that identifiers outside `.google.protobuf`, and any identifier
+    ///   when `prost_types` is not set, do not resolve.
     #[test]
     fn test_well_known_types() {
-        let paths = ExternPaths::new(&[], true).unwrap();
+        let paths = ExternPaths::new(true);
 
         let case = |proto_ident: &str, resolved_ident: &str| {
             assert_eq!(paths.resolve_ident(proto_ident).unwrap(), resolved_ident);
@@ -201,5 +138,17 @@ mod tests {
             "::ntex_grpc::google_types::Duration",
         );
         case(".google.protobuf.Empty", "()");
+        case(
+            ".google.protobuf.FooBar.Baz",
+            "::ntex_grpc::google_types::foo_bar::Baz",
+        );
+
+        assert!(paths.resolve_ident(".google").is_none());
+        assert!(paths.resolve_ident(".foo.Bar").is_none());
+        assert!(
+            ExternPaths::new(false)
+                .resolve_ident(".google.protobuf.Value")
+                .is_none()
+        );
     }
 }

@@ -33,6 +33,9 @@ Options:
   default variant.
 
 See the [ntex-grpc README](https://github.com/ntex-rs/ntex-grpc#readme) for
-how to use the generated code.
+how to use the generated code. The
+[From .proto to Rust](https://docs.ntex.rs/11-grpc.html#from-proto-to-rust)
+section of the ntex guide covers running the generator, what it generates,
+how protobuf types map to Rust and custom field types.
 
 This is a fork of [tokio-rs/prost-build](https://github.com/tokio-rs/prost).

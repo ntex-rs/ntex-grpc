@@ -57,9 +57,8 @@ fn main() {
     let args = Args::parse();
     let mut cfg = NGrpcGenerator::new();
 
-    if let Some(out_dir) = args.out_dir.clone() {
-        cfg.out_dir(out_dir);
-    }
+    let out_dir = args.out_dir.clone().unwrap_or_else(|| "src".into());
+    cfg.out_dir(&out_dir);
 
     if args.well_known_types {
         cfg.compile_well_known_types();
@@ -80,13 +79,9 @@ fn main() {
     if let Err(e) = cfg.compile_protos(&args.proto, &args.include_dir) {
         println!("{e}");
     } else {
-        // run rustfmt
-        let fname = if let Some(mut out_dir) = args.out_dir.clone() {
-            out_dir.push(args.out);
-            out_dir.canonicalize().unwrap_or(out_dir)
-        } else {
-            args.out.into()
-        };
+        // run rustfmt on the written file
+        let fname = out_dir.join(&args.out);
+        let fname = fname.canonicalize().unwrap_or(fname);
 
         println!(
             "GRPC {} package successfully processed. Generated {} file",

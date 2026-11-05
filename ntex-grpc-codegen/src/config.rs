@@ -1,9 +1,8 @@
-use std::{env, io, ops, path::Path};
+use std::{io, ops, path::Path};
 
 use crate::builder::Config;
 use crate::generator::GrpcServiceGenerator;
 
-#[derive(Debug)]
 pub(crate) struct NGrpcGenerator {
     pconfig: Config,
 }
@@ -12,10 +11,6 @@ impl NGrpcGenerator {
     pub(crate) fn new() -> Self {
         let mut cfg = Config::default();
         cfg.service_generator(Box::new(GrpcServiceGenerator));
-
-        let mut current = env::current_dir().unwrap();
-        current.push("src");
-        cfg.out_dir(current);
 
         Self { pconfig: cfg }
     }

@@ -69,6 +69,9 @@ impl Config {
 
     /// Generates well-known types from their `.proto` definitions instead of
     /// using `ntex_grpc::google_types`.
+    ///
+    /// The generated code is meant for the `ntex_grpc` crate itself, so it
+    /// refers to `ntex_grpc` items through `crate::`.
     pub(crate) fn compile_well_known_types(&mut self) -> &mut Self {
         self.prost_types = false;
         self
@@ -234,6 +237,13 @@ impl Config {
             CodeGenerator::generate(self, &extern_paths, &enums, request.1, buf);
         }
 
+        // Well-known types are compiled into `ntex_grpc` itself
+        if !self.prost_types {
+            for content in modules.values_mut() {
+                *content = content.replace("::ntex_grpc::", "crate::");
+            }
+        }
+
         modules
     }
 }
@@ -309,7 +319,67 @@ pub(crate) fn protoc_include() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::Module;
+    use prost_types::source_code_info::Location;
+    use prost_types::{
+        DescriptorProto, FieldDescriptorProto, FileDescriptorProto, SourceCodeInfo,
+        field_descriptor_proto::{Label, Type},
+    };
+
+    use super::{Config, Module};
+
+    /// STATEMENT: Code generated with well-known types compiled locally refers
+    /// to `ntex_grpc` items through `crate::`, other code through `::ntex_grpc::`.
+    ///
+    /// HOW:
+    /// - Generate a message with a `string` field with the default `Config` and
+    ///   with `compile_well_known_types()`.
+    /// - Check that the default output uses `::ntex_grpc::` paths and the
+    ///   well-known types output uses only `crate::` paths.
+    #[test]
+    fn test_well_known_types_crate_path() {
+        let mut field = FieldDescriptorProto {
+            name: Some("value".to_string()),
+            number: Some(1),
+            ..Default::default()
+        };
+        field.set_type(Type::String);
+        field.set_label(Label::Optional);
+        let file = FileDescriptorProto {
+            name: Some("test.proto".to_string()),
+            package: Some("pkg".to_string()),
+            syntax: Some("proto3".to_string()),
+            message_type: vec![DescriptorProto {
+                name: Some("StringValue".to_string()),
+                field: vec![field],
+                ..Default::default()
+            }],
+            source_code_info: Some(SourceCodeInfo {
+                location: [vec![4, 0], vec![4, 0, 2, 0]]
+                    .into_iter()
+                    .map(|path| Location {
+                        path,
+                        ..Default::default()
+                    })
+                    .collect(),
+            }),
+            ..Default::default()
+        };
+        let module = Module::from_protobuf_package_name(file.package());
+        let generate = |cfg: &mut Config| {
+            cfg.generate(vec![(module.clone(), file.clone())])
+                .remove(&module)
+                .unwrap()
+        };
+
+        let code = generate(&mut Config::default());
+        assert!(code.contains("impl ::ntex_grpc::Message for StringValue {"));
+        assert!(code.contains("pub value: ::ntex_grpc::ByteString,"));
+
+        let code = generate(Config::default().compile_well_known_types());
+        assert!(code.contains("impl crate::Message for StringValue {"));
+        assert!(code.contains("pub value: crate::ByteString,"));
+        assert!(!code.contains("ntex_grpc::"));
+    }
 
     #[test]
     fn test_module_file_name() {

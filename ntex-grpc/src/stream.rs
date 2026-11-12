@@ -486,12 +486,14 @@ pub(crate) fn send_response_headers(
     stream: &StreamRef,
     headers: HeaderMap,
 ) -> Result<(), Error<OperationError>> {
-    stream
-        .send_response(StatusCode::OK, headers, false)
+    let res = stream
+        .send_response(StatusCode::OK, &headers, false)
         .inspect_err(|err| {
             log::debug!("{}: Cannot send response headers: {err:?}", stream.tag());
             stream.reset(Reason::INTERNAL_ERROR);
-        })
+        });
+    ntex_h2::release_header_map(headers);
+    res
 }
 
 /// Cancels an unattached sender when opening fails or is dropped.

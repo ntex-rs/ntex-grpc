@@ -16,7 +16,7 @@ use crate::GrpcStatus;
 pub(crate) use crate::Compression as Enc;
 
 #[cfg(not(feature = "compression"))]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Enc {}
 
 #[cfg(not(feature = "compression"))]

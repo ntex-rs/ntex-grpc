@@ -176,6 +176,7 @@ pub struct Request<T> {
 impl<T> FromRequest<T> for T {
     #[inline]
     fn from(input: Request<T>) -> T {
+        ntex_h2::release_header_map(input.headers);
         input.message
     }
 }
@@ -190,6 +191,7 @@ impl<T> FromRequest<T> for Request<T> {
 impl<T> Request<T> {
     /// Take the request message and drop the headers.
     pub fn into_inner(self) -> T {
+        ntex_h2::release_header_map(self.headers);
         self.message
     }
 }

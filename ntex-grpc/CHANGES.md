@@ -1,5 +1,13 @@
 # Changes
 
+## [4.1.1] - 2026-11-12
+
+* Recycle request header maps when a handler takes only the message, so
+  `ntex-h2` reuses them for the next request
+
+* Take response header and trailer maps from the `ntex-h2` pool and return
+  them after sending, unary response headers are shared per thread
+
 ## [4.1.0] - 2026-11-04
 
 * Unary and client-streaming `#[server]` methods can return

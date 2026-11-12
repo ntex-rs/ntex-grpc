@@ -425,7 +425,10 @@ impl Service<(), h2::Message> for PublishService {
 
                 // stream eof, cannot do anything
                 if eof {
-                    if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
+                    if stream
+                        .send_response(StatusCode::OK, response_headers(None), false)
+                        .is_ok()
+                    {
                         send_error(&stream, GrpcStatus::InvalidArgument, ERR_NO_MESSAGE);
                     }
                     return Ok(());
@@ -449,7 +452,10 @@ impl Service<(), h2::Message> for PublishService {
                         if let Err((status, msg)) = self.check_request(data.as_slice()) {
                             remove(&mut streams, &id);
                             drop(streams);
-                            if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
+                            if stream
+                                .send_response(StatusCode::OK, response_headers(None), false)
+                                .is_ok()
+                            {
                                 send_error(&stream, status, msg);
                             }
                             // the client stops sending the rest of the request
@@ -530,7 +536,10 @@ impl PublishService {
         let data = match self.read_request(&headers, data.get()).await {
             Ok(data) => data,
             Err((status, msg)) => {
-                if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
+                if stream
+                    .send_response(StatusCode::OK, response_headers(None), false)
+                    .is_ok()
+                {
                     send_error(stream, status, msg);
                 }
                 return Ok(());
@@ -540,7 +549,10 @@ impl PublishService {
         let (service, name) = split_path(path);
         // the service is known, it is checked with the headers
         let Some(idx) = self.route(&service) else {
-            if stream.send_response(StatusCode::OK, hdrs(), false).is_ok() {
+            if stream
+                .send_response(StatusCode::OK, response_headers(None), false)
+                .is_ok()
+            {
                 let msg = encode_grpc_message(&format!("grpc: unknown service {service}"));
                 send_error(stream, GrpcStatus::Unimplemented, msg);
             }
@@ -591,7 +603,7 @@ impl PublishService {
                     }
                 }
 
-                let mut trailers = HeaderMap::default();
+                let mut trailers = h2::get_header_map();
                 trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
                 append_trailers(&mut trailers, res.headers);
                 send_trailers(stream, trailers);
@@ -649,7 +661,7 @@ impl PublishService {
         let encoding = Enc::of_response(&headers);
         let send = SendShared::server(
             stream.clone(),
-            response_headers(encoding),
+            stream_response_headers(encoding),
             self.max_send_size,
             encoding,
         );
@@ -681,7 +693,7 @@ impl PublishService {
             if headers_sent {
                 let mut trailers = match result {
                     Ok(Ok(res)) => {
-                        let mut trailers = HeaderMap::default();
+                        let mut trailers = h2::get_header_map();
                         trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
                         append_trailers(&mut trailers, res.headers);
                         trailers
@@ -699,7 +711,7 @@ impl PublishService {
                             "{}: Deadline exceeded failure during service call",
                             self.cfg.tag()
                         );
-                        let mut trailers = HeaderMap::default();
+                        let mut trailers = h2::get_header_map();
                         trailers.insert(consts::GRPC_STATUS, GrpcStatus::DeadlineExceeded.into());
                         trailers.insert(consts::GRPC_MESSAGE, ERR_DEADLINE);
                         trailers
@@ -719,7 +731,26 @@ impl PublishService {
 }
 
 /// The response headers, with the encoding of the response messages.
-fn response_headers(encoding: Option<Enc>) -> HeaderMap {
+/// Headers of a unary response, shared per thread so sending them does not
+/// build a map.
+fn response_headers(encoding: Option<Enc>) -> Rc<HeaderMap> {
+    thread_local! {
+        static HEADERS: RefCell<Vec<(Option<Enc>, Rc<HeaderMap>)>> =
+            const { RefCell::new(Vec::new()) };
+    }
+    HEADERS.with_borrow_mut(|cache| {
+        if let Some((_, hdrs)) = cache.iter().find(|(enc, _)| *enc == encoding) {
+            hdrs.clone()
+        } else {
+            let hdrs = Rc::new(stream_response_headers(encoding));
+            cache.push((encoding, hdrs.clone()));
+            hdrs
+        }
+    })
+}
+
+/// Headers of a streaming response, the handler can add more before they are sent.
+fn stream_response_headers(encoding: Option<Enc>) -> HeaderMap {
     let mut headers = hdrs();
     if let Some(enc) = encoding {
         headers.insert(consts::GRPC_ENCODING, enc.header());
@@ -814,7 +845,8 @@ fn reject(stream: &StreamRef, code: StatusCode, st: GrpcStatus, msg: HeaderValue
     let mut hdrs = hdrs();
     hdrs.insert(consts::GRPC_STATUS, st.into());
     hdrs.insert(consts::GRPC_MESSAGE, msg);
-    let _ = stream.send_response(code, hdrs, true);
+    let _ = stream.send_response(code, &hdrs, true);
+    h2::release_header_map(hdrs);
     if !eof {
         // the client stops sending the request
         stream.reset(Reason::NO_ERROR);
@@ -822,14 +854,14 @@ fn reject(stream: &StreamRef, code: StatusCode, st: GrpcStatus, msg: HeaderValue
 }
 
 fn hdrs() -> HeaderMap {
-    let mut hdrs = HeaderMap::default();
+    let mut hdrs = h2::get_header_map();
     hdrs.insert(CONTENT_TYPE, HDR_APP_GRPC);
     hdrs.insert(consts::GRPC_ACCEPT_ENCODING, consts::ACCEPT_ENCODING);
     hdrs
 }
 
 fn send_error(stream: &StreamRef, st: GrpcStatus, msg: HeaderValue) {
-    let mut trailers = HeaderMap::default();
+    let mut trailers = h2::get_header_map();
     trailers.insert(consts::GRPC_STATUS, st.into());
     trailers.insert(consts::GRPC_MESSAGE, msg);
     send_trailers(stream, trailers);
@@ -888,6 +920,30 @@ fn try_parse_grpc_timeout(val: &HeaderValue) -> Result<Millis, ()> {
 mod tests {
     use super::*;
     use crate::utils::send_size;
+
+    /// STATEMENT: Unary response headers are built once per thread and encoding, then shared.
+    ///
+    /// HOW:
+    /// - Call `response_headers(None)` twice and check both return the same `Rc` with the
+    ///   content-type and accept-encoding headers and no `grpc-encoding`.
+    /// - With compression, check a gzip response gets a separate shared map with
+    ///   `grpc-encoding: gzip`.
+    #[test]
+    fn response_headers_are_shared() {
+        let plain = response_headers(None);
+        assert!(Rc::ptr_eq(&plain, &response_headers(None)));
+        assert_eq!(plain.get(CONTENT_TYPE).unwrap(), HDR_APP_GRPC);
+        assert!(plain.contains_key(consts::GRPC_ACCEPT_ENCODING));
+        assert!(!plain.contains_key(consts::GRPC_ENCODING));
+
+        #[cfg(feature = "compression")]
+        {
+            let gzip = response_headers(Some(Enc::Gzip));
+            assert!(Rc::ptr_eq(&gzip, &response_headers(Some(Enc::Gzip))));
+            assert!(!Rc::ptr_eq(&gzip, &plain));
+            assert_eq!(gzip.get(consts::GRPC_ENCODING).unwrap(), "gzip");
+        }
+    }
 
     #[test]
     fn content_type() {

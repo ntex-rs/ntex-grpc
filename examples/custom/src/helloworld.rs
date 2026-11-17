@@ -15,6 +15,11 @@
 )]
 //! DO NOT MODIFY. Auto-generated file
 
+const _: () = assert!(
+    ::ntex_grpc::CODEGEN_VERSION == 1,
+    "generated code does not match the ntex-grpc version (expects CODEGEN_VERSION 1), regenerate it with the matching ntex-grpc-codegen"
+);
+
 ///  The request message containing the user's name.
 #[derive(Clone, PartialEq, Debug)]
 pub struct HelloRequest {

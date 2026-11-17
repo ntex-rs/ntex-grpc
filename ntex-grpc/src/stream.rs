@@ -249,9 +249,14 @@ impl SendShared {
         } else {
             self.wake_sender();
         }
-        let wakers = mem::take(&mut *self.ready_wakers.borrow_mut());
-        for waker in wakers {
+        let mut wakers = mem::take(&mut *self.ready_wakers.borrow_mut());
+        for waker in wakers.drain(..) {
             waker.wake();
+        }
+        // keep the allocation, unless a waker registered again while waking
+        let mut ready = self.ready_wakers.borrow_mut();
+        if ready.is_empty() {
+            *ready = wakers;
         }
     }
 
@@ -417,11 +422,10 @@ impl SendShared {
         };
         self.insert(Flags::SENDING);
         let res = if let Some(deadline) = self.deadline.get() {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            if time::now() >= deadline {
                 Err(deadline_exceeded())
             } else {
-                match time::timeout(remaining, tx.send_pages(buf, false)).await {
+                match tr::until_deadline(deadline, tx.send_pages(buf, false)).await {
                     Ok(res) => res.map_err(|e| StreamError::from_send(&e)),
                     Err(()) => Err(deadline_exceeded()),
                 }
@@ -918,6 +922,8 @@ pub(crate) struct ClientRecv {
     deadline: Option<Instant>,
     sleep: Option<time::Sleep>,
     status: Option<StatusCode>,
+    /// Whether the response is a grpc one, known with the response headers.
+    grpc: bool,
     /// The body of a response that is not a grpc one, kept for the error.
     other: Data,
     /// The error to report once the last message is read.
@@ -934,16 +940,14 @@ impl ClientRecv {
         service: &'static str,
         send: Option<Rc<SendShared>>,
     ) -> Self {
-        let sleep = deadline.map(|d| {
-            time::sleep(time::Millis::from(
-                d.saturating_duration_since(Instant::now()),
-            ))
-        });
+        let sleep = deadline
+            .map(|d| time::sleep(time::Millis::from(d.saturating_duration_since(time::now()))));
         ClientRecv {
             rx: Some(rx),
             deadline,
             sleep,
             status: None,
+            grpc: false,
             other: Data::Empty,
             pending_end: None,
             service,
@@ -988,9 +992,7 @@ impl ClientRecv {
     ) -> ClientResult {
         *trailers = hdrs.clone();
         match tr::check_grpc_status(&hdrs) {
-            Some(Ok(GrpcStatus::Ok)) | None if !tr::is_grpc(self.status, headers) => {
-                Err(self.other_error(headers))
-            }
+            Some(Ok(GrpcStatus::Ok)) | None if !self.grpc => Err(self.other_error(headers)),
             Some(Ok(GrpcStatus::Ok)) => Ok(None),
             None => Err(tr::invalid_response(
                 GrpcStatus::Unknown,
@@ -1029,7 +1031,7 @@ impl ClientRecv {
                 return Poll::Pending;
             };
             let Some(msg) = msg else {
-                if self.deadline.is_some_and(|d| Instant::now() >= d) {
+                if self.deadline.is_some_and(|d| time::now() >= d) {
                     return Poll::Ready(Err(tr::deadline_exceeded(
                         tr::TIMEOUT_RAN_OUT,
                         headers.clone(),
@@ -1058,20 +1060,21 @@ impl ClientRecv {
                         self.status = pseudo.status;
                         return Poll::Ready(trailers_only(pseudo.status, hdrs));
                     }
+                    self.grpc = tr::is_grpc(pseudo.status, &hdrs);
                     *headers = hdrs;
                     self.status = pseudo.status;
                 }
                 h2::MessageKind::Data(data, cap) => {
-                    if tr::is_grpc(self.status, headers) {
+                    if self.grpc {
                         return Poll::Ready(Ok(Some((data, cap))));
                     }
                     self.other.push(data, 0);
-                    if tr::limit_other_body(self.status, headers, &mut self.other) {
+                    if tr::limit_other_body(false, &mut self.other) {
                         return Poll::Ready(Err(self.other_error(headers)));
                     }
                 }
                 h2::MessageKind::Eof(h2::StreamEof::Data(data, cap)) => {
-                    if tr::is_grpc(self.status, headers) {
+                    if self.grpc {
                         self.pending_end = Some(tr::invalid_response(
                             GrpcStatus::Internal,
                             tr::NO_TRAILERS,
@@ -1080,7 +1083,7 @@ impl ClientRecv {
                         return Poll::Ready(Ok(Some((data, cap))));
                     }
                     self.other.push(data, 0);
-                    tr::limit_other_body(self.status, headers, &mut self.other);
+                    tr::limit_other_body(false, &mut self.other);
                     return Poll::Ready(Err(self.other_error(headers)));
                 }
                 h2::MessageKind::Eof(h2::StreamEof::Trailers(hdrs)) => {
@@ -1137,8 +1140,6 @@ enum Source {
     Client(Box<ClientRecv>),
 }
 
-type Decompress = Pin<Box<dyn Future<Output = Result<Bytes, (GrpcStatus, HeaderValue)>>>>;
-
 /// A stream of messages from the peer.
 ///
 /// On the client, the response messages of a server-streaming or a bidi
@@ -1157,7 +1158,9 @@ type Decompress = Pin<Box<dyn Future<Output = Result<Bytes, (GrpcStatus, HeaderV
 pub struct RecvStream<T> {
     source: Source,
     decoder: Decoder,
-    decompress: Option<Decompress>,
+    decompress: Option<utils::ReadMessage>,
+    /// Whether the encoding of the peer is set on `decoder`.
+    enc_known: bool,
     headers: HeaderMap,
     trailers: HeaderMap,
     end: Option<Result<(), StreamError>>,
@@ -1190,6 +1193,8 @@ impl<T> RecvStream<T> {
 
     fn with_source(source: Source, decoder: Decoder, headers: HeaderMap) -> Self {
         RecvStream {
+            // the server gets the encoding with the request headers
+            enc_known: matches!(source, Source::Server(_)),
             source,
             decoder,
             decompress: None,
@@ -1330,7 +1335,7 @@ impl<T: Message> RecvStream<T> {
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<T, StreamError>>> {
         loop {
             if let Some(fut) = self.decompress.as_mut() {
-                let res = match fut.as_mut().poll(cx) {
+                let res = match Pin::new(fut).poll(cx) {
                     Poll::Ready(res) => res,
                     Poll::Pending => return Poll::Pending,
                 };
@@ -1349,13 +1354,15 @@ impl<T: Message> RecvStream<T> {
                     if flag == 0 {
                         return Poll::Ready(Some(self.decode(msg)));
                     }
-                    self.decompress = Some(Box::pin(utils::read_message(
+                    // a small message is ready, a large one is decompressed
+                    // on the thread pool
+                    self.decompress = Some(utils::read_message(
                         flag,
-                        self.decoder.enc.clone(),
+                        self.decoder.enc.as_ref(),
                         msg,
                         self.decoder.max_size,
                         self.decoder.unsupported,
-                    )));
+                    ));
                     continue;
                 }
                 Ok(None) => {}
@@ -1377,8 +1384,10 @@ impl<T: Message> RecvStream<T> {
             }
             match self.poll_source(cx) {
                 Poll::Ready(Item::Data(data, cap)) => {
-                    // the client gets the encoding with the response headers
-                    if self.is_client() && self.decoder.enc.is_none() {
+                    // the client gets the encoding with the response headers,
+                    // they precede the first message
+                    if !self.enc_known {
+                        self.enc_known = true;
                         self.decoder.enc = self.headers.get(consts::GRPC_ENCODING).cloned();
                     }
                     self.decoder.push(data, cap);
@@ -1446,31 +1455,31 @@ impl<T> fmt::Debug for RecvStream<T> {
 /// The streams of a streaming call on the server.
 #[doc(hidden)]
 pub struct CallStreams {
-    recv: Option<(Rc<ServerRecv>, HeaderMap, usize, Option<HeaderValue>)>,
+    recv: Option<(Rc<ServerRecv>, usize, Option<HeaderValue>)>,
     send: Option<Rc<SendShared>>,
 }
 
 impl CallStreams {
     pub(crate) fn new(
         recv: Rc<ServerRecv>,
-        headers: HeaderMap,
         max_size: usize,
         enc: Option<HeaderValue>,
         send: Rc<SendShared>,
     ) -> Self {
         CallStreams {
-            recv: Some((recv, headers, max_size, enc)),
+            recv: Some((recv, max_size, enc)),
             send: Some(send),
         }
     }
 
-    /// Takes the request stream.
+    /// Takes the request stream, `headers` are the request headers it
+    /// returns from [`RecvStream::headers()`].
     ///
     /// # Panics
     ///
     /// Panics if the stream is taken already.
-    pub fn recv<T>(&mut self) -> RecvStream<T> {
-        let (recv, headers, max_size, enc) = self
+    pub fn recv<T>(&mut self, headers: HeaderMap) -> RecvStream<T> {
+        let (recv, max_size, enc) = self
             .recv
             .take()
             .expect("The request stream is taken already");
@@ -1670,6 +1679,54 @@ mod tests {
             let st = err.status();
             assert_eq!(Error::<ClientError>::from(err).status(), st);
         }
+    }
+
+    /// STATEMENT: Waking the ready waiters keeps the allocation of
+    /// `ready_wakers`, and a waker registered while waking is kept.
+    ///
+    /// HOW:
+    /// - Register two counting wakers on an unattached sender and wake the
+    ///   waiters: both are woken once, and the list is empty but keeps its
+    ///   capacity.
+    /// - Register a waker that registers a no-op waker on the same sender
+    ///   when woken, wake the waiters, and confirm one waker, not the
+    ///   woken one, is registered.
+    #[test]
+    fn ready_wakers_reused() {
+        struct Rearm;
+
+        impl Wake for Rearm {
+            fn wake(self: Arc<Self>) {
+                SHARED.with_borrow(|s| {
+                    let cx = Context::from_waker(Waker::noop());
+                    assert!(s.as_ref().unwrap().poll_ready(&cx).is_pending());
+                });
+            }
+        }
+
+        thread_local! {
+            static SHARED: RefCell<Option<Rc<SendShared>>> = const { RefCell::new(None) };
+        }
+
+        let shared = Rc::new(SendShared::new());
+        let (c1, w1) = WakeCount::waker();
+        let (c2, w2) = WakeCount::waker();
+        assert!(shared.poll_ready(&Context::from_waker(&w1)).is_pending());
+        assert!(shared.poll_ready(&Context::from_waker(&w2)).is_pending());
+        let cap = shared.ready_wakers.borrow().capacity();
+        shared.wake_waiters();
+        assert_eq!((c1.take(), c2.take()), (1, 1));
+        assert!(shared.ready_wakers.borrow().is_empty());
+        assert_eq!(shared.ready_wakers.borrow().capacity(), cap);
+
+        SHARED.set(Some(shared.clone()));
+        let rearm = Waker::from(Arc::new(Rearm));
+        assert!(shared.poll_ready(&Context::from_waker(&rearm)).is_pending());
+        shared.wake_waiters();
+        SHARED.set(None);
+        let wakers = shared.ready_wakers.borrow();
+        assert_eq!(wakers.len(), 1);
+        assert!(!wakers[0].will_wake(&rearm));
     }
 
     #[test]
@@ -1941,13 +1998,7 @@ mod tests {
     #[test]
     fn call_streams_drop_closes_recv() {
         let recv = ServerRecv::new(false);
-        let streams = CallStreams::new(
-            recv.clone(),
-            HeaderMap::new(),
-            64,
-            None,
-            Rc::new(SendShared::new()),
-        );
+        let streams = CallStreams::new(recv.clone(), 64, None, Rc::new(SendShared::new()));
         drop(streams);
 
         // the handler does not read the request, its end is dropped
@@ -1964,14 +2015,8 @@ mod tests {
     #[test]
     fn call_streams_take() {
         let recv = ServerRecv::new(false);
-        let mut streams = CallStreams::new(
-            recv.clone(),
-            HeaderMap::new(),
-            64,
-            None,
-            Rc::new(SendShared::new()),
-        );
-        let rx = streams.recv::<()>();
+        let mut streams = CallStreams::new(recv.clone(), 64, None, Rc::new(SendShared::new()));
+        let rx = streams.recv::<()>(HeaderMap::new());
         let _tx = streams.send::<()>();
         drop(streams);
         // the taken stream is still read
@@ -1983,5 +2028,60 @@ mod tests {
             Poll::Ready(Item::End(Ok(())))
         ));
         drop(rx);
+    }
+
+    /// STATEMENT: `#[server]` moves the request headers of a streaming call
+    /// to where its handler reads them: the request stream for a client
+    /// streaming method, the request for a server streaming method.
+    ///
+    /// HOW:
+    /// - Take the request stream of a client streaming method with
+    ///   `__private::recv` and confirm the stream has the `x-a` header and the
+    ///   request has no headers left.
+    /// - Do the same for a server streaming method and confirm the request
+    ///   keeps the header and the stream has none.
+    #[test]
+    fn call_streams_request_headers() {
+        use crate::server::{__private, ServerRequest};
+        use ntex_bytes::ByteString;
+
+        struct Method<const CLIENT: bool>;
+
+        impl<const CLIENT: bool> crate::MethodDef for Method<CLIENT> {
+            const NAME: &'static str = "M";
+            const PATH: ByteString = ByteString::from_static("/test.S/M");
+            const CLIENT_STREAMING: bool = CLIENT;
+            const SERVER_STREAMING: bool = true;
+            type Input = ();
+            type Output = ();
+        }
+
+        fn call() -> (ServerRequest, CallStreams) {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                HeaderName::from_static("x-a"),
+                HeaderValue::from_static("1"),
+            );
+            let req = ServerRequest {
+                service: ByteString::from_static("test.S"),
+                name: ByteString::from_static("M"),
+                payload: Bytes::new(),
+                headers,
+                streams: None,
+            };
+            let streams =
+                CallStreams::new(ServerRecv::new(true), 64, None, Rc::new(SendShared::new()));
+            (req, streams)
+        }
+
+        let (mut req, mut streams) = call();
+        let rx = __private::recv(&Method::<true>, &mut req, &mut streams);
+        assert_eq!(rx.headers().get("x-a").unwrap(), "1");
+        assert!(req.headers.is_empty());
+
+        let (mut req, mut streams) = call();
+        let rx = __private::recv(&Method::<false>, &mut req, &mut streams);
+        assert!(rx.headers().is_empty());
+        assert_eq!(req.headers.get("x-a").unwrap(), "1");
     }
 }

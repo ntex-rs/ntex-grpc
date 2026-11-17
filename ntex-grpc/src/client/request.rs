@@ -61,10 +61,8 @@ impl<'s, S> RequestContext<'s, S> {
     {
         let to = timeout.into();
         self.timeout = Some(to);
-        // always valid, the value holds only digits and a unit
-        if let Ok(val) = HeaderValue::try_from(duration_to_grpc_timeout(to)) {
-            self.headers.insert(consts::GRPC_TIMEOUT, val);
-        }
+        self.headers
+            .insert(consts::GRPC_TIMEOUT, duration_to_grpc_timeout(to));
         self
     }
 
@@ -334,10 +332,8 @@ impl RequestContextBuilder {
     {
         let to = timeout.into();
         self.timeout = Some(to);
-        // always valid, the value holds only digits and a unit
-        if let Ok(val) = HeaderValue::try_from(duration_to_grpc_timeout(to)) {
-            self.headers.insert(consts::GRPC_TIMEOUT, val);
-        }
+        self.headers
+            .insert(consts::GRPC_TIMEOUT, duration_to_grpc_timeout(to));
         self
     }
 
@@ -681,29 +677,45 @@ fn is_reserved(key: &HeaderName) -> bool {
     )
 }
 
-fn duration_to_grpc_timeout(duration: time::Duration) -> String {
+fn duration_to_grpc_timeout(duration: time::Duration) -> HeaderValue {
     // nanoseconds in each unit, from the most precise
-    const UNITS: [(char, u128); 6] = [
-        ('n', 1),
-        ('u', 1_000),
-        ('m', 1_000_000),
-        ('S', 1_000_000_000),
-        ('M', 60_000_000_000),
-        ('H', 3_600_000_000_000),
+    const UNITS: [(u8, u128); 6] = [
+        (b'n', 1),
+        (b'u', 1_000),
+        (b'm', 1_000_000),
+        (b'S', 1_000_000_000),
+        (b'M', 60_000_000_000),
+        (b'H', 3_600_000_000_000),
     ];
     // the spec allows at most 8 digits
-    const MAX_VALUE: u128 = 99_999_999;
+    const MAX_VALUE: u32 = 99_999_999;
 
     let nanos = duration.as_nanos();
-    for (unit, size) in UNITS {
+    let (mut value, unit) = UNITS
+        .into_iter()
         // rounded up, the server must not give up before the client does
-        let value = nanos.div_ceil(size);
-        if value <= MAX_VALUE {
-            return format!("{value}{unit}");
+        .find_map(|(unit, size)| {
+            u32::try_from(nanos.div_ceil(size))
+                .ok()
+                .filter(|value| *value <= MAX_VALUE)
+                .map(|value| (value, unit))
+        })
+        // more than 11,000 years
+        .unwrap_or((MAX_VALUE, b'H'));
+
+    // formatted on the stack, the value fits the inline storage of `HeaderValue`
+    let mut buf = [0; 9];
+    let mut start = buf.len() - 1;
+    buf[start] = unit;
+    loop {
+        start -= 1;
+        buf[start] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
         }
     }
-    // more than 11,000 years
-    format!("{MAX_VALUE}H")
+    HeaderValue::from_bytes(&buf[start..]).expect("digits and a unit are a valid header value")
 }
 
 /// Successful reply to a call.

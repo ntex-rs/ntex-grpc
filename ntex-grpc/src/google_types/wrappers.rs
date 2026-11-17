@@ -15,6 +15,11 @@
 )]
 //! DO NOT MODIFY. Auto-generated file
 
+const _: () = assert!(
+    crate::CODEGEN_VERSION == 1,
+    "generated code does not match the ntex-grpc version (expects CODEGEN_VERSION 1), regenerate it with the matching ntex-grpc-codegen"
+);
+
 ///  Wrapper message for `double`.
 ///
 ///  The JSON representation for `DoubleValue` is JSON number.

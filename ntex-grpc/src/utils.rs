@@ -1,4 +1,5 @@
-use std::{borrow::Cow, fmt::Write, mem};
+use std::task::{Context, Poll};
+use std::{borrow::Cow, fmt::Write, future, mem, pin::Pin};
 
 use base64::engine::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
@@ -253,33 +254,52 @@ fn check_compressed_flag(flag: u8, enc: Option<&HeaderValue>) -> Result<(), Flag
     }
 }
 
+/// A message read by [`read_message()`], ready unless it is decompressed
+/// on the blocking thread pool.
+pub(crate) enum ReadMessage {
+    Ready(future::Ready<Result<Bytes, (GrpcStatus, HeaderValue)>>),
+    #[cfg(feature = "compression")]
+    Offloaded(crate::compression::Decompressing),
+}
+
+impl Future for ReadMessage {
+    type Output = Result<Bytes, (GrpcStatus, HeaderValue)>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.get_mut() {
+            ReadMessage::Ready(res) => Pin::new(res).poll(cx),
+            #[cfg(feature = "compression")]
+            ReadMessage::Offloaded(fut) => Pin::new(fut).poll(cx),
+        }
+    }
+}
+
 /// Returns the message, decompressed if needed.
 ///
 /// `unsupported` is the status of a message in an encoding we do not
 /// support. `enc` is the `grpc-encoding` header value. The decompressed
 /// message must not be larger than `max_size`.
-#[cfg_attr(not(feature = "compression"), allow(clippy::unused_async))]
-pub(crate) async fn read_message(
+pub(crate) fn read_message(
     flag: u8,
-    enc: Option<HeaderValue>,
+    enc: Option<&HeaderValue>,
     block: Bytes,
     max_size: usize,
     unsupported: GrpcStatus,
-) -> Result<Bytes, (GrpcStatus, HeaderValue)> {
+) -> ReadMessage {
     #[cfg(feature = "compression")]
     if flag == 1
-        && let Some(enc) = enc.as_ref().and_then(Enc::from_header)
+        && let Some(enc) = enc.and_then(Enc::from_header)
     {
-        return enc.decompress(block, max_size).await;
+        return enc.decompress(block, max_size);
     }
     #[cfg(not(feature = "compression"))]
     let _ = max_size;
 
-    match check_compressed_flag(flag, enc.as_ref()) {
+    ReadMessage::Ready(future::ready(match check_compressed_flag(flag, enc) {
         Ok(()) => Ok(block),
         Err(FlagError::Unsupported(msg)) => Err((unsupported, msg)),
         Err(FlagError::Invalid(msg)) => Err((GrpcStatus::Internal, msg)),
-    }
+    }))
 }
 
 /// `application/grpc`, optionally with a `+` or `;` suffix, in any case.

@@ -40,7 +40,8 @@ pub trait NamedService {
 #[doc(hidden)]
 pub mod __private {
     use super::{
-        CallStreams, GrpcStatus, MethodDef, RecvStream, SendStream, ServerError, ServerRequest,
+        CallStreams, GrpcStatus, HeaderMap, MethodDef, RecvStream, SendStream, ServerError,
+        ServerRequest,
     };
 
     /// Takes the streams of a streaming call.
@@ -63,8 +64,21 @@ pub mod __private {
     }
 
     /// The request stream of method `M`.
-    pub fn recv<M: MethodDef>(_: &M, streams: &mut CallStreams) -> RecvStream<M::Input> {
-        streams.recv()
+    ///
+    /// The handler of a client streaming method reads the request headers
+    /// from the stream, they are moved there from `req`. The handler of a
+    /// server streaming method reads them from `req`.
+    pub fn recv<M: MethodDef>(
+        _: &M,
+        req: &mut ServerRequest,
+        streams: &mut CallStreams,
+    ) -> RecvStream<M::Input> {
+        let headers = if M::CLIENT_STREAMING {
+            std::mem::take(&mut req.headers)
+        } else {
+            HeaderMap::new()
+        };
+        streams.recv(headers)
     }
 
     /// The response stream of method `M`.

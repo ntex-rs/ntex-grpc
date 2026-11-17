@@ -26,6 +26,22 @@ pub trait FieldFormat<T> {
     /// Protobuf field length
     fn serialized_len(value: &T, tag: u32, default: DefaultValue<&T>) -> usize;
 
+    #[inline]
+    /// Serialize protobuf field with the message lengths cached by the
+    /// preceding [`serialized_len`](Self::serialized_len) call.
+    ///
+    /// See [`NativeType::serialize_cached`].
+    fn serialize_cached(value: &T, tag: u32, default: DefaultValue<&T>, dst: &mut BytePages) {
+        Self::serialize(value, tag, default, dst);
+    }
+
+    #[inline]
+    /// Protobuf field length cached by the preceding
+    /// [`serialized_len`](Self::serialized_len) call.
+    fn cached_serialized_len(value: &T, tag: u32, default: DefaultValue<&T>) -> usize {
+        Self::serialized_len(value, tag, default)
+    }
+
     /// Deserialize protobuf field
     fn deserialize(
         value: &mut T,
@@ -59,6 +75,16 @@ impl<T: NativeType> FieldFormat<T> for Native {
     #[inline]
     fn serialized_len(value: &T, tag: u32, default: DefaultValue<&T>) -> usize {
         value.serialized_len(tag, default)
+    }
+
+    #[inline]
+    fn serialize_cached(value: &T, tag: u32, default: DefaultValue<&T>, dst: &mut BytePages) {
+        value.serialize_cached(tag, default, dst);
+    }
+
+    #[inline]
+    fn cached_serialized_len(value: &T, tag: u32, default: DefaultValue<&T>) -> usize {
+        value.cached_serialized_len(tag, default)
     }
 
     #[inline]
@@ -363,9 +389,14 @@ where
 pub struct Group;
 
 impl Group {
-    fn write<T: Message>(value: &T, tag: u32, dst: &mut BytePages) {
+    /// Writes the group, `cached` uses the lengths cached by `len`
+    fn write<T: Message>(value: &T, tag: u32, cached: bool, dst: &mut BytePages) {
         encoding::encode_key(tag, WireType::StartGroup, dst);
-        value.write(dst);
+        if cached {
+            value.write_cached(dst);
+        } else {
+            value.write(dst);
+        }
         encoding::encode_key(tag, WireType::EndGroup, dst);
     }
 
@@ -388,7 +419,12 @@ impl Group {
 impl<T: Message> FieldFormat<T> for Group {
     #[inline]
     fn serialize(value: &T, tag: u32, _: DefaultValue<&T>, dst: &mut BytePages) {
-        Group::write(value, tag, dst);
+        Group::write(value, tag, false, dst);
+    }
+
+    #[inline]
+    fn serialize_cached(value: &T, tag: u32, _: DefaultValue<&T>, dst: &mut BytePages) {
+        Group::write(value, tag, true, dst);
     }
 
     #[inline]
@@ -410,7 +446,18 @@ impl<T: Message> FieldFormat<T> for Group {
 impl<T: Message> FieldFormat<Option<T>> for Group {
     fn serialize(value: &Option<T>, tag: u32, _: DefaultValue<&Option<T>>, dst: &mut BytePages) {
         if let Some(value) = value {
-            Group::write(value, tag, dst);
+            Group::write(value, tag, false, dst);
+        }
+    }
+
+    fn serialize_cached(
+        value: &Option<T>,
+        tag: u32,
+        _: DefaultValue<&Option<T>>,
+        dst: &mut BytePages,
+    ) {
+        if let Some(value) = value {
+            Group::write(value, tag, true, dst);
         }
     }
 
@@ -431,7 +478,13 @@ impl<T: Message> FieldFormat<Option<T>> for Group {
 impl<T: Message> FieldFormat<Vec<T>> for Group {
     fn serialize(value: &Vec<T>, tag: u32, _: DefaultValue<&Vec<T>>, dst: &mut BytePages) {
         for item in value {
-            Group::write(item, tag, dst);
+            Group::write(item, tag, false, dst);
+        }
+    }
+
+    fn serialize_cached(value: &Vec<T>, tag: u32, _: DefaultValue<&Vec<T>>, dst: &mut BytePages) {
+        for item in value {
+            Group::write(item, tag, true, dst);
         }
     }
 
@@ -512,6 +565,34 @@ impl<K: Default + Ord, V: Default> MapType for BTreeMap<K, V> {
 #[derive(Copy, Clone, Debug)]
 pub struct Map<KF, VF>(PhantomData<(KF, VF)>);
 
+impl<KF, VF> Map<KF, VF> {
+    /// Writes the map entries, `cached` uses the value lengths cached by
+    /// `serialized_len`
+    fn write<M>(value: &M, tag: u32, cached: bool, dst: &mut BytePages)
+    where
+        M: MapType,
+        KF: FieldFormat<M::Key>,
+        VF: FieldFormat<M::Value>,
+    {
+        value.for_each_entry(|key, val| {
+            let val_len = if cached {
+                VF::cached_serialized_len(val, 2, DefaultValue::Default)
+            } else {
+                VF::serialized_len(val, 2, DefaultValue::Default)
+            };
+            let len = KF::serialized_len(key, 1, DefaultValue::Default) + val_len;
+            encoding::encode_key(tag, WireType::LengthDelimited, dst);
+            encoding::encode_varint(len as u64, dst);
+            KF::serialize(key, 1, DefaultValue::Default, dst);
+            if cached {
+                VF::serialize_cached(val, 2, DefaultValue::Default, dst);
+            } else {
+                VF::serialize(val, 2, DefaultValue::Default, dst);
+            }
+        });
+    }
+}
+
 impl<M, KF, VF> FieldFormat<M> for Map<KF, VF>
 where
     M: MapType,
@@ -519,14 +600,11 @@ where
     VF: FieldFormat<M::Value>,
 {
     fn serialize(value: &M, tag: u32, _: DefaultValue<&M>, dst: &mut BytePages) {
-        value.for_each_entry(|key, val| {
-            let len = KF::serialized_len(key, 1, DefaultValue::Default)
-                + VF::serialized_len(val, 2, DefaultValue::Default);
-            encoding::encode_key(tag, WireType::LengthDelimited, dst);
-            encoding::encode_varint(len as u64, dst);
-            KF::serialize(key, 1, DefaultValue::Default, dst);
-            VF::serialize(val, 2, DefaultValue::Default, dst);
-        });
+        Self::write(value, tag, false, dst);
+    }
+
+    fn serialize_cached(value: &M, tag: u32, _: DefaultValue<&M>, dst: &mut BytePages) {
+        Self::write(value, tag, true, dst);
     }
 
     fn serialized_len(value: &M, tag: u32, _: DefaultValue<&M>) -> usize {

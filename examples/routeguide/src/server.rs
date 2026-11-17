@@ -28,6 +28,7 @@ impl RouteGuideServer {
         self.feature_at(&point).cloned().unwrap_or(Feature {
             name: "".into(),
             location: point,
+            ..Default::default()
         })
     }
 
@@ -164,6 +165,7 @@ fn features() -> Arc<[Feature]> {
             latitude,
             longitude,
         },
+        ..Default::default()
     })
     .collect()
 }

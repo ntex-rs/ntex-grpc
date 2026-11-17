@@ -1,5 +1,5 @@
 use std::time::{Duration, Instant};
-use std::{convert::TryFrom, future::Future, str::FromStr};
+use std::{convert::TryFrom, future::Future, future::poll_fn, pin::pin, str::FromStr, task::Poll};
 
 use ntex_bytes::{Buf, BufMut, BytePages, ByteString, Bytes};
 use ntex_error::Error;
@@ -78,13 +78,31 @@ where
         if timeout.is_zero() {
             return Err(deadline_exceeded(TIMEOUT_ZERO, HeaderMap::new()));
         }
-        let deadline = Instant::now().checked_add(timeout);
+        let deadline = time::now().checked_add(timeout);
         time::timeout(timeout, f(deadline))
             .await
             .unwrap_or_else(|()| Err(deadline_exceeded(TIMEOUT_RAN_OUT, HeaderMap::new())))
     } else {
         f(None).await
     }
+}
+
+/// Runs `fut` until `deadline`, fails with `Err(())` once it passes.
+///
+/// The timer is registered only if `fut` does not complete on its first
+/// poll, a send that does not wait for capacity needs none.
+pub(crate) async fn until_deadline<F: Future>(deadline: Instant, fut: F) -> Result<F::Output, ()> {
+    let mut fut = pin!(fut);
+    let mut sleep: Option<time::Sleep> = None;
+    poll_fn(|cx| {
+        if let Poll::Ready(res) = fut.as_mut().poll(cx) {
+            return Poll::Ready(Ok(res));
+        }
+        let sleep = sleep
+            .get_or_insert_with(|| time::sleep(deadline.saturating_duration_since(time::now())));
+        sleep.poll_elapsed(cx).map(Err)
+    })
+    .await
 }
 
 /// The request timeout ran out, `hdrs` are the response headers received
@@ -111,8 +129,10 @@ pub(crate) fn request_error(err: HttpError) -> ClientError {
 }
 
 /// The headers of a request: the grpc ones and the ones set for the call.
+///
+/// The map is taken from the ntex-h2 pool, encoding the request returns it.
 pub(crate) fn request_headers<St>(ctx: &RequestContext<'_, St>) -> HeaderMap {
-    let mut hdrs = HeaderMap::new();
+    let mut hdrs = h2::get_header_map();
     hdrs.append(header::CONTENT_TYPE, consts::HDRV_CT_GRPC);
     hdrs.append(header::USER_AGENT, consts::HDRV_USER_AGENT);
     hdrs.insert(header::TE, consts::HDRV_TRAILERS);
@@ -170,6 +190,8 @@ async fn send_request<T: MethodDef, St>(
 
     // read response
     let mut status = None;
+    // whether the response is a grpc one, known with the response headers
+    let mut grpc = false;
     let mut hdrs = HeaderMap::default();
     let mut trailers = None;
     let mut payload = Data::Empty;
@@ -199,25 +221,26 @@ async fn send_request<T: MethodDef, St>(
                     }
                     hdrs = headers;
                     status = pseudo.status;
+                    grpc = is_grpc(status, &hdrs);
                     continue;
                 }
                 h2::MessageKind::Data(data, _cap) => {
-                    payload.push(data, message_limit(status, &hdrs, max_size));
-                    if let Some((st, msg)) = check_message(status, &hdrs, &payload, max_size) {
+                    payload.push(data, message_limit(grpc, max_size));
+                    if let Some((st, msg)) = check_message(grpc, &payload, max_size) {
                         return Err(invalid_response(st, msg, hdrs));
                     }
-                    if !limit_other_body(status, &hdrs, &mut payload) {
+                    if !limit_other_body(grpc, &mut payload) {
                         continue;
                     }
                     // not a grpc response, the rest of the body is not read
                 }
                 h2::MessageKind::Eof(data) => match data {
                     h2::StreamEof::Data(data, _cap) => {
-                        payload.push(data, message_limit(status, &hdrs, max_size));
-                        if let Some((st, msg)) = check_message(status, &hdrs, &payload, max_size) {
+                        payload.push(data, message_limit(grpc, max_size));
+                        if let Some((st, msg)) = check_message(grpc, &payload, max_size) {
                             return Err(invalid_response(st, msg, hdrs));
                         }
-                        limit_other_body(status, &hdrs, &mut payload);
+                        limit_other_body(grpc, &mut payload);
                         missing = Some((GrpcStatus::Internal, NO_TRAILERS));
                     }
                     h2::StreamEof::Trailers(hdrs) => {
@@ -245,7 +268,7 @@ async fn send_request<T: MethodDef, St>(
             }
 
             let mut data = payload.get();
-            if !is_grpc(status, &hdrs) {
+            if !grpc {
                 return Err(Error::from(ClientError::NotGrpc(NotGrpc::new(
                     status, hdrs, data,
                 ))));
@@ -270,7 +293,7 @@ async fn send_request<T: MethodDef, St>(
             // a message in an unknown encoding is an internal error
             let mut block = match utils::read_message(
                 flag,
-                hdrs.get(consts::GRPC_ENCODING).cloned(),
+                hdrs.get(consts::GRPC_ENCODING),
                 block,
                 max_size,
                 GrpcStatus::Internal,
@@ -358,7 +381,7 @@ pub(crate) fn reset_error(
         let failure = CallFailure::new(GrpcStatus::Unavailable, msg);
         return ClientError::NotProcessed(failure.with_headers(hdrs).with_cause(cause));
     }
-    if reason == Reason::CANCEL && deadline.is_some_and(|d| Instant::now() >= d) {
+    if reason == Reason::CANCEL && deadline.is_some_and(|d| time::now() >= d) {
         let failure = CallFailure::new(
             GrpcStatus::DeadlineExceeded,
             "Stream reset with CANCEL after the deadline",
@@ -459,19 +482,15 @@ pub(crate) fn is_grpc(status: Option<StatusCode>, hdrs: &HeaderMap) -> bool {
 
 /// The largest message to buffer, the body of a response that is not a grpc
 /// one has no length prefix.
-fn message_limit(status: Option<StatusCode>, hdrs: &HeaderMap, max_size: usize) -> usize {
-    if is_grpc(status, hdrs) { max_size } else { 0 }
+fn message_limit(grpc: bool, max_size: usize) -> usize {
+    if grpc { max_size } else { 0 }
 }
 
 /// Keeps at most [`MAX_OTHER_BODY`] bytes of a response body that is not a
 /// grpc one, e.g. an error page from a proxy. Returns true once the limit is
 /// reached, the rest of the body is dropped.
-pub(crate) fn limit_other_body(
-    status: Option<StatusCode>,
-    hdrs: &HeaderMap,
-    payload: &mut Data,
-) -> bool {
-    if payload.as_slice().len() <= MAX_OTHER_BODY || is_grpc(status, hdrs) {
+pub(crate) fn limit_other_body(grpc: bool, payload: &mut Data) -> bool {
+    if grpc || payload.as_slice().len() <= MAX_OTHER_BODY {
         return false;
     }
     payload.truncate(MAX_OTHER_BODY);
@@ -483,13 +502,8 @@ pub(crate) fn limit_other_body(
 /// Fails on a message over the size limit, or on data after the message,
 /// a unary response has exactly one. Neither is buffered then. Only a grpc
 /// response is checked, other responses fail later anyway.
-fn check_message(
-    status: Option<StatusCode>,
-    hdrs: &HeaderMap,
-    payload: &Data,
-    max_size: usize,
-) -> Option<(GrpcStatus, ByteString)> {
-    if !is_grpc(status, hdrs) {
+fn check_message(grpc: bool, payload: &Data, max_size: usize) -> Option<(GrpcStatus, ByteString)> {
+    if !grpc {
         return None;
     }
     let data = payload.as_slice();
@@ -520,29 +534,30 @@ pub(crate) async fn encode_message<M: Message, St>(
     ctx: &RequestContext<'_, St>,
 ) -> Result<BytePages, ClientError> {
     let max_size = ctx.get_max_send_message_size();
+    // fills the cached lengths of nested messages for `write_cached`
+    let len = val.encoded_len();
 
     #[cfg(feature = "compression")]
-    if let Some(enc) = ctx.get_compression() {
-        let len = val.encoded_len();
-        if len >= crate::compression::MIN_SIZE {
-            // the uncompressed message must fit the length prefix too
-            send_size(len, usize::MAX)?;
-            let mut msg = BytePages::default();
-            val.write(&mut msg);
-            let compressed = enc.compress(&mut msg).await.map_err(|(status, msg)| {
-                ClientError::InvalidRequest(CallFailure::new(status, text(&msg)))
-            })?;
-            let len = send_size(msg.len(), max_size)?;
-            utils::prepend_prefix(&mut msg, compressed, len);
-            return Ok(msg);
-        }
+    if len >= crate::compression::MIN_SIZE
+        && let Some(enc) = ctx.get_compression()
+    {
+        // the uncompressed message must fit the length prefix too
+        send_size(len, usize::MAX)?;
+        let mut msg = BytePages::default();
+        val.write_cached(&mut msg);
+        let compressed = enc.compress(&mut msg).await.map_err(|(status, msg)| {
+            ClientError::InvalidRequest(CallFailure::new(status, text(&msg)))
+        })?;
+        let len = send_size(msg.len(), max_size)?;
+        utils::prepend_prefix(&mut msg, compressed, len);
+        return Ok(msg);
     }
 
-    let len = send_size(val.encoded_len(), max_size)?;
+    let len = send_size(len, max_size)?;
     let mut buf = BytePages::default();
     buf.put_u8(0);
     buf.put_u32(len);
-    val.write(&mut buf);
+    val.write_cached(&mut buf);
     Ok(buf)
 }
 
@@ -690,8 +705,8 @@ mod tests {
 
     #[test]
     fn reset_mapping() {
-        let past = Instant::now().checked_sub(Duration::from_millis(1));
-        let future = Instant::now().checked_add(Duration::from_secs(60));
+        let past = time::now().checked_sub(Duration::from_millis(1));
+        let future = time::now().checked_add(Duration::from_secs(60));
         let map = |reason, deadline| {
             let err = reset_error(reason, headers(), deadline, StreamError::Reset(reason));
             let f = failure(&err);
@@ -817,5 +832,61 @@ mod tests {
             std::io::Error::other("refused"),
         ));
         assert_eq!(error_text(&err), "Connect error: Tcp connect: refused");
+    }
+
+    /// STATEMENT: `until_deadline` returns a ready result without waiting
+    /// and fails once the deadline passes for a pending future.
+    ///
+    /// HOW:
+    /// - Await a ready future with a deadline already in the past and get
+    ///   its output.
+    /// - Await a future that completes after 10 ms with a 1 s deadline and
+    ///   get its output.
+    /// - Await a never-ready future with a 50 ms deadline, get `Err(())`, and
+    ///   confirm it took at least 50 ms.
+    #[ntex::test]
+    async fn until_deadline_result() {
+        let past = time::now();
+        assert_eq!(until_deadline(past, async { 1 }).await, Ok(1));
+
+        let deadline = time::now() + Duration::from_secs(1);
+        let fut = async {
+            time::sleep(Duration::from_millis(10)).await;
+            2
+        };
+        assert_eq!(until_deadline(deadline, fut).await, Ok(2));
+
+        let start = time::now();
+        let deadline = start + Duration::from_millis(50);
+        let res = until_deadline(deadline, std::future::pending::<()>()).await;
+        assert_eq!(res, Err(()));
+        assert!(start.elapsed() >= Duration::from_millis(50));
+    }
+
+    /// STATEMENT: `request_headers` reuses a header map from the ntex-h2 pool
+    /// and fills it with the grpc headers and the call's headers.
+    ///
+    /// HOW:
+    /// - Release a map with a distinct capacity to the thread's pool.
+    /// - Build the request headers for a context with one custom header.
+    /// - Confirm the result has the released map's capacity and holds
+    ///   `content-type`, `te` and the custom header.
+    #[test]
+    fn request_headers_pooled() {
+        let pooled = HeaderMap::with_capacity(40);
+        let cap = pooled.capacity();
+        h2::release_header_map(pooled);
+
+        let mut builder = crate::client::request::RequestContextBuilder::new();
+        builder.header("x-custom", "1");
+        let ctx = builder.build(&());
+        let hdrs = request_headers(&ctx);
+        assert_eq!(hdrs.capacity(), cap);
+        assert_eq!(
+            hdrs.get(header::CONTENT_TYPE).unwrap(),
+            consts::HDRV_CT_GRPC
+        );
+        assert_eq!(hdrs.get(header::TE).unwrap(), consts::HDRV_TRAILERS);
+        assert_eq!(hdrs.get("x-custom").unwrap(), "1");
     }
 }

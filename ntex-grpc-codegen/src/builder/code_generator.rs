@@ -32,9 +32,38 @@ struct MessageCode {
     read: String,
     encoded_len: String,
     default: String,
+    debug: String,
     accessors: String,
     required: String,
     required_num: usize,
+    /// The message has message fields and caches its encoded length
+    nested: bool,
+}
+
+struct OneofCode {
+    write: String,
+    /// `serialize_cached` match arms, for oneofs with message variants
+    write_cached: Option<String>,
+    read: String,
+    encoded_len: String,
+}
+
+/// Message and group fields, generated messages with them cache the encoded
+/// lengths of the nested messages
+fn is_message(field: &FieldDescriptorProto) -> bool {
+    matches!(field.r#type(), Type::Message | Type::Group)
+}
+
+/// Message field, or map field with message values
+fn is_message_field(field: &FieldDescriptorProto, map_types: &MapTypes) -> bool {
+    match field
+        .type_name
+        .as_ref()
+        .and_then(|type_name| map_types.get(type_name))
+    {
+        Some((_, value)) => is_message(value),
+        None => is_message(field),
+    }
 }
 
 pub(crate) struct CodeGenerator<'a> {
@@ -153,6 +182,60 @@ pub(crate) fn enum_values<'a>(files: impl Iterator<Item = &'a FileDescriptorProt
 fn push_indent(buf: &mut String, depth: u8) {
     for _ in 0..depth {
         buf.push_str("    ");
+    }
+}
+
+/// `write` and `encoded_len` methods of the `Message` impl.
+///
+/// Messages with message fields cache the encoded length, `write` computes the
+/// lengths of the whole tree once and `write_cached` uses the cached lengths.
+fn message_encode_fns(code: &MessageCode) -> (String, String) {
+    let MessageCode {
+        write, encoded_len, ..
+    } = code;
+    if code.nested {
+        (
+            format!(
+                "#[inline]
+                  fn write(&self, dst: &mut ::ntex_grpc::BytePages) {{
+                    ::ntex_grpc::Message::encoded_len(self);
+                    ::ntex_grpc::Message::write_cached(self, dst);
+                 }}
+
+                 #[inline]
+                 fn write_cached(&self, dst: &mut ::ntex_grpc::BytePages) {{
+                    {write}
+                 }}
+
+                 #[inline]
+                 fn cached_len(&self) -> usize {{
+                     self._cached_len.get()
+                 }}\n\n"
+            ),
+            format!(
+                "#[inline]
+                 fn encoded_len(&self) -> usize {{
+                     let len = 0 {encoded_len};
+                     self._cached_len.set(len);
+                     len
+                 }}\n\n"
+            ),
+        )
+    } else {
+        (
+            format!(
+                "#[inline]
+                  fn write(&self, dst: &mut ::ntex_grpc::BytePages) {{
+                    {write}
+                 }}\n\n"
+            ),
+            format!(
+                "#[inline]
+                 fn encoded_len(&self) -> usize {{
+                     0 {encoded_len}
+                 }}\n\n"
+            ),
+        )
     }
 }
 
@@ -317,20 +400,43 @@ impl CodeGenerator<'_> {
         // Split the fields into a vector of the normal fields, and oneof fields.
         // Path indexes are preserved so that comments can be retrieved.
         let (fields, mut oneof_fields) = split_fields(message.field);
+        let nested = fields
+            .iter()
+            .any(|(field, _)| is_message_field(field, &map_types))
+            || oneof_fields
+                .iter_all()
+                .any(|(_, fields)| fields.iter().any(|(field, _)| is_message(field)));
 
         self.append_doc();
         self.push_indent();
-        self.buf.push_str("#[derive(Clone, PartialEq, Debug)]\n");
+        if nested {
+            // `Debug` is implemented without the length cache
+            self.buf.push_str("#[derive(Clone, PartialEq)]\n");
+        } else {
+            self.buf.push_str("#[derive(Clone, PartialEq, Debug)]\n");
+        }
         self.push_indent();
         self.buf.push_str("pub struct ");
         self.buf.push_str(&to_upper_camel(&message_name));
         self.buf.push_str(" {\n");
 
         let type_path = self.type_path(&to_upper_camel(&message_name));
-        let mut code = MessageCode::default();
+        let mut code = MessageCode {
+            nested,
+            ..MessageCode::default()
+        };
         self.depth += 1;
         self.append_message_fields(&fq_message_name, &fields, &map_types, &mut code);
         self.append_message_oneofs(&message_name, &message.oneof_decl, &oneof_fields, &mut code);
+        if nested {
+            self.push_indent();
+            self.buf.push_str("#[doc(hidden)]\n");
+            self.push_indent();
+            self.buf
+                .push_str("pub _cached_len: ::ntex_grpc::CachedLen,\n");
+            code.default
+                .push_str("_cached_len: ::core::default::Default::default(),\n");
+        }
         self.depth -= 1;
         self.push_indent();
         self.buf.push_str("}\n\n");
@@ -421,8 +527,14 @@ impl CodeGenerator<'_> {
             };
             let value = value.unwrap_or_else(|| "::core::default::Default::default()".to_string());
 
+            // nested messages are written with the lengths of `encoded_len`
+            let serialize = if is_message_field(field, map_types) {
+                "serialize_cached"
+            } else {
+                "serialize"
+            };
             write!(code.write,
-                "{ops}serialize(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::{skip}, dst);",
+                "{ops}{serialize}(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::{skip}, dst);",
             ).unwrap();
             if field.label() == Label::Required {
                 // a required field missing from the input fails decoding
@@ -457,6 +569,12 @@ impl CodeGenerator<'_> {
                 " + {ops}serialized_len(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::{skip})",
             ).unwrap();
             writeln!(code.default, "{field_name}: {value},").unwrap();
+            writeln!(
+                code.debug,
+                ".field(\"{}\", &self.{field_name})",
+                field_name.trim_start_matches("r#")
+            )
+            .unwrap();
 
             self.enum_accessors(fq_message_name, field, map_entry, &mut code.accessors);
             match map_entry {
@@ -484,28 +602,35 @@ impl CodeGenerator<'_> {
                 continue;
             };
 
+            let oneof_name = to_snake(oneof.name());
+            let serialize = if fields.iter().any(|(field, _)| is_message(field)) {
+                "serialize_cached"
+            } else {
+                "serialize"
+            };
             write!(code.write,
-                "::ntex_grpc::NativeType::serialize(&self.{}, 0, ::ntex_grpc::types::DefaultValue::Default, dst);",
-                to_snake(oneof.name()),
+                "::ntex_grpc::NativeType::{serialize}(&self.{oneof_name}, 0, ::ntex_grpc::types::DefaultValue::Default, dst);",
             ).unwrap();
             write!(
                 code.read,
                 "
-               {} => ::ntex_grpc::NativeType::deserialize(&mut self.{}, tag, wire_type, src)
-                        .map_err(|err| err.push(STRUCT_NAME, \"{}\"))?,",
+               {} => ::ntex_grpc::NativeType::deserialize(&mut self.{oneof_name}, tag, wire_type, src)
+                        .map_err(|err| err.push(STRUCT_NAME, \"{oneof_name}\"))?,",
                 fields.iter().map(|(field, _)| field.number()).join("| "),
-                to_snake(oneof.name()),
-                to_snake(oneof.name()),
             )
             .unwrap();
             write!(code.encoded_len,
-                " + ::ntex_grpc::NativeType::serialized_len(&self.{}, 0, ::ntex_grpc::types::DefaultValue::Default)",
-                to_snake(oneof.name()),
+                " + ::ntex_grpc::NativeType::serialized_len(&self.{oneof_name}, 0, ::ntex_grpc::types::DefaultValue::Default)",
             ).unwrap();
             writeln!(
                 code.default,
-                "{}: ::core::default::Default::default(),",
-                to_snake(oneof.name()),
+                "{oneof_name}: ::core::default::Default::default(),",
+            )
+            .unwrap();
+            writeln!(
+                code.debug,
+                ".field(\"{}\", &self.{oneof_name})",
+                oneof_name.trim_start_matches("r#")
             )
             .unwrap();
 
@@ -518,26 +643,19 @@ impl CodeGenerator<'_> {
 
     fn append_message_impl(&mut self, message_name: &str, type_path: &str, code: &MessageCode) {
         let MessageCode {
-            write,
             read,
-            encoded_len,
             default,
+            debug,
             required,
             required_num,
+            nested,
             ..
         } = code;
+        let (write_fns, encoded_len_fn) = message_encode_fns(code);
         self.priv_buf.push_str("impl ::ntex_grpc::Message for ");
         self.priv_buf.push_str(type_path);
         self.priv_buf.push_str(" {\n");
-
-        write!(
-            self.priv_buf,
-            "#[inline]
-              fn write(&self, dst: &mut ::ntex_grpc::BytePages) {{
-                {write}
-             }}\n\n"
-        )
-        .unwrap();
+        self.priv_buf.push_str(&write_fns);
 
         let read = if read.is_empty() {
             "::ntex_grpc::encoding::skip_field(wire_type, tag, src)?;".to_string()
@@ -587,15 +705,22 @@ impl CodeGenerator<'_> {
              }}\n\n",
             to_upper_camel(message_name)
         ).unwrap();
-        write!(
-            self.priv_buf,
-            "#[inline]
-             fn encoded_len(&self) -> usize {{
-                 0 {encoded_len}
-             }}\n\n"
-        )
-        .unwrap();
+        self.priv_buf.push_str(&encoded_len_fn);
         self.priv_buf.push_str("}\n\n");
+
+        if *nested {
+            write!(
+                self.priv_buf,
+                "impl ::std::fmt::Debug for {type_path} {{
+                     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {{
+                         f.debug_struct(\"{}\")
+                             {debug}.finish()
+                     }}
+                 }}\n\n",
+                to_upper_camel(message_name)
+            )
+            .unwrap();
+        }
 
         // default
         write!(
@@ -715,6 +840,7 @@ impl CodeGenerator<'_> {
         self.buf.push_str(" {\n");
 
         let mut write = String::new();
+        let mut write_cached = String::new();
         let mut read = String::new();
         let mut encoded_len = String::new();
 
@@ -728,6 +854,14 @@ impl CodeGenerator<'_> {
 
             write!(write,
                 "{name}::{field_name}(ref value) => {ops}serialize(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown, dst),",
+            ).unwrap();
+            let serialize = if is_message(field) {
+                "serialize_cached"
+            } else {
+                "serialize"
+            };
+            write!(write_cached,
+                "{name}::{field_name}(ref value) => {ops}{serialize}(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown, dst),",
             ).unwrap();
             if fields.len() == 1 {
                 // single variant oneof, pattern is irrefutable
@@ -773,9 +907,15 @@ impl CodeGenerator<'_> {
             &name,
             oneof.name(),
             &to_upper_camel(fields[0].0.name()),
-            &write,
-            &read,
-            &encoded_len,
+            &OneofCode {
+                write,
+                write_cached: fields
+                    .iter()
+                    .any(|(field, _)| is_message(field))
+                    .then_some(write_cached),
+                read,
+                encoded_len,
+            },
         );
     }
 
@@ -784,10 +924,14 @@ impl CodeGenerator<'_> {
         name: &str,
         oneof_name: &str,
         default_variant: &str,
-        write: &str,
-        read: &str,
-        encoded_len: &str,
+        code: &OneofCode,
     ) {
+        let OneofCode {
+            write,
+            write_cached,
+            read,
+            encoded_len,
+        } = code;
         write!(self.priv_buf,
             "
         impl ::ntex_grpc::NativeType for {name} {{
@@ -810,6 +954,15 @@ impl CodeGenerator<'_> {
                 match *self {{ {write} }}
             }}\n",
         ).unwrap();
+        if let Some(write_cached) = write_cached {
+            write!(self.priv_buf,
+                "
+            #[inline]
+            fn serialize_cached(&self, _: u32, _: ::ntex_grpc::types::DefaultValue<&Self>, dst: &mut ::ntex_grpc::BytePages) {{
+                match *self {{ {write_cached} }}
+            }}\n",
+            ).unwrap();
+        }
         write!(self.priv_buf, "
             #[inline]
             /// Decodes an instance of the message from a buffer, and merges it into self.
@@ -2082,5 +2235,213 @@ mod tests {
         assert!(code.contains("impl ::ntex_grpc::NativeType for outer::inner::Kind {"));
         assert!(code.contains("impl ::ntex_grpc::NativeType for outer::inner::Choice {"));
         assert!(code.contains("outer::inner::Choice::X(ref value)"));
+    }
+
+    /// STATEMENT: Messages with message fields cache their encoded length and
+    /// write the nested messages with the cached lengths, leaf messages are
+    /// generated without the cache.
+    ///
+    /// HOW:
+    /// - Generate `Leaf { int32 a }` and
+    ///   `Node { Leaf leaf; oneof kind { Leaf l; int32 n } }`.
+    /// - Confirm `Node` gets the hidden `_cached_len` field, a manual `Debug`
+    ///   without it, `write_cached` and `cached_len`, that `write` refreshes
+    ///   the lengths with `encoded_len` before `write_cached`, and that it
+    ///   writes `leaf`, the oneof and its message variant with
+    ///   `serialize_cached`.
+    /// - Confirm `Leaf` keeps the derived `Debug` and is the only message
+    ///   without the cache methods.
+    #[test]
+    fn test_nested_cached_len() {
+        let mut a = FieldDescriptorProto {
+            name: Some("a".to_string()),
+            number: Some(1),
+            ..Default::default()
+        };
+        a.set_type(Type::Int32);
+        a.set_label(Label::Optional);
+        let mut leaf = field("leaf", ".pkg.Leaf", Label::Optional);
+        leaf.number = Some(1);
+        let mut l = field("l", ".pkg.Leaf", Label::Optional);
+        l.number = Some(2);
+        l.oneof_index = Some(0);
+        let mut n = FieldDescriptorProto {
+            name: Some("n".to_string()),
+            number: Some(3),
+            oneof_index: Some(0),
+            ..Default::default()
+        };
+        n.set_type(Type::Int32);
+        n.set_label(Label::Optional);
+        let mut node = message("Node", vec![leaf, l, n], vec![]);
+        node.oneof_decl.push(OneofDescriptorProto {
+            name: Some("kind".to_string()),
+            ..Default::default()
+        });
+        let file = FileDescriptorProto {
+            name: Some("test.proto".to_string()),
+            package: Some("pkg".to_string()),
+            syntax: Some("proto3".to_string()),
+            message_type: vec![message("Leaf", vec![a], vec![]), node],
+            source_code_info: Some(SourceCodeInfo {
+                location: [
+                    vec![4, 0],
+                    vec![4, 0, 2, 0],
+                    vec![4, 1],
+                    vec![4, 1, 2, 0],
+                    vec![4, 1, 2, 1],
+                    vec![4, 1, 2, 2],
+                    vec![4, 1, 8, 0],
+                ]
+                .into_iter()
+                .map(|path| Location {
+                    path,
+                    ..Default::default()
+                })
+                .collect(),
+            }),
+            ..Default::default()
+        };
+        let mut code = String::new();
+        CodeGenerator::generate(
+            &mut Config::default(),
+            &ExternPaths::new(false),
+            &EnumValues::new(),
+            file,
+            &mut code,
+        );
+
+        assert!(code.contains("#[derive(Clone, PartialEq, Debug)]\npub struct Leaf {"));
+        assert!(code.contains("#[derive(Clone, PartialEq)]\npub struct Node {"));
+        assert_eq!(
+            code.matches("pub _cached_len: ::ntex_grpc::CachedLen,")
+                .count(),
+            1
+        );
+        assert!(code.contains("_cached_len: ::core::default::Default::default(),"));
+
+        assert!(code.contains("impl ::std::fmt::Debug for Node {"));
+        assert!(
+            code.contains(".field(\"leaf\", &self.leaf)\n.field(\"kind\", &self.kind)\n.finish()")
+        );
+        assert_eq!(code.matches("impl ::std::fmt::Debug for").count(), 1);
+
+        assert_eq!(code.matches("fn write_cached(").count(), 1);
+        assert_eq!(code.matches("fn cached_len(").count(), 1);
+        assert!(code.contains("self._cached_len.set(len);"));
+        let compact = code.split_whitespace().collect::<String>();
+        assert!(compact.contains(
+            "fnwrite(&self,dst:&mut::ntex_grpc::BytePages){::ntex_grpc::Message::encoded_len(self);::ntex_grpc::Message::write_cached(self,dst);}"
+        ));
+        assert!(code.contains("::ntex_grpc::NativeType::serialize_cached(&self.leaf, 1,"));
+        assert!(code.contains("::ntex_grpc::NativeType::serialize_cached(&self.kind, 0,"));
+
+        // the oneof writes the message variant with its cached length
+        assert_eq!(code.matches("fn serialize_cached(").count(), 1);
+        assert!(code.contains(
+            "node::Kind::L(ref value) => ::ntex_grpc::NativeType::serialize_cached(value, 2,"
+        ));
+        assert!(
+            code.contains(
+                "node::Kind::L(ref value) => ::ntex_grpc::NativeType::serialize(value, 2,"
+            )
+        );
+    }
+
+    /// STATEMENT: A message whose message values are only in a map caches its
+    /// encoded length, a message with a map of scalars does not.
+    ///
+    /// HOW:
+    /// - Generate `Leaf { int32 a }`, `Bag { map<string, Leaf> m }` and
+    ///   `Ints { map<int32, int32> s }`.
+    /// - Confirm only `Bag` gets the `_cached_len` field and writes its map
+    ///   with `serialize_cached`, and `Ints` writes its map with `serialize`.
+    #[test]
+    fn test_map_cached_len() {
+        fn scalar(name: &str, number: i32, ty: Type) -> FieldDescriptorProto {
+            let mut f = FieldDescriptorProto {
+                name: Some(name.to_string()),
+                number: Some(number),
+                ..Default::default()
+            };
+            f.set_type(ty);
+            f.set_label(Label::Optional);
+            f
+        }
+        fn map_field(name: &str, ty: &str) -> FieldDescriptorProto {
+            let mut f = field(name, ty, Label::Repeated);
+            f.number = Some(1);
+            f
+        }
+        fn map_entry(name: &str, key: Type, value: FieldDescriptorProto) -> DescriptorProto {
+            let mut entry = message(name, vec![scalar("key", 1, key), value], vec![]);
+            entry.options = Some(prost_types::MessageOptions {
+                map_entry: Some(true),
+                ..Default::default()
+            });
+            entry
+        }
+
+        let mut leaf_value = field("value", ".pkg.Leaf", Label::Optional);
+        leaf_value.number = Some(2);
+        let bag = message(
+            "Bag",
+            vec![map_field("m", ".pkg.Bag.MEntry")],
+            vec![map_entry("MEntry", Type::String, leaf_value)],
+        );
+        let ints = message(
+            "Ints",
+            vec![map_field("s", ".pkg.Ints.SEntry")],
+            vec![map_entry(
+                "SEntry",
+                Type::Int32,
+                scalar("value", 2, Type::Int32),
+            )],
+        );
+        let file = FileDescriptorProto {
+            name: Some("test.proto".to_string()),
+            package: Some("pkg".to_string()),
+            syntax: Some("proto3".to_string()),
+            message_type: vec![
+                message("Leaf", vec![scalar("a", 1, Type::Int32)], vec![]),
+                bag,
+                ints,
+            ],
+            source_code_info: Some(SourceCodeInfo {
+                location: [
+                    vec![4, 0],
+                    vec![4, 0, 2, 0],
+                    vec![4, 1],
+                    vec![4, 1, 2, 0],
+                    vec![4, 2],
+                    vec![4, 2, 2, 0],
+                ]
+                .into_iter()
+                .map(|path| Location {
+                    path,
+                    ..Default::default()
+                })
+                .collect(),
+            }),
+            ..Default::default()
+        };
+        let mut code = String::new();
+        CodeGenerator::generate(
+            &mut Config::default(),
+            &ExternPaths::new(false),
+            &EnumValues::new(),
+            file,
+            &mut code,
+        );
+
+        assert!(code.contains("#[derive(Clone, PartialEq)]\npub struct Bag {"));
+        assert!(code.contains("#[derive(Clone, PartialEq, Debug)]\npub struct Ints {"));
+        assert_eq!(
+            code.matches("pub _cached_len: ::ntex_grpc::CachedLen,")
+                .count(),
+            1
+        );
+        assert!(code.contains("serialize_cached(&self.m, 1,"));
+        assert!(code.contains("serialize(&self.s, 1,"));
     }
 }

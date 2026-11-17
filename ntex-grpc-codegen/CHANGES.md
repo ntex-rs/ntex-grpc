@@ -1,5 +1,15 @@
 # Changes
 
+## [1.2.0] - 2026-11-17
+
+* Generated files assert `ntex_grpc::CODEGEN_VERSION` at compile time, a
+  file generated for another ntex-grpc version fails to build until it is
+  regenerated
+
+* Messages with message fields cache their encoded length in a hidden
+  `_cached_len` field, so nested lengths are computed once per encode.
+  Generated code requires ntex-grpc with `CODEGEN_VERSION` 1
+
 ## [1.1.0] - 2026-11-04
 
 * Fix enum `to_str_name()` values: the enum name prefix is stripped only at

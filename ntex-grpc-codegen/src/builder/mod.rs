@@ -19,6 +19,10 @@ use self::extern_paths::ExternPaths;
 use self::ident::to_snake;
 use self::path::PathMap;
 
+/// Version of the generated code, checked against `ntex_grpc::CODEGEN_VERSION`
+/// by every generated file. Bump both when generated code must be regenerated.
+pub(crate) const CODEGEN_VERSION: u32 = 1;
+
 /// A service generator takes a service descriptor and generates Rust code.
 ///
 /// Service generators are registered using `Config::service_generator`.
@@ -225,10 +229,12 @@ impl Config {
 
         for request in requests {
             if !modules.contains_key(&request.0) {
-                let mut buf = String::new();
-                buf.insert_str(
-                    0,
-                    "#![allow(dead_code, unused_mut, unused_variables, clippy::identity_op, clippy::too_many_lines, clippy::derivable_impls, clippy::unit_arg, clippy::derive_partial_eq_without_eq, clippy::manual_range_patterns, clippy::default_trait_access, clippy::semicolon_if_nothing_returned, clippy::doc_markdown, clippy::wildcard_imports)]\n//! DO NOT MODIFY. Auto-generated file\n\n",
+                let buf = format!(
+                    "#![allow(dead_code, unused_mut, unused_variables, clippy::identity_op, clippy::too_many_lines, clippy::derivable_impls, clippy::unit_arg, clippy::derive_partial_eq_without_eq, clippy::manual_range_patterns, clippy::default_trait_access, clippy::semicolon_if_nothing_returned, clippy::doc_markdown, clippy::wildcard_imports)]\n//! DO NOT MODIFY. Auto-generated file\n\n\
+                     const _: () = assert!(\n    \
+                         ::ntex_grpc::CODEGEN_VERSION == {CODEGEN_VERSION},\n    \
+                         \"generated code does not match the ntex-grpc version (expects CODEGEN_VERSION {CODEGEN_VERSION}), regenerate it with the matching ntex-grpc-codegen\"\n\
+                     );\n\n",
                 );
                 modules.insert(request.0.clone(), buf);
             }
@@ -325,7 +331,7 @@ mod tests {
         field_descriptor_proto::{Label, Type},
     };
 
-    use super::{Config, Module};
+    use super::{CODEGEN_VERSION, Config, Module};
 
     /// STATEMENT: Code generated with well-known types compiled locally refers
     /// to `ntex_grpc` items through `crate::`, other code through `::ntex_grpc::`.
@@ -379,6 +385,41 @@ mod tests {
         assert!(code.contains("impl crate::Message for StringValue {"));
         assert!(code.contains("pub value: crate::ByteString,"));
         assert!(!code.contains("ntex_grpc::"));
+    }
+
+    /// STATEMENT: Every generated file fails to compile unless the
+    /// `CODEGEN_VERSION` of the `ntex_grpc` it builds against matches the
+    /// version of the codegen.
+    ///
+    /// HOW:
+    /// - Generate an empty proto file with the default `Config` and with
+    ///   `compile_well_known_types()`.
+    /// - Check that each output has a `const` assertion comparing
+    ///   `::ntex_grpc::CODEGEN_VERSION`, or `crate::CODEGEN_VERSION` for
+    ///   well-known types, with the codegen's `CODEGEN_VERSION`.
+    #[test]
+    fn test_codegen_version_check() {
+        let file = FileDescriptorProto {
+            name: Some("test.proto".to_string()),
+            package: Some("pkg".to_string()),
+            syntax: Some("proto3".to_string()),
+            source_code_info: Some(SourceCodeInfo::default()),
+            ..Default::default()
+        };
+        let module = Module::from_protobuf_package_name(file.package());
+        let mut wkt = Config::default();
+        wkt.compile_well_known_types();
+
+        for (mut cfg, path) in [(Config::default(), "::ntex_grpc::"), (wkt, "crate::")] {
+            let code = cfg
+                .generate(vec![(module.clone(), file.clone())])
+                .remove(&module)
+                .unwrap();
+            let check = format!(
+                "const _: () = assert!(\n    {path}CODEGEN_VERSION == {CODEGEN_VERSION},\n"
+            );
+            assert!(code.contains(&check), "{code}");
+        }
     }
 
     #[test]

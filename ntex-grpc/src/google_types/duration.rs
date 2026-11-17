@@ -15,6 +15,11 @@
 )]
 //! DO NOT MODIFY. Auto-generated file
 
+const _: () = assert!(
+    crate::CODEGEN_VERSION == 1,
+    "generated code does not match the ntex-grpc version (expects CODEGEN_VERSION 1), regenerate it with the matching ntex-grpc-codegen"
+);
+
 ///  A Duration represents a signed, fixed-length span of time represented
 ///  as a count of seconds and fractions of seconds at nanosecond
 ///  resolution. It is independent of any calendar and concepts like "day"

@@ -62,7 +62,7 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             Kind::ServerStreaming => quote::quote_spanned! {span=>
                 ::ntex_grpc::server::__private::check_kind::<_, false, true>(&method);
                 let mut streams = ::ntex_grpc::server::__private::streams(&mut req)?;
-                let rx = ::ntex_grpc::server::__private::recv(&method, &mut streams);
+                let rx = ::ntex_grpc::server::__private::recv(&method, &mut req, &mut streams);
                 let tx = ::ntex_grpc::server::__private::send(&method, &mut streams);
                 let req = ::ntex_grpc::server::Request {
                     message: rx.single().await?,
@@ -79,7 +79,7 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 use ::ntex_grpc::MethodDef;
                 ::ntex_grpc::server::__private::check_kind::<_, true, false>(&method);
                 let mut streams = ::ntex_grpc::server::__private::streams(&mut req)?;
-                let rx = ::ntex_grpc::server::__private::recv(&method, &mut streams);
+                let rx = ::ntex_grpc::server::__private::recv(&method, &mut req, &mut streams);
                 let tx = ::ntex_grpc::server::__private::send(&method, &mut streams);
 
                 let result = #ty::#fn_name(self, rx).await;
@@ -93,7 +93,7 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             Kind::Bidi => quote::quote_spanned! {span=>
                 ::ntex_grpc::server::__private::check_kind::<_, true, true>(&method);
                 let mut streams = ::ntex_grpc::server::__private::streams(&mut req)?;
-                let rx = ::ntex_grpc::server::__private::recv(&method, &mut streams);
+                let rx = ::ntex_grpc::server::__private::recv(&method, &mut req, &mut streams);
                 let tx = ::ntex_grpc::server::__private::send(&method, &mut streams);
 
                 let result = #ty::#fn_name(self, rx, tx).await;

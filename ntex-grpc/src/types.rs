@@ -4,7 +4,8 @@
     clippy::cast_possible_wrap
 )]
 use std::hash::{BuildHasher, Hash};
-use std::{collections::HashMap, convert::TryFrom, fmt, mem, sync::Arc};
+use std::sync::{Arc, atomic::AtomicUsize, atomic::Ordering};
+use std::{collections::HashMap, convert::TryFrom, fmt, mem};
 
 use ntex_bytes::{Buf, BufMut, BytePages, ByteString, Bytes};
 use ntex_util::hash_map::HashMap as HashMapBase;
@@ -36,8 +37,76 @@ pub trait Message: Default + Sized + fmt::Debug {
 
     /// Returns the encoded length of the message, without a length delimiter.
     ///
-    /// This is the number of bytes [`write`](Self::write) produces.
+    /// This is the number of bytes [`write`](Self::write) produces. Generated
+    /// messages with message fields also cache the lengths of the message and
+    /// its nested messages for [`write_cached`](Self::write_cached).
     fn encoded_len(&self) -> usize;
+
+    #[inline]
+    /// Returns the length cached by the preceding [`encoded_len`](Self::encoded_len)
+    /// call on the unchanged message.
+    ///
+    /// The default implementation computes the length.
+    fn cached_len(&self) -> usize {
+        self.encoded_len()
+    }
+
+    #[inline]
+    /// Encodes and writes the message with the lengths cached by the preceding
+    /// [`encoded_len`](Self::encoded_len) call.
+    ///
+    /// The message must not change between the calls, otherwise the written
+    /// length prefixes of nested messages are wrong. The default implementation
+    /// calls [`write`](Self::write).
+    fn write_cached(&self, dst: &mut BytePages) {
+        self.write(dst);
+    }
+}
+
+/// Encoded length of a generated message, cached by [`Message::encoded_len`].
+///
+/// Generated messages with message fields keep it, so writing a message does
+/// not compute the lengths of its nested messages again. The cache is not
+/// part of the message value, clones start empty and comparisons ignore it.
+#[derive(Default)]
+pub struct CachedLen(AtomicUsize);
+
+impl CachedLen {
+    #[inline]
+    /// Returns the cached length
+    pub fn get(&self) -> usize {
+        // the message cannot change while it is shared, concurrent
+        // encoders store the same length
+        self.0.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    /// Stores the length
+    pub fn set(&self, len: usize) {
+        self.0.store(len, Ordering::Relaxed);
+    }
+}
+
+impl Clone for CachedLen {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PartialEq for CachedLen {
+    #[inline]
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for CachedLen {}
+
+impl fmt::Debug for CachedLen {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CachedLen")
+    }
 }
 
 /// How a field decides it holds its default value.
@@ -51,6 +120,18 @@ pub enum DefaultValue<T> {
     Default,
     /// Skip the field when it equals this value.
     Value(T),
+}
+
+impl<T: NativeType> DefaultValue<&T> {
+    /// Returns true if `value` holds the default and is left out
+    #[inline]
+    fn skips(self, value: &T) -> bool {
+        match self {
+            DefaultValue::Unknown => false,
+            DefaultValue::Default => value.is_default(),
+            DefaultValue::Value(d) => value == d,
+        }
+    }
 }
 
 /// Protobuf type serializer
@@ -94,13 +175,7 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
     #[inline]
     /// Serialize protobuf field
     fn serialize(&self, tag: u32, default: DefaultValue<&Self>, dst: &mut BytePages) {
-        let default = match default {
-            DefaultValue::Unknown => false,
-            DefaultValue::Default => self.is_default(),
-            DefaultValue::Value(d) => self == d,
-        };
-
-        if !default {
+        if !default.skips(self) {
             self.encode_type(tag, dst);
             self.encode_value(dst);
         }
@@ -109,13 +184,31 @@ pub trait NativeType: PartialEq + Default + Sized + fmt::Debug {
     #[inline]
     /// Protobuf field length
     fn serialized_len(&self, tag: u32, default: DefaultValue<&Self>) -> usize {
-        let default = match default {
-            DefaultValue::Unknown => false,
-            DefaultValue::Default => self.is_default(),
-            DefaultValue::Value(d) => self == d,
-        };
+        if default.skips(self) {
+            0
+        } else {
+            self.encoded_len(tag)
+        }
+    }
 
-        if default { 0 } else { self.encoded_len(tag) }
+    #[inline]
+    /// Serialize protobuf field with the message lengths cached by the
+    /// preceding [`serialized_len`](Self::serialized_len) call.
+    ///
+    /// Generated messages write message fields with it. The value must not
+    /// change between the calls. The default implementation calls
+    /// [`serialize`](Self::serialize).
+    fn serialize_cached(&self, tag: u32, default: DefaultValue<&Self>, dst: &mut BytePages) {
+        self.serialize(tag, default, dst);
+    }
+
+    #[inline]
+    /// Protobuf field length cached by the preceding
+    /// [`serialized_len`](Self::serialized_len) call.
+    ///
+    /// The default implementation computes the length.
+    fn cached_serialized_len(&self, tag: u32, default: DefaultValue<&Self>) -> usize {
+        self.serialized_len(tag, default)
     }
 
     #[inline]
@@ -190,6 +283,16 @@ impl<T: Message> Message for Box<T> {
     fn encoded_len(&self) -> usize {
         T::encoded_len(self)
     }
+
+    #[inline]
+    fn cached_len(&self) -> usize {
+        T::cached_len(self)
+    }
+
+    #[inline]
+    fn write_cached(&self, dst: &mut BytePages) {
+        T::write_cached(self, dst);
+    }
 }
 
 impl<T: Message + PartialEq> NativeType for T {
@@ -208,6 +311,25 @@ impl<T: Message + PartialEq> NativeType for T {
     /// Deserialize from the input
     fn merge(&mut self, src: &mut Bytes) -> Result<(), DecodeError> {
         encoding::merge_nested(|| Message::merge_from(self, src))
+    }
+
+    #[inline]
+    fn serialize_cached(&self, tag: u32, default: DefaultValue<&Self>, dst: &mut BytePages) {
+        if !default.skips(self) {
+            encoding::encode_key(tag, WireType::LengthDelimited, dst);
+            encoding::encode_varint(self.cached_len() as u64, dst);
+            self.write_cached(dst);
+        }
+    }
+
+    #[inline]
+    fn cached_serialized_len(&self, tag: u32, default: DefaultValue<&Self>) -> usize {
+        if default.skips(self) {
+            0
+        } else {
+            let len = self.cached_len();
+            encoding::key_len(tag) + encoding::encoded_len_varint(len as u64) + len
+        }
     }
 }
 
@@ -378,6 +500,13 @@ impl<T: NativeType> NativeType for Option<T> {
     }
 
     #[inline]
+    fn serialize_cached(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytePages) {
+        if let Some(value) = self {
+            value.serialize_cached(tag, DefaultValue::Unknown, dst);
+        }
+    }
+
+    #[inline]
     /// Protobuf field length
     fn serialized_len(&self, tag: u32, _: DefaultValue<&Self>) -> usize {
         if let Some(value) = self {
@@ -481,6 +610,16 @@ impl<T: NativeType> NativeType for Vec<T> {
         }
     }
 
+    fn serialize_cached(&self, tag: u32, default: DefaultValue<&Self>, dst: &mut BytePages) {
+        if T::TYPE == WireType::LengthDelimited {
+            for item in self {
+                item.serialize_cached(tag, DefaultValue::Unknown, dst);
+            }
+        } else {
+            self.serialize(tag, default, dst);
+        }
+    }
+
     #[inline]
     fn is_default(&self) -> bool {
         self.is_empty()
@@ -553,25 +692,11 @@ macro_rules! hashmap {
 
             /// Serialize protobuf field
             fn serialize(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytePages) {
-                let key_default = K::default();
-                let val_default = V::default();
+                serialize_map(self, tag, false, dst);
+            }
 
-                for item in self {
-                    let skip_key = item.0 == &key_default;
-                    let skip_val = item.1 == &val_default;
-
-                    let len = (if skip_key { 0 } else { item.0.encoded_len(1) })
-                        + (if skip_val { 0 } else { item.1.encoded_len(2) });
-
-                    encoding::encode_key(tag, WireType::LengthDelimited, dst);
-                    encoding::encode_varint(len as u64, dst);
-                    if !skip_key {
-                        item.0.serialize(1, DefaultValue::Default, dst);
-                    }
-                    if !skip_val {
-                        item.1.serialize(2, DefaultValue::Default, dst);
-                    }
-                }
+            fn serialize_cached(&self, tag: u32, _: DefaultValue<&Self>, dst: &mut BytePages) {
+                serialize_map(self, tag, true, dst);
             }
 
             /// Generic protobuf map encode function with an overridden value default.
@@ -601,6 +726,48 @@ macro_rules! hashmap {
 
 hashmap!(HashMap);
 hashmap!(HashMapBase);
+
+/// Writes the map entries, `cached` uses the value lengths cached by the
+/// preceding `serialized_len` call.
+fn serialize_map<'a, K, V>(
+    map: impl IntoIterator<Item = (&'a K, &'a V)>,
+    tag: u32,
+    cached: bool,
+    dst: &mut BytePages,
+) where
+    K: NativeType + 'a,
+    V: NativeType + 'a,
+{
+    let key_default = K::default();
+    let val_default = V::default();
+
+    for (key, val) in map {
+        let skip_key = key == &key_default;
+        let skip_val = val == &val_default;
+
+        let val_len = if skip_val {
+            0
+        } else if cached {
+            val.cached_serialized_len(2, DefaultValue::Unknown)
+        } else {
+            val.encoded_len(2)
+        };
+        let len = (if skip_key { 0 } else { key.encoded_len(1) }) + val_len;
+
+        encoding::encode_key(tag, WireType::LengthDelimited, dst);
+        encoding::encode_varint(len as u64, dst);
+        if !skip_key {
+            key.serialize(1, DefaultValue::Default, dst);
+        }
+        if !skip_val {
+            if cached {
+                val.serialize_cached(2, DefaultValue::Default, dst);
+            } else {
+                val.serialize(2, DefaultValue::Default, dst);
+            }
+        }
+    }
+}
 
 /// Macro which emits a module containing a set of encoding functions for a
 /// variable width numeric type.
@@ -1356,5 +1523,220 @@ mod tests {
         msg.write(&mut buf);
         assert_eq!(buf.len(), 6);
         assert_eq!(TestMessage::read(&mut buf.freeze()).unwrap(), msg);
+    }
+
+    /// Message with message fields, encoded without cached lengths
+    #[derive(Clone, PartialEq, Debug, Default)]
+    struct Plain {
+        name: String,
+        children: Vec<Plain>,
+        first: Option<Box<Plain>>,
+        props: HashMap<u32, Plain>,
+    }
+
+    impl Message for Plain {
+        fn read(src: &mut Bytes) -> Result<Self, DecodeError> {
+            let mut msg = Self::default();
+            while !src.is_empty() {
+                let (tag, wire_type) = encoding::decode_key(src)?;
+                match tag {
+                    1 => NativeType::deserialize(&mut msg.name, tag, wire_type, src)?,
+                    2 => NativeType::deserialize(&mut msg.children, tag, wire_type, src)?,
+                    3 => NativeType::deserialize(&mut msg.first, tag, wire_type, src)?,
+                    4 => NativeType::deserialize(&mut msg.props, tag, wire_type, src)?,
+                    _ => encoding::skip_field(wire_type, tag, src)?,
+                }
+            }
+            Ok(msg)
+        }
+
+        fn write(&self, dst: &mut BytePages) {
+            NativeType::serialize(&self.name, 1, DefaultValue::Default, dst);
+            NativeType::serialize(&self.children, 2, DefaultValue::Default, dst);
+            NativeType::serialize(&self.first, 3, DefaultValue::Default, dst);
+            NativeType::serialize(&self.props, 4, DefaultValue::Default, dst);
+        }
+
+        fn encoded_len(&self) -> usize {
+            NativeType::serialized_len(&self.name, 1, DefaultValue::Default)
+                + NativeType::serialized_len(&self.children, 2, DefaultValue::Default)
+                + NativeType::serialized_len(&self.first, 3, DefaultValue::Default)
+                + NativeType::serialized_len(&self.props, 4, DefaultValue::Default)
+        }
+    }
+
+    thread_local! {
+        static TREE_LEN_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// `Plain` with cached lengths, written like the generated code
+    #[derive(Clone, PartialEq, Debug, Default)]
+    struct Tree {
+        name: String,
+        children: Vec<Tree>,
+        first: Option<Box<Tree>>,
+        props: HashMap<u32, Tree>,
+        len: CachedLen,
+    }
+
+    impl From<&Plain> for Tree {
+        fn from(p: &Plain) -> Self {
+            Tree {
+                name: p.name.clone(),
+                children: p.children.iter().map(Tree::from).collect(),
+                first: p.first.as_deref().map(|f| Box::new(Tree::from(f))),
+                props: p.props.iter().map(|(k, v)| (*k, Tree::from(v))).collect(),
+                len: CachedLen::default(),
+            }
+        }
+    }
+
+    impl Message for Tree {
+        fn read(src: &mut Bytes) -> Result<Self, DecodeError> {
+            Plain::read(src).map(|p| Tree::from(&p))
+        }
+
+        fn write(&self, dst: &mut BytePages) {
+            Message::encoded_len(self);
+            self.write_cached(dst);
+        }
+
+        fn write_cached(&self, dst: &mut BytePages) {
+            NativeType::serialize(&self.name, 1, DefaultValue::Default, dst);
+            NativeType::serialize_cached(&self.children, 2, DefaultValue::Default, dst);
+            NativeType::serialize_cached(&self.first, 3, DefaultValue::Default, dst);
+            NativeType::serialize_cached(&self.props, 4, DefaultValue::Default, dst);
+        }
+
+        fn cached_len(&self) -> usize {
+            self.len.get()
+        }
+
+        fn encoded_len(&self) -> usize {
+            TREE_LEN_CALLS.with(|c| c.set(c.get() + 1));
+            let len = NativeType::serialized_len(&self.name, 1, DefaultValue::Default)
+                + NativeType::serialized_len(&self.children, 2, DefaultValue::Default)
+                + NativeType::serialized_len(&self.first, 3, DefaultValue::Default)
+                + NativeType::serialized_len(&self.props, 4, DefaultValue::Default);
+            self.len.set(len);
+            len
+        }
+    }
+
+    /// `Plain` tree `depth` levels deep, with lengths over one varint byte
+    fn plain_tree(depth: u32) -> Plain {
+        let mut p = Plain {
+            name: "n".repeat(depth as usize * 40),
+            ..Default::default()
+        };
+        if depth > 0 {
+            p.children = vec![plain_tree(depth - 1), Plain::default()];
+            p.first = Some(Box::new(plain_tree(depth - 1)));
+            p.props.insert(depth, plain_tree(depth - 1));
+        }
+        p
+    }
+
+    /// Messages written for `p`, maps leave out default values
+    fn tree_size(p: &Plain) -> usize {
+        1 + p.children.iter().map(tree_size).sum::<usize>()
+            + p.first.as_deref().map_or(0, tree_size)
+            + p.props
+                .values()
+                .filter(|v| **v != Plain::default())
+                .map(tree_size)
+                .sum::<usize>()
+    }
+
+    fn write_msg<M: Message>(msg: &M) -> Bytes {
+        let mut buf = BytePages::default();
+        msg.write(&mut buf);
+        buf.freeze()
+    }
+
+    /// STATEMENT: A message that writes its message fields with cached lengths
+    /// produces the uncached encoding and computes each nested length once.
+    ///
+    /// HOW:
+    /// - Build the same 4 levels deep tree as `Plain` and as cached `Tree`,
+    ///   with repeated, boxed optional and map message fields.
+    /// - Write both and compare the bytes, `encoded_len` and the decoded tree.
+    /// - Count `Tree::encoded_len` calls during the write, one per written
+    ///   message; default map values are left out and not measured.
+    /// - Write `Tree` again with `write_cached` after `encoded_len`.
+    #[test]
+    fn cached_lengths_write_uncached_bytes() {
+        let plain = plain_tree(4);
+        let tree = Tree::from(&plain);
+        let expected = write_msg(&plain);
+        assert!(expected.len() > 1000);
+
+        TREE_LEN_CALLS.with(|c| c.set(0));
+        let bytes = write_msg(&tree);
+        assert_eq!(TREE_LEN_CALLS.with(std::cell::Cell::get), tree_size(&plain));
+        assert_eq!(bytes, expected);
+        assert_eq!(Message::encoded_len(&tree), expected.len());
+        assert_eq!(tree.cached_len(), expected.len());
+        assert_eq!(Tree::read(&mut bytes.clone()).unwrap(), tree);
+
+        let mut buf = BytePages::default();
+        tree.write_cached(&mut buf);
+        assert_eq!(buf.freeze(), expected);
+    }
+
+    /// STATEMENT: Lengths cached by one write are not reused by the next write
+    /// of a changed message.
+    ///
+    /// HOW:
+    /// - Write a cached `Tree`, then grow and remove nested messages in it and
+    ///   in its `Plain` copy.
+    /// - Write the changed `Tree` and its clone, which starts with an empty
+    ///   cache, and compare both with the changed `Plain` encoding.
+    #[test]
+    fn write_refreshes_cached_lengths() {
+        let mut plain = plain_tree(3);
+        let mut tree = Tree::from(&plain);
+        write_msg(&tree);
+
+        let long = "x".repeat(200);
+        plain.first.as_mut().unwrap().children[0]
+            .name
+            .push_str(&long);
+        tree.first.as_mut().unwrap().children[0]
+            .name
+            .push_str(&long);
+        plain.props.get_mut(&3).unwrap().first = None;
+        tree.props.get_mut(&3).unwrap().first = None;
+
+        let expected = write_msg(&plain);
+        assert_eq!(write_msg(&tree), expected);
+        assert_eq!(write_msg(&tree.clone()), expected);
+    }
+
+    /// STATEMENT: A message written with `NativeType::serialize`, the path of
+    /// hand-written parents, is encoded correctly when it caches lengths.
+    ///
+    /// HOW:
+    /// - Serialize a cached `Tree` and its `Plain` copy as field 1, with and
+    ///   without a default.
+    /// - Compare the bytes and `serialized_len`, then decode the field back.
+    #[test]
+    fn cached_message_in_uncached_parent() {
+        let plain = plain_tree(3);
+        let tree = Tree::from(&plain);
+
+        let expected = encode(&plain, 1, DefaultValue::Default);
+        assert_eq!(encode(&tree, 1, DefaultValue::Default), expected);
+        assert_eq!(encode(&tree, 1, DefaultValue::Unknown), expected);
+        assert_eq!(
+            NativeType::serialized_len(&tree, 1, DefaultValue::Default),
+            expected.len()
+        );
+
+        let mut src = expected;
+        let (tag, wire_type) = encoding::decode_key(&mut src).unwrap();
+        let mut decoded = Tree::default();
+        decoded.deserialize(tag, wire_type, &mut src).unwrap();
+        assert_eq!(decoded, tree);
     }
 }

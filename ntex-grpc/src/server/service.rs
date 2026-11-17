@@ -285,12 +285,7 @@ struct PublishService {
 
 enum Inflight {
     /// A unary request, read before the service is called.
-    Unary {
-        /// The request path without the leading `/`, `service/method`.
-        path: ByteString,
-        data: Data,
-        headers: HeaderMap,
-    },
+    Unary(UnaryCall),
     /// A streaming request, the service reads it as it arrives.
     Stream(Rc<ServerRecv>),
 }
@@ -350,7 +345,7 @@ impl PublishService {
         // a message in an unknown encoding is unimplemented
         utils::read_message(
             flag,
-            headers.get(consts::GRPC_ENCODING).cloned(),
+            headers.get(consts::GRPC_ENCODING),
             data,
             self.max_size,
             GrpcStatus::Unimplemented,
@@ -409,7 +404,7 @@ impl Service<(), h2::Message> for PublishService {
                     return Ok(());
                 };
 
-                let (service, name) = split_path(path.clone());
+                let (service, name) = split_path(path);
                 if self.is_streaming(idx, &name) {
                     let call = StreamCall {
                         stream: &stream,
@@ -436,20 +431,22 @@ impl Service<(), h2::Message> for PublishService {
 
                 let _ = self.streams.borrow_mut().insert(
                     stream.id(),
-                    Inflight::Unary {
-                        headers,
+                    Inflight::Unary(UnaryCall {
+                        idx,
+                        service,
+                        name,
                         data: Data::Empty,
-                        path,
-                    },
+                        headers,
+                    }),
                 );
             }
             h2::MessageKind::Data(chunk, cap) => {
                 let mut streams = self.streams.borrow_mut();
                 match streams.get_mut(&id) {
                     Some(Inflight::Stream(recv)) => recv.push_data(chunk, cap),
-                    Some(Inflight::Unary { data, .. }) => {
-                        data.push(chunk, self.max_size);
-                        if let Err((status, msg)) = self.check_request(data.as_slice()) {
+                    Some(Inflight::Unary(call)) => {
+                        call.data.push(chunk, self.max_size);
+                        if let Err((status, msg)) = self.check_request(call.data.as_slice()) {
                             remove(&mut streams, &id);
                             drop(streams);
                             if stream
@@ -482,23 +479,19 @@ impl Service<(), h2::Message> for PublishService {
                         };
                         recv.push_end(end);
                     }
-                    Some(Inflight::Unary {
-                        path,
-                        mut data,
-                        mut headers,
-                    }) => {
+                    Some(Inflight::Unary(mut call)) => {
                         match eof {
                             h2::StreamEof::Data(chunk, _cap) => {
-                                data.push(chunk, self.max_size);
+                                call.data.push(chunk, self.max_size);
                             }
                             h2::StreamEof::Trailers(hdrs) => {
                                 for (name, val) in &hdrs {
-                                    headers.insert(name.clone(), val.clone());
+                                    call.headers.insert(name.clone(), val.clone());
                                 }
                             }
                             h2::StreamEof::Error(err) => return Err(err.into_error()),
                         }
-                        return self.call_unary(&stream, path, data, headers, ctx).await;
+                        return self.call_unary(&stream, call, ctx).await;
                     }
                     None => {}
                 }
@@ -511,6 +504,17 @@ impl Service<(), h2::Message> for PublishService {
         }
         Ok(())
     }
+}
+
+/// A unary call, the request is read before the service is called.
+struct UnaryCall {
+    /// The index of the service that serves the call, the service is
+    /// routed with the headers.
+    idx: usize,
+    service: ByteString,
+    name: ByteString,
+    data: Data,
+    headers: HeaderMap,
 }
 
 /// A streaming call, passed to the service once its headers arrive.
@@ -528,11 +532,16 @@ impl PublishService {
     async fn call_unary(
         &self,
         stream: &StreamRef,
-        path: ByteString,
-        mut data: Data,
-        headers: HeaderMap,
+        call: UnaryCall,
         ctx: Ctx<'_, Self, ()>,
     ) -> Result<(), h2::StreamError> {
+        let UnaryCall {
+            idx,
+            service,
+            name,
+            mut data,
+            headers,
+        } = call;
         let data = match self.read_request(&headers, data.get()).await {
             Ok(data) => data,
             Err((status, msg)) => {
@@ -546,18 +555,6 @@ impl PublishService {
             }
         };
 
-        let (service, name) = split_path(path);
-        // the service is known, it is checked with the headers
-        let Some(idx) = self.route(&service) else {
-            if stream
-                .send_response(StatusCode::OK, response_headers(None), false)
-                .is_ok()
-            {
-                let msg = encode_grpc_message(&format!("grpc: unknown service {service}"));
-                send_error(stream, GrpcStatus::Unimplemented, msg);
-            }
-            return Ok(());
-        };
         log::debug!("{}: Call service {service} method {name}", self.cfg.tag());
         let req = ServerRequest {
             payload: data,
@@ -665,9 +662,10 @@ impl PublishService {
             self.max_send_size,
             encoding,
         );
+        // the request headers stay in the request, `#[server]` moves them to
+        // the request stream for a handler that reads them from it
         let streams = CallStreams::new(
             recv.clone(),
-            headers.clone(),
             self.max_size,
             headers.get(consts::GRPC_ENCODING).cloned(),
             send.clone(),
@@ -1003,6 +1001,11 @@ mod tests {
         );
     }
 
+    /// STATEMENT: The state of an unfinished request, a slot of the streams
+    /// map, stays within 128 bytes.
+    ///
+    /// HOW:
+    /// - Check `size_of::<Inflight>()` against the limit.
     #[test]
     fn inflight_size() {
         // a slot of the streams map holds the state of a request
@@ -1013,7 +1016,7 @@ mod tests {
             size_of::<Data>(),
             size_of::<HeaderMap>()
         );
-        assert!(size_of::<Inflight>() <= 96, "{}", size_of::<Inflight>());
+        assert!(size_of::<Inflight>() <= 128, "{}", size_of::<Inflight>());
     }
 
     #[test]

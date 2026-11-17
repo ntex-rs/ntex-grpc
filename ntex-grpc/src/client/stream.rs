@@ -377,7 +377,7 @@ impl<'a, T, M: MethodDef> StreamRequest<'a, T, M, ServerStreaming<'a, M::Input>>
                 Error::from(err).with_service(service)
             })?;
             // Encoding can finish without yielding to the timeout.
-            if deadline.is_some_and(|d| Instant::now() >= d) {
+            if deadline.is_some_and(|d| time::now() >= d) {
                 return Err(deadline_exceeded());
             }
             if let Err(err) = tx.send_pages(buf, true).await {
@@ -394,11 +394,10 @@ impl<'a, T, M: MethodDef> StreamRequest<'a, T, M, ServerStreaming<'a, M::Input>>
             Ok(())
         };
         if let Some(deadline) = deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            if time::now() >= deadline {
                 return Err(deadline_exceeded());
             }
-            match time::timeout(remaining, send).await {
+            match tr::until_deadline(deadline, send).await {
                 Ok(res) => res?,
                 Err(()) => return Err(deadline_exceeded()),
             }

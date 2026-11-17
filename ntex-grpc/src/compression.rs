@@ -1,14 +1,17 @@
 use std::io::{self, Cursor, Read};
-use std::{cell::Cell, fmt, iter, mem::MaybeUninit, slice, thread::LocalKey};
+use std::task::{Context, Poll};
+use std::{cell::Cell, fmt, future, iter, mem::MaybeUninit, pin::Pin, slice, thread::LocalKey};
 
 use flate2::{Compress, Crc, FlushCompress, Status, bufread::GzDecoder};
 use ntex_bytes::{BufMut, BytePage, BytePages, Bytes, BytesMut};
 use ntex_http::{HeaderMap, HeaderValue};
+use ntex_rt::BlockingResult;
 use zstd::zstd_safe::zstd_sys::{
     ZSTD_BLOCKSIZE_MAX, ZSTD_EndDirective, ZSTD_ErrorCode, ZSTD_MAGICNUMBER, ZSTD_getErrorCode,
 };
 use zstd::zstd_safe::{CCtx, CParameter, DCtx, InBuffer, OutBuffer, ResetDirective, WriteBuf};
 
+use crate::utils::ReadMessage;
 use crate::{GrpcStatus, consts};
 
 /// Message compression.
@@ -167,23 +170,15 @@ impl Compression {
     /// Decompresses `data`, the result must not be larger than `max_size`.
     ///
     /// A large compressed message is decompressed on the thread pool, a
-    /// small one in place.
-    pub(crate) async fn decompress(
-        self,
-        data: Bytes,
-        max_size: usize,
-    ) -> Result<Bytes, (GrpcStatus, HeaderValue)> {
-        offload(data.len() >= self.decompress_limit(), move || {
-            self.decompress_sync(&data, max_size)
-        })
-        .await
-        .unwrap_or_else(|err| {
-            Err(error(
-                GrpcStatus::Internal,
-                "grpc: failed to decompress the message",
-                err,
-            ))
-        })
+    /// small one in place before this returns.
+    pub(crate) fn decompress(self, data: Bytes, max_size: usize) -> ReadMessage {
+        if data.len() >= self.decompress_limit() {
+            ReadMessage::Offloaded(Decompressing(spawn(move || {
+                self.decompress_sync(&data, max_size)
+            })))
+        } else {
+            ReadMessage::Ready(future::ready(self.decompress_sync(&data, max_size)))
+        }
     }
 
     /// The decompressed size stored in `data`, at most `limit`.
@@ -620,6 +615,25 @@ fn freeze(buf: BytesMut) -> Bytes {
     }
 }
 
+/// A message decompressed on the blocking thread pool.
+pub(crate) struct Decompressing(BlockingResult<Result<Bytes, (GrpcStatus, HeaderValue)>>);
+
+impl Future for Decompressing {
+    type Output = Result<Bytes, (GrpcStatus, HeaderValue)>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(cx).map(|res| {
+            res.unwrap_or_else(|err| {
+                Err(error(
+                    GrpcStatus::Internal,
+                    "grpc: failed to decompress the message",
+                    err,
+                ))
+            })
+        })
+    }
+}
+
 /// Runs `f` on the blocking thread pool if `blocking` is set, in place
 /// otherwise.
 async fn offload<F, R>(blocking: bool, f: F) -> Result<R, ntex_rt::BlockingError>
@@ -627,18 +641,22 @@ where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
-    if blocking {
-        #[cfg(test)]
-        OFFLOADED.set(OFFLOADED.get() + 1);
-        ntex_rt::spawn_blocking(move || {
-            let res = f();
-            drop_contexts();
-            res
-        })
-        .await
-    } else {
-        Ok(f())
-    }
+    if blocking { spawn(f).await } else { Ok(f()) }
+}
+
+/// Runs `f` on the blocking thread pool.
+fn spawn<F, R>(f: F) -> BlockingResult<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    #[cfg(test)]
+    OFFLOADED.set(OFFLOADED.get() + 1);
+    ntex_rt::spawn_blocking(move || {
+        let res = f();
+        drop_contexts();
+        res
+    })
 }
 
 #[cfg(test)]
@@ -931,7 +949,8 @@ mod tests {
                     assert!(offloaded(compress(enc, &data)).await.1);
                     assert_eq!(offload(true, || contexts(false)).await, Ok([false; 4]));
                     let large = frame(enc, &random(enc.decompress_limit()));
-                    let (res, used) = offloaded(enc.decompress(large, usize::MAX)).await;
+                    let (res, used) =
+                        offloaded(async { enc.decompress(large, usize::MAX).await }).await;
                     assert!(res.is_ok() && used, "{enc:?}");
                     assert_eq!(offload(true, || contexts(false)).await, Ok([false; 4]));
                 }
@@ -939,6 +958,9 @@ mod tests {
     }
 
     /// Returns the result of `f` and whether it used the thread pool.
+    ///
+    /// `f` must not start its work before it is polled, wrap calls to
+    /// [`Compression::decompress()`] in an `async` block.
     async fn offloaded<R>(f: impl Future<Output = R>) -> (R, bool) {
         let before = OFFLOADED.get();
         let res = f.await;
@@ -967,14 +989,14 @@ mod tests {
                 (limit + 1, limit, false),
             ] {
                 let data = compress(enc, &vec![b'a'; size]).await;
-                let (res, used) = offloaded(enc.decompress(data, max)).await;
+                let (res, used) = offloaded(async { enc.decompress(data, max).await }).await;
                 assert_eq!(res.is_ok(), size <= max, "{enc:?} {size}");
                 assert_eq!(used, blocking, "{enc:?} {size} {max}");
             }
 
             // the compressed message is large
             let data = Bytes::from(vec![1; limit]);
-            let (res, used) = offloaded(enc.decompress(data, usize::MAX)).await;
+            let (res, used) = offloaded(async { enc.decompress(data, usize::MAX).await }).await;
             assert!(res.is_err());
             assert!(used, "{enc:?}");
         }

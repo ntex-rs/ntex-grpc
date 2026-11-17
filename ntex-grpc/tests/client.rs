@@ -2617,8 +2617,27 @@ async fn custom_stream_transport_compression() {
     }
 }
 
+/// STATEMENT: A server-streaming request whose encoding finishes past the
+/// deadline fails with `DeadlineExceeded`, resets its stream, and leaves the
+/// connection usable.
+///
+/// HOW:
+/// - Open a call with a 50 ms timeout and a gzip-compressed message that
+///   blocks for 100 ms in `write`, then is compressed on the thread pool, so
+///   the deadline is checked after the encode yields to the runtime.
+/// - Confirm `open` fails with `DeadlineExceeded` and "Request timeout ran out".
+/// - Confirm a following call succeeds and the server saw one `CANCEL` reset,
+///   all within one second.
+#[cfg(feature = "compression")]
 #[ntex::test]
 async fn server_streaming_encoding_deadline() {
+    use ntex_grpc::Compression;
+
+    // `time::now()` does not advance within a runtime turn on neon and compio,
+    // the message is incompressible and large so gzip runs on the thread pool
+    // past the end of the turn
+    const LEN: usize = 1024 * 1024;
+
     #[derive(Debug, Default)]
     struct SlowMessage;
 
@@ -2627,12 +2646,19 @@ async fn server_streaming_encoding_deadline() {
             <() as ntex_grpc::Message>::read(src).map(|()| Self)
         }
 
-        fn write(&self, _: &mut ntex_bytes::BytePages) {
+        fn write(&self, dst: &mut ntex_bytes::BytePages) {
             std::thread::sleep(Duration::from_millis(100));
+            let mut x = 0x2545_f491_4f6c_dd1d_u64;
+            for _ in 0..LEN / 8 {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                dst.extend_from_slice(&x.to_ne_bytes());
+            }
         }
 
         fn encoded_len(&self) -> usize {
-            0
+            LEN
         }
     }
 
@@ -2649,6 +2675,7 @@ async fn server_streaming_encoding_deadline() {
     ntex::time::timeout(Duration::from_secs(1), async {
         let mut req = StreamRequest::<_, SlowUpload, _>::server_streaming(&client, &SlowMessage);
         req.timeout(Duration::from_millis(50));
+        req.compression(Compression::Gzip);
         let err = req.open().await.unwrap_err();
         assert!(matches!(*err, ClientError::DeadlineExceeded(_)), "{err:?}");
         assert_eq!(err.message(), "Request timeout ran out");

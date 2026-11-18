@@ -372,9 +372,7 @@ impl SendShared {
     async fn send<T: Message>(&self, msg: &T) -> Result<(), StreamError> {
         let _guard = SendWait::new(self).await?;
 
-        let mut buf = BytePages::default();
-        msg.write(&mut buf);
-        let buf = utils::frame_message(buf, self.max_size.get(), self.enc.get())
+        let buf = utils::encode_framed(msg, self.max_size.get(), self.enc.get())
             .await
             .map_err(|(st, msg)| StreamError::Status(st, msg))?;
         let len = buf.len();

@@ -1,4 +1,4 @@
-use std::{cell::RefCell, error::Error, hash::Hash, rc::Rc};
+use std::{cell::RefCell, convert::Infallible, error::Error, hash::Hash, rc::Rc};
 
 use ntex_bytes::{Buf, ByteString, Bytes};
 use ntex_h2::{self as h2, StreamRef, frame::Reason, frame::StreamId};
@@ -6,7 +6,7 @@ use ntex_http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header::
 use ntex_io::{Filter, Io, IoBoxed};
 use ntex_service::boxed::{self, BoxService, BoxServiceFactory};
 use ntex_service::{Ctx, Pipeline, Service, ServiceFactory, cfg::SharedCfg};
-use ntex_util::{HashMap, future::join_all, time::Millis, time::timeout_checked};
+use ntex_util::{HashMap, future::Either, future::join_all, time::Millis, time::timeout_checked};
 
 use crate::stream::{CallStreams, SendShared, ServerRecv, StreamError, send_response_headers};
 use crate::utils::{self, Data, Enc};
@@ -205,7 +205,7 @@ impl GrpcServer {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
 
-        let _ = h2::server::handle_one(
+        let _ = h2::server::handle_one2::<Infallible, _>(
             io,
             Pipeline::new(
                 (),
@@ -219,7 +219,7 @@ impl GrpcServer {
                     streams: RefCell::new(HashMap::default()),
                 },
             ),
-            Pipeline::new((), ControlService),
+            None,
         )
         .await;
 
@@ -250,22 +250,6 @@ impl Service<(), IoBoxed> for GrpcServer {
 
     async fn call(&self, io: IoBoxed, _: Ctx<'_, Self, ()>) -> Result<(), Self::Error> {
         self.run(io).await
-    }
-}
-
-struct ControlService;
-
-impl Service<(), h2::Control<h2::StreamError>> for ControlService {
-    type Res = h2::ControlAck;
-    type Error = Rc<dyn Error>;
-
-    async fn call(
-        &self,
-        msg: h2::Control<h2::StreamError>,
-        _: Ctx<'_, Self, ()>,
-    ) -> Result<Self::Res, Self::Error> {
-        log::trace!("Control message: {msg:?}");
-        Ok(msg.ack())
     }
 }
 
@@ -358,12 +342,37 @@ impl Service<(), h2::Message> for PublishService {
     type Res = ();
     type Error = h2::StreamError;
 
-    #[allow(clippy::too_many_lines)]
-    async fn call(
+    // Not an `async fn`, the pipeline boxes the future of every h2 message and
+    // an `async fn` would keep the moved message parts in its state. Only the
+    // end of a unary request and a streaming call return a pending future.
+    fn call(
         &self,
         msg: h2::Message,
         ctx: Ctx<'_, Self, ()>,
-    ) -> Result<Self::Res, Self::Error> {
+    ) -> impl Future<Output = Result<Self::Res, Self::Error>> {
+        match self.handle(msg) {
+            Next::Done(res) => Either::Left(std::future::ready(res)),
+            Next::Unary(stream, call) => {
+                Either::Right(Either::Left(self.call_unary(stream, call, ctx)))
+            }
+            Next::Stream(call) => Either::Right(Either::Right(self.call_stream(call, ctx))),
+        }
+    }
+}
+
+/// The rest of a message once it is handled in place.
+enum Next<'a> {
+    Done(Result<(), h2::StreamError>),
+    /// The unary request is complete, the service is called.
+    Unary(StreamRef, UnaryCall),
+    /// A streaming call starts.
+    Stream(StreamCall<'a>),
+}
+
+impl PublishService {
+    /// Handles a message in place, returns what is left to run for it.
+    #[allow(clippy::too_many_lines)]
+    fn handle(&self, msg: h2::Message) -> Next<'_> {
         let id = msg.id();
         let h2::Message { stream, kind } = msg;
 
@@ -380,12 +389,12 @@ impl Service<(), h2::Message> for PublishService {
                         GrpcStatus::InvalidArgument,
                     );
                     reject(&stream, code, st, msg, eof);
-                    return Ok(());
+                    return Next::Done(Ok(()));
                 }
                 if let Some(msg) = check_method(pseudo.method.as_ref()) {
                     let (code, st) = (StatusCode::METHOD_NOT_ALLOWED, GrpcStatus::Internal);
                     reject(&stream, code, st, msg, eof);
-                    return Ok(());
+                    return Next::Done(Ok(()));
                 }
 
                 let path = pseudo.path.unwrap().split_off(1);
@@ -394,28 +403,27 @@ impl Service<(), h2::Message> for PublishService {
                     let msg =
                         encode_grpc_message(&format!("grpc: malformed method name: /{path}"));
                     reject(&stream, StatusCode::OK, GrpcStatus::Unimplemented, msg, eof);
-                    return Ok(());
+                    return Next::Done(Ok(()));
                 };
                 // the request is not read for an unknown service
                 let Some(idx) = self.route(&path[..n]) else {
                     let msg =
                         encode_grpc_message(&format!("grpc: unknown service {}", &path[..n]));
                     reject(&stream, StatusCode::OK, GrpcStatus::Unimplemented, msg, eof);
-                    return Ok(());
+                    return Next::Done(Ok(()));
                 };
 
                 let (service, name) = split_path(path);
                 if self.is_streaming(idx, &name) {
                     let call = StreamCall {
-                        stream: &stream,
+                        stream,
                         svc: &self.services[idx],
                         service,
                         name,
                         headers,
                         eof,
                     };
-                    self.call_stream(call, ctx).await;
-                    return Ok(());
+                    return Next::Stream(call);
                 }
 
                 // stream eof, cannot do anything
@@ -426,7 +434,7 @@ impl Service<(), h2::Message> for PublishService {
                     {
                         send_error(&stream, GrpcStatus::InvalidArgument, ERR_NO_MESSAGE);
                     }
-                    return Ok(());
+                    return Next::Done(Ok(()));
                 }
 
                 let _ = self.streams.borrow_mut().insert(
@@ -489,9 +497,9 @@ impl Service<(), h2::Message> for PublishService {
                                     call.headers.insert(name.clone(), val.clone());
                                 }
                             }
-                            h2::StreamEof::Error(err) => return Err(err.into_error()),
+                            h2::StreamEof::Error(err) => return Next::Done(Err(err.into_error())),
                         }
-                        return self.call_unary(&stream, call, ctx).await;
+                        return Next::Unary(stream, call);
                     }
                     None => {}
                 }
@@ -502,7 +510,7 @@ impl Service<(), h2::Message> for PublishService {
                 }
             }
         }
-        Ok(())
+        Next::Done(Ok(()))
     }
 }
 
@@ -519,7 +527,7 @@ struct UnaryCall {
 
 /// A streaming call, passed to the service once its headers arrive.
 struct StreamCall<'a> {
-    stream: &'a StreamRef,
+    stream: StreamRef,
     svc: &'a BoxedService,
     service: ByteString,
     name: ByteString,
@@ -529,202 +537,227 @@ struct StreamCall<'a> {
 }
 
 impl PublishService {
-    async fn call_unary(
+    // Not an `async fn`, its arguments would be stored twice in the future.
+    // The fields of `call` are used in place, a local that is borrowed stays
+    // in the future state even after it is moved.
+    #[allow(clippy::manual_async_fn)]
+    fn call_unary(
         &self,
-        stream: &StreamRef,
-        call: UnaryCall,
+        stream: StreamRef,
+        mut call: UnaryCall,
         ctx: Ctx<'_, Self, ()>,
-    ) -> Result<(), h2::StreamError> {
-        let UnaryCall {
-            idx,
-            service,
-            name,
-            mut data,
-            headers,
-        } = call;
-        let data = match self.read_request(&headers, data.get()).await {
-            Ok(data) => data,
-            Err((status, msg)) => {
-                if stream
-                    .send_response(StatusCode::OK, response_headers(None), false)
-                    .is_ok()
-                {
-                    send_error(stream, status, msg);
+    ) -> impl Future<Output = Result<(), h2::StreamError>> {
+        async move {
+            let payload = match self.read_request(&call.headers, call.data.get()).await {
+                Ok(data) => data,
+                Err((status, msg)) => {
+                    if stream
+                        .send_response(StatusCode::OK, response_headers(None), false)
+                        .is_ok()
+                    {
+                        send_error(&stream, status, msg);
+                    }
+                    return Ok(());
                 }
+            };
+
+            log::debug!(
+                "{}: Call service {} method {}",
+                self.cfg.tag(),
+                call.service,
+                call.name
+            );
+            // the response is compressed like the request
+            let encoding = Enc::of_response(&call.headers);
+            if stream
+                .send_response(StatusCode::OK, response_headers(encoding), false)
+                .is_err()
+            {
                 return Ok(());
             }
-        };
 
-        log::debug!("{}: Call service {service} method {name}", self.cfg.tag());
-        let req = ServerRequest {
-            payload: data,
-            service,
-            name,
-            headers,
-            streams: None,
-        };
-        // the response is compressed like the request
-        let encoding = Enc::of_response(&req.headers);
-        if stream
-            .send_response(StatusCode::OK, response_headers(encoding), false)
-            .is_err()
-        {
-            return Ok(());
+            let to = match request_timeout(&call.headers) {
+                Ok(to) => to,
+                Err((status, msg)) => {
+                    send_error(&stream, status, msg);
+                    return Ok(());
+                }
+            };
+
+            let svc = &self.services[call.idx];
+            let req = ServerRequest {
+                payload,
+                service: call.service,
+                name: call.name,
+                headers: call.headers,
+                streams: None,
+            };
+            // the response is sent by a separate future, so its state does
+            // not take space while the service is called
+            let res = match timeout_checked(to, ctx.call(svc, req)).await {
+                Ok(Ok(res)) => res,
+                Ok(Err(err)) => {
+                    log::debug!(
+                        "{}: Failure during service call: {:?}",
+                        self.cfg.tag(),
+                        err.message
+                    );
+                    send_trailers(&stream, error_trailers(err));
+                    return Ok(());
+                }
+                Err(()) => {
+                    log::debug!(
+                        "{}: Deadline exceeded failure during service call",
+                        self.cfg.tag()
+                    );
+                    send_error(&stream, GrpcStatus::DeadlineExceeded, ERR_DEADLINE);
+                    return Ok(());
+                }
+            };
+            self.send_unary(stream, res, encoding).await;
+            Ok(())
         }
+    }
 
-        let to = match request_timeout(&req.headers) {
-            Ok(to) => to,
-            Err((status, msg)) => {
-                send_error(stream, status, msg);
-                return Ok(());
-            }
-        };
-
-        match timeout_checked(to, ctx.call(&self.services[idx], req)).await {
-            Ok(Ok(res)) => {
-                log::debug!("{}: Response is received {res:?}", self.cfg.tag());
-                if res.payload.is_empty() {
-                    // an empty message is never compressed
-                    let _ = stream
-                        .send_payload(Bytes::from_static(EMPTY_MESSAGE), false)
-                        .await;
-                } else {
-                    match utils::frame_message(res.payload, self.max_send_size, encoding).await {
-                        Ok(buf) => {
-                            let _ = stream.send_pages(buf, false).await;
-                        }
-                        Err((status, msg)) => {
-                            send_error(stream, status, msg);
-                            return Ok(());
-                        }
+    /// Sends the response message and the trailers of a unary call.
+    #[allow(clippy::manual_async_fn)]
+    fn send_unary(
+        &self,
+        stream: StreamRef,
+        res: ServerResponse,
+        encoding: Option<Enc>,
+    ) -> impl Future<Output = ()> {
+        async move {
+            log::debug!("{}: Response is received {res:?}", self.cfg.tag());
+            if res.payload.is_empty() {
+                // an empty message is never compressed
+                let _ = stream
+                    .send_payload(Bytes::from_static(EMPTY_MESSAGE), false)
+                    .await;
+            } else {
+                match utils::frame_message(res.payload, self.max_send_size, encoding).await {
+                    Ok(buf) => {
+                        let _ = stream.send_pages(buf, false).await;
+                    }
+                    Err((status, msg)) => {
+                        send_error(&stream, status, msg);
+                        return;
                     }
                 }
+            }
 
-                let mut trailers = h2::get_header_map();
-                trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
-                append_trailers(&mut trailers, res.headers);
-                send_trailers(stream, trailers);
-            }
-            Ok(Err(err)) => {
-                log::debug!(
-                    "{}: Failure during service call: {:?}",
-                    self.cfg.tag(),
-                    err.message
-                );
-                send_trailers(stream, error_trailers(err));
-            }
-            Err(()) => {
-                log::debug!(
-                    "{}: Deadline exceeded failure during service call",
-                    self.cfg.tag()
-                );
-                send_error(stream, GrpcStatus::DeadlineExceeded, ERR_DEADLINE);
-            }
+            let mut trailers = h2::get_header_map();
+            trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
+            append_trailers(&mut trailers, res.headers);
+            send_trailers(&stream, trailers);
         }
-        Ok(())
     }
 
     /// Calls the service with the streams of the call, the request messages
     /// are pushed to it as they arrive. The call ends when the service
     /// returns.
-    async fn call_stream(&self, call: StreamCall<'_>, ctx: Ctx<'_, Self, ()>) {
-        let StreamCall {
-            stream,
-            svc,
-            service,
-            name,
-            headers,
-            eof,
-        } = call;
-
-        let to = match request_timeout(&headers) {
-            Ok(to) => to,
-            Err((status, msg)) => {
-                reject(stream, StatusCode::OK, status, msg, eof);
-                return;
-            }
-        };
-
-        let recv = ServerRecv::new(eof);
-        if !eof {
-            let _ = self
-                .streams
-                .borrow_mut()
-                .insert(stream.id(), Inflight::Stream(recv.clone()));
-        }
-
-        // the response is compressed like the request, the headers are sent
-        // with the first message or when the call ends
-        let encoding = Enc::of_response(&headers);
-        let send = SendShared::server(
-            stream.clone(),
-            stream_response_headers(encoding),
-            self.max_send_size,
-            encoding,
-        );
-        // the request headers stay in the request, `#[server]` moves them to
-        // the request stream for a handler that reads them from it
-        let streams = CallStreams::new(
-            recv.clone(),
-            self.max_size,
-            headers.get(consts::GRPC_ENCODING).cloned(),
-            send.clone(),
-        );
-        log::debug!(
-            "{}: Call streaming service {service} method {name}",
-            self.cfg.tag()
-        );
-        let req = ServerRequest {
-            payload: Bytes::new(),
-            service,
-            name,
-            headers,
-            streams: Some(streams),
-        };
-        let result = timeout_checked(to, ctx.call(svc, req)).await;
-
-        if let Some((res_headers, extra)) = send.finish() {
-            let headers_sent = match res_headers {
-                Some(hdrs) => send_response_headers(stream, hdrs).is_ok(),
-                None => true,
+    // Not an `async fn`, its arguments would be stored twice in the future.
+    #[allow(clippy::manual_async_fn)]
+    fn call_stream(
+        &self,
+        call: StreamCall<'_>,
+        ctx: Ctx<'_, Self, ()>,
+    ) -> impl Future<Output = Result<(), h2::StreamError>> {
+        async move {
+            let stream = &call.stream;
+            let to = match request_timeout(&call.headers) {
+                Ok(to) => to,
+                Err((status, msg)) => {
+                    reject(stream, StatusCode::OK, status, msg, call.eof);
+                    return Ok(());
+                }
             };
-            if headers_sent {
-                let mut trailers = match result {
-                    Ok(Ok(res)) => {
-                        let mut trailers = h2::get_header_map();
-                        trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
-                        append_trailers(&mut trailers, res.headers);
-                        trailers
-                    }
-                    Ok(Err(err)) => {
-                        log::debug!(
-                            "{}: Failure during service call: {:?}",
-                            self.cfg.tag(),
-                            err.message
-                        );
-                        error_trailers(err)
-                    }
-                    Err(()) => {
-                        log::debug!(
-                            "{}: Deadline exceeded failure during service call",
-                            self.cfg.tag()
-                        );
-                        let mut trailers = h2::get_header_map();
-                        trailers.insert(consts::GRPC_STATUS, GrpcStatus::DeadlineExceeded.into());
-                        trailers.insert(consts::GRPC_MESSAGE, ERR_DEADLINE);
-                        trailers
-                    }
+
+            let recv = ServerRecv::new(call.eof);
+            if !call.eof {
+                let _ = self
+                    .streams
+                    .borrow_mut()
+                    .insert(stream.id(), Inflight::Stream(recv.clone()));
+            }
+
+            // the response is compressed like the request, the headers are sent
+            // with the first message or when the call ends
+            let encoding = Enc::of_response(&call.headers);
+            let send = SendShared::server(
+                stream.clone(),
+                stream_response_headers(encoding),
+                self.max_send_size,
+                encoding,
+            );
+            // the request headers stay in the request, `#[server]` moves them to
+            // the request stream for a handler that reads them from it
+            let streams = CallStreams::new(
+                recv.clone(),
+                self.max_size,
+                call.headers.get(consts::GRPC_ENCODING).cloned(),
+                send.clone(),
+            );
+            log::debug!(
+                "{}: Call streaming service {} method {}",
+                self.cfg.tag(),
+                call.service,
+                call.name
+            );
+            let req = ServerRequest {
+                payload: Bytes::new(),
+                service: call.service,
+                name: call.name,
+                headers: call.headers,
+                streams: Some(streams),
+            };
+            let result = timeout_checked(to, ctx.call(call.svc, req)).await;
+
+            if let Some((res_headers, extra)) = send.finish() {
+                let headers_sent = match res_headers {
+                    Some(hdrs) => send_response_headers(stream, hdrs).is_ok(),
+                    None => true,
                 };
-                let extra = extra.iter().map(|(n, v)| (n.clone(), v.clone()));
-                append_trailers(&mut trailers, extra);
-                send_trailers(stream, trailers);
-                // the call is over, the client stops sending the request
-                if !recv.is_ended() {
-                    stream.reset(Reason::NO_ERROR);
+                if headers_sent {
+                    let mut trailers = match result {
+                        Ok(Ok(res)) => {
+                            let mut trailers = h2::get_header_map();
+                            trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
+                            append_trailers(&mut trailers, res.headers);
+                            trailers
+                        }
+                        Ok(Err(err)) => {
+                            log::debug!(
+                                "{}: Failure during service call: {:?}",
+                                self.cfg.tag(),
+                                err.message
+                            );
+                            error_trailers(err)
+                        }
+                        Err(()) => {
+                            log::debug!(
+                                "{}: Deadline exceeded failure during service call",
+                                self.cfg.tag()
+                            );
+                            let mut trailers = h2::get_header_map();
+                            trailers
+                                .insert(consts::GRPC_STATUS, GrpcStatus::DeadlineExceeded.into());
+                            trailers.insert(consts::GRPC_MESSAGE, ERR_DEADLINE);
+                            trailers
+                        }
+                    };
+                    let extra = extra.iter().map(|(n, v)| (n.clone(), v.clone()));
+                    append_trailers(&mut trailers, extra);
+                    send_trailers(stream, trailers);
+                    // the call is over, the client stops sending the request
+                    if !recv.is_ended() {
+                        stream.reset(Reason::NO_ERROR);
+                    }
                 }
             }
+            remove(&mut self.streams.borrow_mut(), &stream.id());
+            Ok(())
         }
-        remove(&mut self.streams.borrow_mut(), &stream.id());
     }
 }
 

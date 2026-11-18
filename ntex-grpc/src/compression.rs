@@ -315,9 +315,9 @@ fn with_context<T, R>(
     res
 }
 
-/// Compresses `pages` into the gzip member `flate2::write::GzEncoder`
-/// writes, returns `None` once it is as large as the `len` bytes of the
-/// input.
+/// Compresses `pages` into a gzip member with the header
+/// `flate2::write::GzEncoder` writes, returns `None` once it is as large as
+/// the `len` bytes of the input.
 fn gzip_compress(
     ctx: &mut Compress,
     pages: &[BytePage],
@@ -1257,7 +1257,19 @@ mod tests {
 
     #[test]
     fn same_output() {
-        // as the encoders of flate2 and zstd write it
+        // zlib-rs output depends on how the input is split, the member must
+        // decode and be about as small as flate2 writes it
+        let gzip = |data: &[u8], out: &Bytes| {
+            let expected = frame(Compression::Gzip, data);
+            assert_eq!(out[..GZIP_HEADER.len()], expected[..GZIP_HEADER.len()]);
+            assert!(out.len() <= expected.len() + expected.len() / 100);
+            let mut decoded = Vec::new();
+            flate2::read::GzDecoder::new(&out[..])
+                .read_to_end(&mut decoded)
+                .unwrap();
+            assert_eq!(decoded, data);
+        };
+        // as the encoder of zstd writes it
         let zstd = |data: &[u8]| {
             let mut enc = zstd::Encoder::new(Vec::new(), 0).unwrap();
             enc.set_pledged_src_size(Some(data.len() as u64)).unwrap();
@@ -1272,8 +1284,7 @@ mod tests {
             data.extend_from_slice(&text(len));
             for size in [1, 100, 4096, usize::MAX] {
                 let data = &data[..data.len().min(size.saturating_mul(1000))];
-                let out = compress_in(Compression::Gzip, data, size).unwrap();
-                assert_eq!(out, frame(Compression::Gzip, data), "{len} {size}");
+                gzip(data, &compress_in(Compression::Gzip, data, size).unwrap());
                 let out = compress_in(Compression::Zstd, data, size).unwrap();
                 assert_eq!(out, zstd(data), "{len} {size}");
             }

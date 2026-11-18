@@ -3,13 +3,17 @@ use std::{borrow::Cow, fmt::Write, future, mem, pin::Pin};
 
 use base64::engine::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
-use ntex_bytes::{BytePages, Bytes, BytesMut};
+use ntex_bytes::{BufMut, BytePages, Bytes, BytesMut};
 #[cfg(not(feature = "compression"))]
 use ntex_http::HeaderMap;
 use ntex_http::HeaderValue;
 use urly::quoting::{Component, unquote};
 
-use crate::GrpcStatus;
+use crate::{GrpcStatus, Message};
+
+/// An uncompressed message smaller than this is copied behind its prefix,
+/// so the prefix does not take a write buffer of its own.
+const COPY_LIMIT: usize = 4096;
 
 /// Message compression, an uninhabited type without the `compression`
 /// feature so callers do not need their own `cfg`s.
@@ -141,11 +145,48 @@ pub(crate) fn send_size(len: usize, max_size: usize) -> Result<u32, HeaderValue>
         .unwrap_or_else(|_| HeaderValue::from_static("grpc: message too large")))
 }
 
+/// Writes the message prefix, the compressed flag and the length.
+fn put_prefix(buf: &mut BytePages, compressed: bool, len: u32) {
+    buf.put_u8(u8::from(compressed));
+    buf.put_u32(len);
+}
+
+/// Encodes a message with its prefix, compressed if `enc` is set.
+///
+/// A message that is not compressed is written into the page of its prefix.
+#[cfg_attr(not(feature = "compression"), allow(clippy::unused_async))]
+pub(crate) async fn encode_framed<T: Message>(
+    msg: &T,
+    max_size: usize,
+    enc: Option<Enc>,
+) -> Result<BytePages, (GrpcStatus, HeaderValue)> {
+    // fills the cached lengths of nested messages for `write_cached`
+    let len = msg.encoded_len();
+    let mut buf = BytePages::default();
+
+    #[cfg(feature = "compression")]
+    if len >= crate::compression::MIN_SIZE
+        && let Some(enc) = enc
+    {
+        msg.write_cached(&mut buf);
+        return frame_message(buf, max_size, Some(enc)).await;
+    }
+    #[cfg(not(feature = "compression"))]
+    let _ = enc;
+
+    let len = send_size(len, max_size).map_err(|m| (GrpcStatus::ResourceExhausted, m))?;
+    put_prefix(&mut buf, false, len);
+    msg.write_cached(&mut buf);
+    Ok(buf)
+}
+
 /// Compresses an encoded message if `enc` is set and puts the message prefix
 /// in front of it.
 ///
 /// A small message, or one that does not get smaller, is sent uncompressed.
-/// The message must not be larger than `max_size` after compression.
+/// The message must not be larger than `max_size` after compression. An
+/// uncompressed message smaller than 4 KiB is copied into the page of its
+/// prefix.
 pub(crate) async fn frame_message(
     mut msg: BytePages,
     max_size: usize,
@@ -160,6 +201,14 @@ pub(crate) async fn frame_message(
         None => false,
     };
     let len = send_size(msg.len(), max_size).map_err(|m| (GrpcStatus::ResourceExhausted, m))?;
+    if !compressed && msg.len() < COPY_LIMIT {
+        let mut buf = BytePages::default();
+        put_prefix(&mut buf, false, len);
+        for chunk in msg.iter() {
+            buf.extend_from_slice(chunk);
+        }
+        return Ok(buf);
+    }
     prepend_prefix(&mut msg, compressed, len);
     Ok(msg)
 }
@@ -375,6 +424,65 @@ mod tests {
         assert_eq!(body.as_ref().as_ptr(), ptr);
         assert_eq!(body.as_ref(), &[7; 100]);
         assert!(msg.take().is_none());
+    }
+
+    /// STATEMENT: An uncompressed message under 4 KiB is framed in the page of
+    /// its prefix, a bigger one is not copied.
+    ///
+    /// HOW:
+    /// - Frame a 100 byte message without compression and check that a
+    ///   single page holds the prefix and the message.
+    /// - Frame a 4 KiB message and check that the prefix is a page of its own
+    ///   and the message page has the same address.
+    #[ntex::test]
+    async fn frame_small_message_in_prefix_page() {
+        let mut msg = BytePages::default();
+        msg.extend_from_slice(&[7; 100]);
+        let mut buf = frame_message(msg, usize::MAX, None).await.unwrap();
+        assert_eq!(buf.num_pages(), 1);
+        let page = buf.take().unwrap();
+        assert_eq!(&page.as_ref()[..5], &[0, 0, 0, 0, 100]);
+        assert_eq!(&page.as_ref()[5..], &[7; 100]);
+
+        let mut msg = BytePages::default();
+        msg.append(Bytes::from(vec![7; COPY_LIMIT]));
+        let ptr = msg.iter().next().unwrap().as_ptr();
+        let mut buf = frame_message(msg, usize::MAX, None).await.unwrap();
+        assert_eq!(buf.take().unwrap().as_ref(), &[0, 0, 0, 0x10, 0]);
+        let body = buf.take().unwrap();
+        assert_eq!(body.as_ref().as_ptr(), ptr);
+        assert_eq!(body.len(), COPY_LIMIT);
+        assert!(buf.take().is_none());
+    }
+
+    /// STATEMENT: `encode_framed` writes an uncompressed message into the page
+    /// of its prefix and rejects a message over the size limit.
+    ///
+    /// HOW:
+    /// - Encode a `StringValue` and check that a single page holds the prefix
+    ///   with the encoded length followed by the `write` output.
+    /// - Encode it with a limit one byte smaller than the message and check
+    ///   for `ResourceExhausted`.
+    #[ntex::test]
+    async fn encode_framed_in_prefix_page() {
+        let msg = crate::google_types::StringValue {
+            value: "hello".into(),
+        };
+        let mut expected = BytePages::default();
+        msg.write(&mut expected);
+        let expected = expected.take().unwrap();
+        let len = u8::try_from(expected.len()).unwrap();
+
+        let mut buf = encode_framed(&msg, usize::MAX, None).await.unwrap();
+        assert_eq!(buf.num_pages(), 1);
+        let page = buf.take().unwrap();
+        assert_eq!(&page.as_ref()[..5], &[0, 0, 0, 0, len]);
+        assert_eq!(&page.as_ref()[5..], expected.as_ref());
+
+        let err = encode_framed(&msg, usize::from(len) - 1, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, GrpcStatus::ResourceExhausted);
     }
 
     fn push(data: &mut Data, chunk: &[u8]) {

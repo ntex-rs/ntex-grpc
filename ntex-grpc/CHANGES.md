@@ -21,6 +21,13 @@
   which is faster than miniz_oxide. Compressed messages can differ from the
   bytes earlier versions sent. Requires flate2 1.1.10
 
+* The server sends the response headers of a unary call together with its
+  message, after the service returns, so headers, message and trailers go
+  out in one write. A unary call that fails before its message is sent gets
+  a trailers-only response, `content-type` and `grpc-accept-encoding` are
+  sent with the status. A rejected request is reset with `INTERNAL_ERROR` if
+  its trailers-only response cannot be sent
+
 ## [4.1.1] - 2026-11-12
 
 * Recycle request header maps when a handler takes only the message, so

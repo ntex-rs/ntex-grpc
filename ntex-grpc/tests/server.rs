@@ -187,7 +187,8 @@ async fn call(
     call_to(client, "/test.Svc/Call", req_headers(encoding), body).await
 }
 
-/// Like [`call`], with the method path and the request headers.
+/// Like [`call`], with the method path and the request headers. A
+/// trailers-only response is returned as both the headers and the trailers.
 async fn call_to(
     client: &SimpleClient,
     path: &'static str,
@@ -207,6 +208,11 @@ async fn call_to(
     loop {
         let msg = rcv.recv().await.unwrap();
         match msg.kind {
+            h2::MessageKind::Headers {
+                headers: h,
+                eof: true,
+                ..
+            } => return (h.clone(), data, h),
             h2::MessageKind::Headers { headers: h, .. } => headers = h,
             h2::MessageKind::Data(chunk, cap) => {
                 data.extend_from_slice(&chunk);
@@ -291,19 +297,20 @@ async fn short_request() {
         .send(Method::POST, "/test.Svc/Call".into(), hdrs, true)
         .await
         .unwrap();
-    loop {
-        match rcv.recv().await.unwrap().kind {
-            h2::MessageKind::Headers { .. } => {}
-            h2::MessageKind::Eof(h2::StreamEof::Trailers(trailers)) => {
-                assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "3");
-                assert_eq!(
-                    trailers.get(GRPC_MESSAGE).unwrap(),
-                    "grpc: request without a message"
-                );
-                break;
-            }
-            kind => panic!("{kind:?}"),
+    // a trailers-only response
+    match rcv.recv().await.unwrap().kind {
+        h2::MessageKind::Headers {
+            headers: trailers,
+            eof: true,
+            ..
+        } => {
+            assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "3");
+            assert_eq!(
+                trailers.get(GRPC_MESSAGE).unwrap(),
+                "grpc: request without a message"
+            );
         }
+        kind => panic!("{kind:?}"),
     }
 
     // the connection still works
@@ -496,12 +503,12 @@ async fn call_open(client: &SimpleClient, parts: &[&[u8]]) -> (String, String, b
             .await
             .unwrap();
     }
-    let trailers = loop {
-        match rcv.recv().await.unwrap().kind {
-            h2::MessageKind::Headers { .. } => {}
-            h2::MessageKind::Eof(h2::StreamEof::Trailers(trailers)) => break trailers,
-            kind => panic!("{kind:?}"),
-        }
+    // a trailers-only response
+    let trailers = match rcv.recv().await.unwrap().kind {
+        h2::MessageKind::Headers {
+            headers, eof: true, ..
+        } => headers,
+        kind => panic!("{kind:?}"),
     };
     ntex::time::sleep(ntex::time::Millis(50)).await;
     let reset = snd
@@ -561,24 +568,139 @@ async fn early_reject() {
     assert_eq!(data, message(0, &[1; 100]));
 }
 
+/// STATEMENT: A unary service error is sent as a trailers-only response that
+/// keeps the headers of the error.
+///
+/// HOW:
+/// - Call `Fail`, which fails with `NotFound`, "nothing here" and an `x-test`
+///   header.
+/// - Check the first response frame is HEADERS with `END_STREAM`, status 200,
+///   `content-type: application/grpc`, `grpc-status: 5`, the message and
+///   `x-test: error`.
+/// - Call `Call` and check it succeeds on the same connection.
 #[ntex::test]
 async fn service_error() {
     let client = client();
-    let (_, data, trailers) = call_to(
-        &client,
-        "/test.Svc/Fail",
-        req_headers(None),
-        message(0, b"x"),
-    )
-    .await;
-    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "5");
-    assert_eq!(trailers.get(GRPC_MESSAGE).unwrap(), "nothing here");
-    // the headers of the error are kept
-    assert_eq!(trailers.get(X_TEST).unwrap(), "error");
-    assert!(data.is_empty());
+    let (snd, rcv) = client
+        .send(
+            Method::POST,
+            "/test.Svc/Fail".into(),
+            req_headers(None),
+            false,
+        )
+        .await
+        .unwrap();
+    snd.send_payload(Bytes::from(message(0, b"x")), true)
+        .await
+        .unwrap();
+    match rcv.recv().await.unwrap().kind {
+        h2::MessageKind::Headers {
+            pseudo,
+            headers,
+            eof,
+        } => {
+            assert!(eof);
+            assert_eq!(pseudo.status, Some(ntex_http::StatusCode::OK));
+            assert_eq!(
+                headers.get(ntex_http::header::CONTENT_TYPE).unwrap(),
+                "application/grpc"
+            );
+            assert_eq!(headers.get(GRPC_STATUS).unwrap(), "5");
+            assert_eq!(headers.get(GRPC_MESSAGE).unwrap(), "nothing here");
+            // the headers of the error are kept
+            assert_eq!(headers.get(X_TEST).unwrap(), "error");
+        }
+        kind => panic!("{kind:?}"),
+    }
 
     // the connection still works
     let (_, _, trailers) = call(&client, None, message(0, b"x")).await;
+    assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
+}
+
+/// STATEMENT: The headers of a unary response are sent with its message,
+/// after the service returns.
+///
+/// HOW:
+/// - Serve `test.Gate` with a handler that waits on a oneshot before echoing
+///   the request.
+/// - Send a request and check nothing arrives within 100 ms while the handler
+///   waits.
+/// - Release the handler and check the response is HEADERS without
+///   `END_STREAM` and without `grpc-status`, then the echoed message, then
+///   trailers with `grpc-status: 0`.
+#[ntex::test]
+async fn unary_headers_sent_with_message() {
+    use ntex::channel::oneshot;
+    use std::{cell::RefCell, rc::Rc, time::Duration};
+
+    let (release, gate) = oneshot::channel::<()>();
+    let gate = Rc::new(RefCell::new(Some(gate)));
+    let factory = fn_factory(async move |&()| {
+        let gate = gate.clone();
+        Ok::<_, std::io::Error>(fn_service(move |req: ServerRequest| {
+            let gate = gate.borrow_mut().take();
+            async move {
+                if let Some(gate) = gate {
+                    let _ = gate.await;
+                }
+                handle(req).await
+            }
+        }))
+    });
+    let client = connect(
+        GrpcServer::new(Svc).service_named("test.Gate", factory),
+        false,
+    );
+
+    let (snd, rcv) = client
+        .send(
+            Method::POST,
+            "/test.Gate/Call".into(),
+            req_headers(None),
+            false,
+        )
+        .await
+        .unwrap();
+    snd.send_payload(Bytes::from(message(0, b"x")), true)
+        .await
+        .unwrap();
+    // the service waits, nothing is sent yet
+    assert!(
+        ntex::time::timeout(Duration::from_millis(100), rcv.recv())
+            .await
+            .is_err()
+    );
+
+    release.send(()).unwrap();
+    match rcv.recv().await.unwrap().kind {
+        h2::MessageKind::Headers {
+            pseudo,
+            headers,
+            eof,
+        } => {
+            assert!(!eof);
+            assert_eq!(pseudo.status, Some(ntex_http::StatusCode::OK));
+            assert_eq!(
+                headers.get(ntex_http::header::CONTENT_TYPE).unwrap(),
+                "application/grpc"
+            );
+            assert!(headers.get(GRPC_STATUS).is_none());
+        }
+        kind => panic!("{kind:?}"),
+    }
+    let mut data = Vec::new();
+    let trailers = loop {
+        match rcv.recv().await.unwrap().kind {
+            h2::MessageKind::Data(chunk, cap) => {
+                data.extend_from_slice(&chunk);
+                cap.consume(chunk.len() as u32);
+            }
+            h2::MessageKind::Eof(h2::StreamEof::Trailers(trailers)) => break trailers,
+            kind => panic!("{kind:?}"),
+        }
+    };
+    assert_eq!(data, message(0, b"x"));
     assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
 }
 
@@ -666,12 +788,24 @@ async fn grpc_timeout() {
     assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0");
 }
 
+/// STATEMENT: A unary call whose deadline passes gets a trailers-only
+/// `DeadlineExceeded` response and the connection stays usable.
+///
+/// HOW:
+/// - Call `Slow`, which sleeps 5 s, with `grpc-timeout: 50m`.
+/// - Check the response headers carry `grpc-status: 4`, so no headers were
+///   sent before the deadline, the message is "Deadline exceeded" and no
+///   response message is sent.
+/// - Call `Call` and check it succeeds on the same connection.
 #[ntex::test]
 async fn deadline_exceeded() {
     let client = client();
     let mut hdrs = req_headers(None);
     hdrs.insert(GRPC_TIMEOUT, HeaderValue::from_static("50m"));
-    let (_, data, trailers) = call_to(&client, "/test.Svc/Slow", hdrs, message(0, b"x")).await;
+    let (headers, data, trailers) =
+        call_to(&client, "/test.Svc/Slow", hdrs, message(0, b"x")).await;
+    // a trailers-only response
+    assert_eq!(headers.get(GRPC_STATUS).unwrap(), "4");
     assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "4");
     assert_eq!(trailers.get(GRPC_MESSAGE).unwrap(), "Deadline exceeded");
     assert!(data.is_empty());

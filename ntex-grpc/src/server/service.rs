@@ -817,7 +817,13 @@ where
 }
 
 fn error_trailers(err: ServerError) -> HeaderMap {
-    let mut trailers = err.headers;
+    // the map of an error without extra trailers is empty, a pooled one goes
+    // back to the pool once the trailers are sent
+    let mut trailers = if err.headers.is_empty() {
+        h2::get_header_map()
+    } else {
+        err.headers
+    };
     trailers.insert(consts::GRPC_STATUS, err.status.into());
     trailers.insert(consts::GRPC_MESSAGE, err.message);
     trailers
@@ -990,6 +996,42 @@ mod tests {
             assert!(!Rc::ptr_eq(&gzip, &plain));
             assert_eq!(gzip.get(consts::GRPC_ENCODING).unwrap(), "gzip");
         }
+    }
+
+    /// STATEMENT: The trailers of an error without extra trailers use a pooled
+    /// header map, the extra trailers of an error are kept.
+    ///
+    /// HOW:
+    /// - Build the trailers of an error without headers and check that they
+    ///   hold `grpc-status` and `grpc-message` and their capacity is at least
+    ///   8, the smallest map `release_header_map` returns to the pool.
+    /// - Build the trailers of an error with an `x-a` header and check that
+    ///   it is kept next to `grpc-status` and `grpc-message`.
+    #[test]
+    fn error_trailers_map() {
+        let trailers = error_trailers(ServerError::new(
+            GrpcStatus::NotFound,
+            HeaderValue::from_static("nope"),
+            None,
+        ));
+        assert_eq!(trailers.get(consts::GRPC_STATUS).unwrap(), "5");
+        assert_eq!(trailers.get(consts::GRPC_MESSAGE).unwrap(), "nope");
+        assert!(trailers.capacity() >= 8);
+
+        let mut hdrs = HeaderMap::new();
+        hdrs.insert(
+            HeaderName::from_static("x-a"),
+            HeaderValue::from_static("1"),
+        );
+        let trailers = error_trailers(ServerError::new(
+            GrpcStatus::NotFound,
+            HeaderValue::from_static("nope"),
+            Some(hdrs),
+        ));
+        assert_eq!(trailers.len(), 3);
+        assert_eq!(trailers.get("x-a").unwrap(), "1");
+        assert_eq!(trailers.get(consts::GRPC_STATUS).unwrap(), "5");
+        assert_eq!(trailers.get(consts::GRPC_MESSAGE).unwrap(), "nope");
     }
 
     #[test]

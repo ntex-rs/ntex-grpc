@@ -39,6 +39,10 @@
 * The trailers of a server error without extra trailers use a header map
   from the `ntex-h2` pool, which takes it back once they are sent
 
+* The trailers of a successful call without extra trailers are shared per
+  thread, sending them does not build a map. Requires ntex-h2 with
+  `StreamRef::send_trailers()` that accepts `&HeaderMap`
+
 ## [4.1.1] - 2026-11-12
 
 * Recycle request header maps when a handler takes only the message, so

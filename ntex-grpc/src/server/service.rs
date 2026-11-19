@@ -646,10 +646,11 @@ impl PublishService {
                 }
             };
 
-            let mut trailers = h2::get_header_map();
-            trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
-            append_trailers(&mut trailers, res.headers);
-            send_trailers(&stream, trailers);
+            if res.headers.is_empty() {
+                send_ok_trailers(&stream);
+            } else {
+                send_trailers(&stream, ok_trailers(res.headers));
+            }
         }
     }
 
@@ -719,20 +720,17 @@ impl PublishService {
                     None => true,
                 };
                 if headers_sent {
-                    let mut trailers = match result {
-                        Ok(Ok(res)) => {
-                            let mut trailers = h2::get_header_map();
-                            trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
-                            append_trailers(&mut trailers, res.headers);
-                            trailers
-                        }
+                    // `None` for a successful call without extra trailers
+                    let trailers = match result {
+                        Ok(Ok(res)) if res.headers.is_empty() && extra.is_empty() => None,
+                        Ok(Ok(res)) => Some(ok_trailers(res.headers)),
                         Ok(Err(err)) => {
                             log::debug!(
                                 "{}: Failure during service call: {:?}",
                                 self.cfg.tag(),
                                 err.message
                             );
-                            error_trailers(err)
+                            Some(error_trailers(err))
                         }
                         Err(()) => {
                             log::debug!(
@@ -743,12 +741,16 @@ impl PublishService {
                             trailers
                                 .insert(consts::GRPC_STATUS, GrpcStatus::DeadlineExceeded.into());
                             trailers.insert(consts::GRPC_MESSAGE, ERR_DEADLINE);
-                            trailers
+                            Some(trailers)
                         }
                     };
-                    let extra = extra.iter().map(|(n, v)| (n.clone(), v.clone()));
-                    append_trailers(&mut trailers, extra);
-                    send_trailers(stream, trailers);
+                    if let Some(mut trailers) = trailers {
+                        let extra = extra.iter().map(|(n, v)| (n.clone(), v.clone()));
+                        append_trailers(&mut trailers, extra);
+                        send_trailers(stream, trailers);
+                    } else {
+                        send_ok_trailers(stream);
+                    }
                     // the call is over, the client stops sending the request
                     if !recv.is_ended() {
                         stream.reset(Reason::NO_ERROR);
@@ -801,6 +803,17 @@ fn request_timeout(headers: &HeaderMap) -> Result<Millis, (GrpcStatus, HeaderVal
     } else {
         Ok(timeout)
     }
+}
+
+/// Trailers of a successful call with the trailers of the service.
+fn ok_trailers<I>(extra: I) -> HeaderMap
+where
+    I: IntoIterator<Item = (HeaderName, HeaderValue)>,
+{
+    let mut trailers = h2::get_header_map();
+    trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
+    append_trailers(&mut trailers, extra);
+    trailers
 }
 
 /// Appends the trailers of the service, except `grpc-status` and
@@ -920,11 +933,30 @@ fn send_trailers_only(stream: &StreamRef, code: StatusCode, mut hdrs: HeaderMap)
     h2::release_header_map(hdrs);
 }
 
+/// Sends trailers and returns the map to the `ntex-h2` pool.
+fn send_trailers(stream: &StreamRef, trailers: HeaderMap) {
+    send_trailers_ref(stream, &trailers);
+    h2::release_header_map(trailers);
+}
+
+/// Sends the trailers of a successful call without extra trailers, shared
+/// per thread so sending them does not build a map.
+fn send_ok_trailers(stream: &StreamRef) {
+    thread_local! {
+        static TRAILERS: HeaderMap = {
+            let mut trailers = HeaderMap::with_capacity(1);
+            trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
+            trailers
+        };
+    }
+    TRAILERS.with(|trailers| send_trailers_ref(stream, trailers));
+}
+
 /// Sends trailers, the stream is reset if they cannot be sent.
 ///
 /// Trailers that exceed the peer's `SETTINGS_MAX_HEADER_LIST_SIZE` are not sent
 /// and the stream stays open, it is reset with `INTERNAL_ERROR` instead.
-fn send_trailers(stream: &StreamRef, trailers: HeaderMap) {
+fn send_trailers_ref(stream: &StreamRef, trailers: &HeaderMap) {
     if let Err(err) = stream.send_trailers(trailers) {
         log::debug!("{}: Cannot send trailers: {err:?}", stream.tag());
         stream.reset(Reason::INTERNAL_ERROR);

@@ -44,6 +44,9 @@ pub trait MethodDef {
 
     #[inline]
     /// Encode a reply message.
+    ///
+    /// The server does not call it, `#[server]` builds unary replies with
+    /// [`ServerResponse::from_message()`](crate::server::ServerResponse::from_message).
     fn encode(&self, val: Self::Output, buf: &mut BytePages) {
         val.write(buf);
     }

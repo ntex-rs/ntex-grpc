@@ -54,10 +54,7 @@ fn server_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let result = #ty::#fn_name(self, ::ntex_grpc::server::FromRequest::from(req)).await;
 
                 let response = method.server_result(result)?;
-                let mut buf = ::ntex_grpc::BytePages::default();
-                method.encode(response.message, &mut buf);
-
-                Ok(::ntex_grpc::server::ServerResponse::with_headers(buf, response.headers))
+                Ok(::ntex_grpc::server::ServerResponse::from_message(response))
             },
             Kind::ServerStreaming => quote::quote_spanned! {span=>
                 ::ntex_grpc::server::__private::check_kind::<_, false, true>(&method);

@@ -11,7 +11,7 @@ pub use self::service::GrpcServer;
 pub use crate::GrpcStatus;
 
 use crate::stream::CallStreams;
-use crate::{MethodDef, RecvStream, SendStream};
+use crate::{Message, MethodDef, RecvStream, SendStream};
 
 /// A service that serves one gRPC service, such as `helloworld.Greeter`.
 ///
@@ -125,11 +125,15 @@ pub struct ServerRequest {
 #[derive(Debug)]
 pub struct ServerResponse {
     /// The encoded reply message, the server adds the message prefix.
+    /// A reply built with [`ServerResponse::from_message()`], as the unary
+    /// replies of a `#[server]` service are, starts with the 5-byte prefix.
     /// Ignored for a streaming call, its messages are sent on its stream.
     pub payload: BytePages,
     /// Extra trailers, sent after `grpc-status`. `grpc-status` and
     /// `grpc-message` are ignored, the status is `OK`.
     pub headers: Vec<(HeaderName, HeaderValue)>,
+    /// The payload starts with the prefix of an uncompressed message.
+    prefixed: bool,
 }
 
 impl ServerResponse {
@@ -145,7 +149,37 @@ impl ServerResponse {
         payload: BytePages,
         headers: Vec<(HeaderName, HeaderValue)>,
     ) -> ServerResponse {
-        ServerResponse { payload, headers }
+        ServerResponse {
+            payload,
+            headers,
+            prefixed: false,
+        }
+    }
+
+    /// Answer with a message and the extra trailers of `res`.
+    ///
+    /// The message is written behind its 5-byte message prefix, the server
+    /// sends it without copying it or adding a prefix page. Pass
+    /// `message.into()` for a message without extra trailers.
+    pub fn from_message<T: Message>(res: Response<T>) -> ServerResponse {
+        let mut payload = BytePages::default();
+        // fills the cached lengths of nested messages for `write_cached`
+        let len = res.message.encoded_len();
+        // an empty message is sent without a payload, the server fails one
+        // that does not fit the prefix
+        let prefixed = match u32::try_from(len) {
+            Ok(len) if len > 0 => {
+                crate::utils::put_prefix(&mut payload, false, len);
+                true
+            }
+            _ => false,
+        };
+        res.message.write_cached(&mut payload);
+        ServerResponse {
+            payload,
+            headers: res.headers,
+            prefixed,
+        }
     }
 }
 
@@ -261,6 +295,7 @@ impl<T> From<T> for Response<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Message;
 
     fn pages(data: &[u8]) -> BytePages {
         let mut buf = BytePages::default();
@@ -284,6 +319,45 @@ mod tests {
         assert_eq!(res.headers.len(), 1);
         assert_eq!(res.headers[0].1, HeaderValue::from_static("1"));
         assert!(format!("{res:?}").contains("ServerResponse"));
+    }
+
+    /// STATEMENT: `ServerResponse::from_message` writes the reply message
+    /// behind its prefix in one page and keeps the headers, an empty message
+    /// has no payload.
+    ///
+    /// HOW:
+    /// - Build the response of a `StringValue` with a header and check that
+    ///   it is prefixed, its single page holds the prefix with the encoded
+    ///   length followed by the `write` output, and the header is kept.
+    /// - Build the response of an empty `StringValue` passed with `into()`
+    ///   and check that it is not prefixed and its payload is empty.
+    #[test]
+    fn from_message() {
+        let msg = crate::google_types::StringValue {
+            value: "hello".into(),
+        };
+        let mut expected = BytePages::default();
+        msg.write(&mut expected);
+        let expected = expected.freeze();
+        let len = u8::try_from(expected.len()).unwrap();
+
+        let mut res = Response::new(msg);
+        res.headers.push((
+            HeaderName::from_static("x-a"),
+            HeaderValue::from_static("1"),
+        ));
+        let mut res = ServerResponse::from_message(res);
+        assert!(res.prefixed);
+        assert_eq!(res.payload.num_pages(), 1);
+        let data = res.payload.freeze();
+        assert_eq!(&data[..5], &[0, 0, 0, 0, len]);
+        assert_eq!(&data[5..], &expected[..]);
+        assert_eq!(res.headers.len(), 1);
+        assert_eq!(res.headers[0].1, HeaderValue::from_static("1"));
+
+        let res = ServerResponse::from_message(crate::google_types::StringValue::default().into());
+        assert!(!res.prefixed);
+        assert!(res.payload.is_empty());
     }
 
     #[test]

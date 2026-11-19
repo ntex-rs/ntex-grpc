@@ -615,15 +615,18 @@ impl PublishService {
     ) -> impl Future<Output = ()> {
         async move {
             log::debug!("{}: Response is received {res:?}", self.cfg.tag());
-            let buf = if res.payload.is_empty() {
+            let buf = if res.prefixed {
+                Some(utils::frame_prefixed(res.payload, self.max_send_size, encoding).await)
+            } else if res.payload.is_empty() {
                 None
             } else {
-                match utils::frame_message(res.payload, self.max_send_size, encoding).await {
-                    Ok(buf) => Some(buf),
-                    Err((status, msg)) => {
-                        send_error(&stream, status, msg);
-                        return;
-                    }
+                Some(utils::frame_message(res.payload, self.max_send_size, encoding).await)
+            };
+            let buf = match buf.transpose() {
+                Ok(buf) => buf,
+                Err((status, msg)) => {
+                    send_error(&stream, status, msg);
+                    return;
                 }
             };
 

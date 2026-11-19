@@ -146,7 +146,7 @@ pub(crate) fn send_size(len: usize, max_size: usize) -> Result<u32, HeaderValue>
 }
 
 /// Writes the message prefix, the compressed flag and the length.
-fn put_prefix(buf: &mut BytePages, compressed: bool, len: u32) {
+pub(crate) fn put_prefix(buf: &mut BytePages, compressed: bool, len: u32) {
     buf.put_u8(u8::from(compressed));
     buf.put_u32(len);
 }
@@ -211,6 +211,50 @@ pub(crate) async fn frame_message(
     }
     prepend_prefix(&mut msg, compressed, len);
     Ok(msg)
+}
+
+/// Like [`frame_message`], for a message that is written behind the prefix
+/// of an uncompressed message.
+///
+/// A message that is not compressed is sent as it is, with its prefix. If
+/// the prefix does not match the rest of `msg`, `msg` is framed as a
+/// message without a prefix.
+pub(crate) async fn frame_prefixed(
+    msg: BytePages,
+    max_size: usize,
+    enc: Option<Enc>,
+) -> Result<BytePages, (GrpcStatus, HeaderValue)> {
+    if !has_prefix(&msg) {
+        return frame_message(msg, max_size, enc).await;
+    }
+    let len = msg.len() - 5;
+
+    #[cfg(feature = "compression")]
+    if len >= crate::compression::MIN_SIZE
+        && let Some(enc) = enc
+    {
+        let mut msg = msg;
+        msg.advance_to(5);
+        return frame_message(msg, max_size, Some(enc)).await;
+    }
+
+    send_size(len, max_size).map_err(|m| (GrpcStatus::ResourceExhausted, m))?;
+    Ok(msg)
+}
+
+/// Returns `true` if `msg` starts with the prefix of the uncompressed
+/// message that follows it.
+fn has_prefix(msg: &BytePages) -> bool {
+    let mut bytes = msg.iter().flatten().copied();
+    let mut prefix = [0; 5];
+    for byte in &mut prefix {
+        match bytes.next() {
+            Some(b) => *byte = b,
+            None => return false,
+        }
+    }
+    let [flag, a, b, c, d] = prefix;
+    flag == 0 && u32::from_be_bytes([a, b, c, d]) as usize == msg.len() - 5
 }
 
 /// Encode a binary metadata value.
@@ -483,6 +527,92 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.0, GrpcStatus::ResourceExhausted);
+    }
+
+    /// A message of `len` bytes of `7` written behind its prefix.
+    fn prefixed(len: u32) -> BytePages {
+        let mut msg = BytePages::default();
+        put_prefix(&mut msg, false, len);
+        msg.extend_from_slice(&vec![7; len as usize]);
+        msg
+    }
+
+    /// STATEMENT: `frame_prefixed` sends an uncompressed message that is
+    /// written behind its prefix as it is, and rejects one over the size
+    /// limit.
+    ///
+    /// HOW:
+    /// - Frame a 100 byte message behind its prefix and check that the
+    ///   single page has the same address and holds the prefix and the
+    ///   message.
+    /// - Frame it with a limit of 99 bytes and check for `ResourceExhausted`.
+    #[ntex::test]
+    async fn frame_prefixed_in_place() {
+        let msg = prefixed(100);
+        let ptr = msg.iter().next().unwrap().as_ptr();
+        let mut buf = frame_prefixed(msg, usize::MAX, None).await.unwrap();
+        assert_eq!(buf.num_pages(), 1);
+        assert_eq!(buf.iter().next().unwrap().as_ptr(), ptr);
+        let data = buf.freeze();
+        assert_eq!(&data[..5], &[0, 0, 0, 0, 100]);
+        assert_eq!(&data[5..], &[7; 100]);
+
+        let err = frame_prefixed(prefixed(100), 99, None).await.unwrap_err();
+        assert_eq!(err.0, GrpcStatus::ResourceExhausted);
+    }
+
+    /// STATEMENT: `frame_prefixed` frames a payload that does not start with
+    /// a matching prefix as a message without a prefix.
+    ///
+    /// HOW:
+    /// - Frame a payload with a non-zero first byte, one whose prefix length
+    ///   does not match the rest, and one shorter than a prefix.
+    /// - Check that each is sent behind a new prefix with its full length,
+    ///   with all of its bytes.
+    #[ntex::test]
+    async fn frame_prefixed_without_prefix() {
+        let mismatched = [&[0, 0, 0, 0, 1][..], &[7; 100]].concat();
+        for data in [&[7; 100][..], &mismatched, &[0, 0, 0]] {
+            let mut msg = BytePages::default();
+            msg.extend_from_slice(data);
+            let mut buf = frame_prefixed(msg, usize::MAX, None).await.unwrap();
+            let len = u8::try_from(data.len()).unwrap();
+            let expected = [&[0, 0, 0, 0, len][..], data].concat();
+            assert_eq!(buf.freeze(), expected);
+        }
+    }
+
+    /// STATEMENT: With compression, `frame_prefixed` compresses a message of
+    /// at least `MIN_SIZE` bytes without its prefix, and sends a smaller one
+    /// as it is.
+    ///
+    /// HOW:
+    /// - Frame a 1000 byte message behind its prefix with gzip and check the
+    ///   compressed flag, the length in the prefix, and that the rest
+    ///   decompresses to the message without the old prefix.
+    /// - Frame a 10 byte message with gzip and check that the page has the
+    ///   same address and an uncompressed prefix.
+    #[cfg(feature = "compression")]
+    #[ntex::test]
+    async fn frame_prefixed_compressed() {
+        let mut buf = frame_prefixed(prefixed(1000), usize::MAX, Some(Enc::Gzip))
+            .await
+            .unwrap();
+        let mut data = buf.freeze();
+        let prefix = data.split_to(5);
+        assert_eq!(prefix[0], 1);
+        let len = u32::from_be_bytes(prefix[1..].try_into().unwrap());
+        assert_eq!(len as usize, data.len());
+        let msg = Enc::Gzip.decompress(data, usize::MAX).await.unwrap();
+        assert_eq!(msg, vec![7; 1000]);
+
+        let msg = prefixed(10);
+        let ptr = msg.iter().next().unwrap().as_ptr();
+        let mut buf = frame_prefixed(msg, usize::MAX, Some(Enc::Gzip))
+            .await
+            .unwrap();
+        assert_eq!(buf.iter().next().unwrap().as_ptr(), ptr);
+        assert_eq!(buf.freeze(), [&[0, 0, 0, 0, 10][..], &[7; 10]].concat());
     }
 
     fn push(data: &mut Data, chunk: &[u8]) {

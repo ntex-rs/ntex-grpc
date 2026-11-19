@@ -1124,6 +1124,79 @@ mod routing {
         assert_eq!(res.0, "0");
     }
 
+    /// STATEMENT: A `#[server]` unary reply is sent behind a single prefix,
+    /// is rejected over the send size limit, and is compressed when the
+    /// call asks for it.
+    ///
+    /// HOW:
+    /// - Call `test.Echo/Call` with `hi` and check that the body is the
+    ///   encoded `test.Echo hi` reply behind one uncompressed prefix.
+    /// - Call it on a server whose send limit is one byte under the reply and
+    ///   check for status 8 and no body.
+    /// - With compression, call it with gzip and a 200 byte value and check
+    ///   the compressed flag, the length in the prefix, and that the body
+    ///   decompresses to the encoded reply.
+    #[ntex::test]
+    async fn unary_reply() {
+        let reply = |value: &str| {
+            let mut buf = BytePages::default();
+            ntex_grpc::Message::write(
+                &StringValue {
+                    value: value.to_owned().into(),
+                },
+                &mut buf,
+            );
+            buf.freeze()
+        };
+        let expected = reply("test.Echo hi");
+
+        let client = connect(GrpcServer::new(EchoServer), false);
+        let (_, data, trailers) = call_to(
+            &client,
+            "/test.Echo/Call",
+            req_headers(None),
+            string_message("hi"),
+        )
+        .await;
+        assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0", "{trailers:?}");
+        assert_eq!(data, message(0, &expected));
+
+        let server = GrpcServer::new(EchoServer).max_send_message_size(expected.len() - 1);
+        let limited = connect(server, false);
+        let (_, data, trailers) = call_to(
+            &limited,
+            "/test.Echo/Call",
+            req_headers(None),
+            string_message("hi"),
+        )
+        .await;
+        assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "8", "{trailers:?}");
+        assert!(data.is_empty());
+
+        #[cfg(feature = "compression")]
+        {
+            use std::io::Read;
+
+            let value: &'static str = "a".repeat(200).leak();
+            let (_, data, trailers) = call_to(
+                &client,
+                "/test.Echo/Call",
+                req_headers(Some("gzip")),
+                string_message(value),
+            )
+            .await;
+            assert_eq!(trailers.get(GRPC_STATUS).unwrap(), "0", "{trailers:?}");
+            assert_eq!(data[0], 1);
+            let len = u32::from_be_bytes(data[1..5].try_into().unwrap()) as usize;
+            assert_eq!(len, data.len() - 5);
+            let mut out = Vec::new();
+            flate2::read::GzDecoder::new(&data[5..])
+                .read_to_end(&mut out)
+                .unwrap();
+            assert_eq!(out, reply(&format!("test.Echo {value}")));
+        }
+    }
+
     #[ntex::test]
     async fn default_service() {
         // the added services take their calls from the default service

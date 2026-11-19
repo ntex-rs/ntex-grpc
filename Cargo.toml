@@ -20,7 +20,7 @@ ntex-grpc-derive = "4.2.0"
 ntex-grpc-codegen = "1.2.0"
 
 ntex = "4.9"
-ntex-bytes = "1.15.2"
+ntex-bytes = "1.15"
 ntex-error = "3.1"
 ntex-http = "2.1"
 ntex-h2 = "4.5"

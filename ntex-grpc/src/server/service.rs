@@ -428,12 +428,7 @@ impl PublishService {
 
                 // stream eof, cannot do anything
                 if eof {
-                    if stream
-                        .send_response(StatusCode::OK, response_headers(None), false)
-                        .is_ok()
-                    {
-                        send_error(&stream, GrpcStatus::InvalidArgument, ERR_NO_MESSAGE);
-                    }
+                    send_error(&stream, GrpcStatus::InvalidArgument, ERR_NO_MESSAGE);
                     return Next::Done(Ok(()));
                 }
 
@@ -457,12 +452,7 @@ impl PublishService {
                         if let Err((status, msg)) = self.check_request(call.data.as_slice()) {
                             remove(&mut streams, &id);
                             drop(streams);
-                            if stream
-                                .send_response(StatusCode::OK, response_headers(None), false)
-                                .is_ok()
-                            {
-                                send_error(&stream, status, msg);
-                            }
+                            send_error(&stream, status, msg);
                             // the client stops sending the rest of the request
                             stream.reset(Reason::NO_ERROR);
                         }
@@ -551,12 +541,7 @@ impl PublishService {
             let payload = match self.read_request(&call.headers, call.data.get()).await {
                 Ok(data) => data,
                 Err((status, msg)) => {
-                    if stream
-                        .send_response(StatusCode::OK, response_headers(None), false)
-                        .is_ok()
-                    {
-                        send_error(&stream, status, msg);
-                    }
+                    send_error(&stream, status, msg);
                     return Ok(());
                 }
             };
@@ -569,10 +554,9 @@ impl PublishService {
             );
             // the response is compressed like the request
             let encoding = Enc::of_response(&call.headers);
-            if stream
-                .send_response(StatusCode::OK, response_headers(encoding), false)
-                .is_err()
-            {
+            // the response headers are sent with the message, the service is
+            // not called for a stream that is gone already
+            if stream.is_reset() {
                 return Ok(());
             }
 
@@ -602,7 +586,7 @@ impl PublishService {
                         self.cfg.tag(),
                         err.message
                     );
-                    send_trailers(&stream, error_trailers(err));
+                    send_trailers_only(&stream, StatusCode::OK, error_trailers(err));
                     return Ok(());
                 }
                 Err(()) => {
@@ -619,7 +603,9 @@ impl PublishService {
         }
     }
 
-    /// Sends the response message and the trailers of a unary call.
+    /// Sends the response headers, the message and the trailers of a unary
+    /// call. A message that cannot be sent fails the call with a
+    /// trailers-only response.
     #[allow(clippy::manual_async_fn)]
     fn send_unary(
         &self,
@@ -629,22 +615,33 @@ impl PublishService {
     ) -> impl Future<Output = ()> {
         async move {
             log::debug!("{}: Response is received {res:?}", self.cfg.tag());
-            if res.payload.is_empty() {
-                // an empty message is never compressed
-                let _ = stream
-                    .send_payload(Bytes::from_static(EMPTY_MESSAGE), false)
-                    .await;
+            let buf = if res.payload.is_empty() {
+                None
             } else {
                 match utils::frame_message(res.payload, self.max_send_size, encoding).await {
-                    Ok(buf) => {
-                        let _ = stream.send_pages(buf, false).await;
-                    }
+                    Ok(buf) => Some(buf),
                     Err((status, msg)) => {
                         send_error(&stream, status, msg);
                         return;
                     }
                 }
+            };
+
+            if stream
+                .send_response(StatusCode::OK, response_headers(encoding), false)
+                .is_err()
+            {
+                return;
             }
+            let _ = match buf {
+                Some(buf) => stream.send_pages(buf, false).await,
+                // an empty message is never compressed
+                None => {
+                    stream
+                        .send_payload(Bytes::from_static(EMPTY_MESSAGE), false)
+                        .await
+                }
+            };
 
             let mut trailers = h2::get_header_map();
             trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
@@ -873,15 +870,16 @@ fn check_method(method: Option<&Method>) -> Option<HeaderValue> {
 /// Rejects a request that is not a grpc call, with an HTTP status and the
 /// grpc status the client reports.
 fn reject(stream: &StreamRef, code: StatusCode, st: GrpcStatus, msg: HeaderValue, eof: bool) {
-    let mut hdrs = hdrs();
-    hdrs.insert(consts::GRPC_STATUS, st.into());
-    hdrs.insert(consts::GRPC_MESSAGE, msg);
-    let _ = stream.send_response(code, &hdrs, true);
-    h2::release_header_map(hdrs);
+    send_trailers_only(stream, code, status_headers(st, msg));
     if !eof {
         // the client stops sending the request
         stream.reset(Reason::NO_ERROR);
     }
+}
+
+/// Fails a unary call whose response is not sent yet.
+fn send_error(stream: &StreamRef, st: GrpcStatus, msg: HeaderValue) {
+    send_trailers_only(stream, StatusCode::OK, status_headers(st, msg));
 }
 
 fn hdrs() -> HeaderMap {
@@ -891,11 +889,26 @@ fn hdrs() -> HeaderMap {
     hdrs
 }
 
-fn send_error(stream: &StreamRef, st: GrpcStatus, msg: HeaderValue) {
-    let mut trailers = h2::get_header_map();
-    trailers.insert(consts::GRPC_STATUS, st.into());
-    trailers.insert(consts::GRPC_MESSAGE, msg);
-    send_trailers(stream, trailers);
+fn status_headers(st: GrpcStatus, msg: HeaderValue) -> HeaderMap {
+    let mut hdrs = h2::get_header_map();
+    hdrs.insert(consts::GRPC_STATUS, st.into());
+    hdrs.insert(consts::GRPC_MESSAGE, msg);
+    hdrs
+}
+
+/// Sends a trailers-only response, the headers end the stream. The stream is
+/// reset if they cannot be sent.
+fn send_trailers_only(stream: &StreamRef, code: StatusCode, mut hdrs: HeaderMap) {
+    hdrs.insert(CONTENT_TYPE, HDR_APP_GRPC);
+    hdrs.insert(consts::GRPC_ACCEPT_ENCODING, consts::ACCEPT_ENCODING);
+    if let Err(err) = stream.send_response(code, &hdrs, true) {
+        log::debug!(
+            "{}: Cannot send trailers-only response: {err:?}",
+            stream.tag()
+        );
+        stream.reset(Reason::INTERNAL_ERROR);
+    }
+    h2::release_header_map(hdrs);
 }
 
 /// Sends trailers, the stream is reset if they cannot be sent.

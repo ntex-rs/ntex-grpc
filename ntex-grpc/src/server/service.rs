@@ -497,8 +497,8 @@ struct UnaryCall {
     /// The index of the service that serves the call, the service is
     /// routed with the headers.
     idx: usize,
-    service: ByteString,
     name: ByteString,
+    service: ByteString,
     data: Data,
     headers: HeaderMap,
 }
@@ -507,8 +507,8 @@ struct UnaryCall {
 struct StreamCall<'a> {
     stream: StreamRef,
     svc: &'a BoxedService,
-    service: ByteString,
     name: ByteString,
+    service: ByteString,
     headers: HeaderMap,
     /// The client sent no request messages.
     eof: bool,
@@ -619,7 +619,7 @@ impl PublishService {
             };
 
             if stream
-                .send_response(StatusCode::OK, response_headers(encoding), false)
+                .send_response_shared(StatusCode::OK, &response_headers(encoding), false)
                 .is_err()
             {
                 return;
@@ -1002,29 +1002,31 @@ fn send_trailers_only(stream: &StreamRef, code: StatusCode, mut hdrs: HeaderMap)
 
 /// Sends trailers and returns the map to the `ntex-h2` pool.
 fn send_trailers(stream: &StreamRef, trailers: HeaderMap) {
-    send_trailers_ref(stream, &trailers);
+    trailers_sent(stream, stream.send_trailers(&trailers));
     h2::release_header_map(trailers);
 }
 
 /// Sends the trailers of a successful call without extra trailers, shared
-/// per thread so sending them does not build a map.
+/// per thread so sending them does not build a map and `ntex-h2` can reuse
+/// their encoded block.
 fn send_ok_trailers(stream: &StreamRef) {
     thread_local! {
-        static TRAILERS: HeaderMap = {
+        static TRAILERS: Rc<HeaderMap> = {
             let mut trailers = HeaderMap::with_capacity(1);
             trailers.insert(consts::GRPC_STATUS, GrpcStatus::Ok.into());
-            trailers
+            Rc::new(trailers)
         };
     }
-    TRAILERS.with(|trailers| send_trailers_ref(stream, trailers));
+    let res = TRAILERS.with(|trailers| stream.send_trailers_shared(trailers));
+    trailers_sent(stream, res);
 }
 
-/// Sends trailers, the stream is reset if they cannot be sent.
+/// Resets the stream if its trailers could not be sent.
 ///
 /// Trailers that exceed the peer's `SETTINGS_MAX_HEADER_LIST_SIZE` are not sent
 /// and the stream stays open, it is reset with `INTERNAL_ERROR` instead.
-fn send_trailers_ref(stream: &StreamRef, trailers: &HeaderMap) {
-    if let Err(err) = stream.send_trailers(trailers) {
+fn trailers_sent<E: std::fmt::Debug>(stream: &StreamRef, res: Result<(), E>) {
+    if let Err(err) = res {
         log::debug!("{}: Cannot send trailers: {err:?}", stream.tag());
         stream.reset(Reason::INTERNAL_ERROR);
     }

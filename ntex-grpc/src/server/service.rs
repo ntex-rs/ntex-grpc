@@ -275,15 +275,6 @@ enum Inflight {
 }
 
 impl PublishService {
-    /// Returns the index of the service that serves `service`, the default
-    /// service serves the names that are not registered.
-    fn route(&self, service: &str) -> Option<usize> {
-        match self.names.iter().position(|name| name == service) {
-            Some(idx) => Some(idx),
-            None => (self.services.len() > self.names.len()).then_some(self.names.len()),
-        }
-    }
-
     fn is_streaming(&self, idx: usize, method: &str) -> bool {
         self.streaming.get(idx).is_some_and(|f| f(method))
     }
@@ -397,23 +388,19 @@ impl PublishService {
                     return Next::Done(Ok(()));
                 }
 
-                let path = pseudo.path.unwrap().split_off(1);
-                let Some(n) = path.find('/') else {
-                    // not a `service/method` path, the method is unknown
-                    let msg =
-                        encode_grpc_message(&format!("grpc: malformed method name: /{path}"));
-                    reject(&stream, StatusCode::OK, GrpcStatus::Unimplemented, msg, eof);
-                    return Next::Done(Ok(()));
-                };
-                // the request is not read for an unknown service
-                let Some(idx) = self.route(&path[..n]) else {
-                    let msg =
-                        encode_grpc_message(&format!("grpc: unknown service {}", &path[..n]));
-                    reject(&stream, StatusCode::OK, GrpcStatus::Unimplemented, msg, eof);
-                    return Next::Done(Ok(()));
+                let path = pseudo.path.unwrap();
+                let has_default = self.services.len() > self.names.len();
+                // the request is not read for a malformed path or an unknown
+                // service
+                let (idx, end) = match route(&self.names, has_default, &path) {
+                    Ok(route) => route,
+                    Err(msg) => {
+                        reject(&stream, StatusCode::OK, GrpcStatus::Unimplemented, msg, eof);
+                        return Next::Done(Ok(()));
+                    }
                 };
 
-                let (service, name) = split_path(path);
+                let (service, name) = split_path(&self.names, idx, &path, end);
                 if self.is_streaming(idx, &name) {
                     let call = StreamCall {
                         stream,
@@ -856,16 +843,55 @@ fn remove<K: Hash + Eq, V>(map: &mut HashMap<K, V>, key: &K) -> Option<V> {
     val
 }
 
-/// Splits `service/method` into the service and the method name, the method
-/// name ends at the next `/`. The path must contain a `/`.
-fn split_path(mut path: ByteString) -> (ByteString, ByteString) {
-    let n = path.find('/').unwrap_or(path.len());
-    let service = path.split_to(n);
-    let mut name = path.split_off(1);
-    if let Some(n) = name.find('/') {
-        name = name.split_to(n);
+/// Routes a `/service/method` path. Returns the index of the service in
+/// `names` and the position of the `/` that ends the service name. The
+/// default service, at index `names.len()`, serves the names that are not
+/// registered. Returns the `grpc-message` to reject the request with
+/// otherwise.
+fn route(
+    names: &[ByteString],
+    has_default: bool,
+    path: &str,
+) -> Result<(usize, usize), HeaderValue> {
+    let malformed = || encode_grpc_message(&format!("grpc: malformed method name: {path}"));
+    let rest = path.strip_prefix('/').ok_or_else(malformed)?;
+    // a registered name has no `/`, so it is matched without searching the
+    // path for the end of the service name
+    for (idx, name) in names.iter().enumerate() {
+        if rest.as_bytes().get(name.len()) == Some(&b'/') && rest.starts_with(name.as_str()) {
+            return Ok((idx, name.len() + 1));
+        }
     }
-    (service, name)
+    let n = rest.find('/').ok_or_else(malformed)?;
+    if has_default {
+        Ok((names.len(), n + 1))
+    } else {
+        Err(encode_grpc_message(&format!(
+            "grpc: unknown service {}",
+            &rest[..n]
+        )))
+    }
+}
+
+/// Returns the service and the method name of a path routed to `idx`, the
+/// method name ends at the next `/`. A registered service name is taken from
+/// `names` instead of the path.
+fn split_path(
+    names: &[ByteString],
+    idx: usize,
+    path: &ByteString,
+    end: usize,
+) -> (ByteString, ByteString) {
+    let service = match names.get(idx) {
+        Some(name) => name.clone(),
+        None => path.slice(1..end),
+    };
+    let start = end + 1;
+    let len = path.as_bytes()[start..]
+        .iter()
+        .position(|&b| b == b'/')
+        .unwrap_or(path.len() - start);
+    (service, path.slice(start..start + len))
 }
 
 /// Returns the `grpc-message` to reject the request with if it is not a grpc
@@ -1185,16 +1211,60 @@ mod tests {
         }
     }
 
+    /// STATEMENT: A `/service/method` path is routed to a registered service
+    /// by its full name, or to the default one, and is split into the
+    /// service and the method name. A registered name is reused instead of
+    /// sliced from the path, and a malformed path is rejected without a
+    /// panic.
+    ///
+    /// HOW:
+    /// - Register `test.Svc` and `test.SvcX` and route paths with and without
+    ///   a default service.
+    /// - Check the service index, the service and method names, and that the
+    ///   service name of a registered service points to the registered one.
+    /// - Check the `grpc-message` of malformed paths, including one that
+    ///   starts with a multibyte char, and of unknown services.
     #[test]
     fn path() {
-        for (path, service, name) in [
-            ("test.Svc/Call", "test.Svc", "Call"),
-            ("test.Svc/Call/extra", "test.Svc", "Call"),
-            ("test.Svc/", "test.Svc", ""),
-            ("/Call", "", "Call"),
+        let names = [
+            ByteString::from_static("test.Svc"),
+            ByteString::from_static("test.SvcX"),
+        ];
+        for (path, default, idx, service, name) in [
+            ("/test.Svc/Call", false, 0, "test.Svc", "Call"),
+            ("/test.Svc/Call/extra", false, 0, "test.Svc", "Call"),
+            ("/test.Svc/", false, 0, "test.Svc", ""),
+            ("/test.SvcX/Call", false, 1, "test.SvcX", "Call"),
+            ("/test.SvcY/Call", true, 2, "test.SvcY", "Call"),
+            ("/test.Sv/Call/extra", true, 2, "test.Sv", "Call"),
+            ("//Call", true, 2, "", "Call"),
         ] {
-            let (s, n) = split_path(ByteString::from_static(path));
+            let full = ByteString::from_static(path);
+            let (i, end) = route(&names, default, path).unwrap();
+            assert_eq!(i, idx, "{path}");
+            let (s, n) = split_path(&names, i, &full, end);
             assert_eq!((&*s, &*n), (service, name), "{path}");
+            if let Some(registered) = names.get(i) {
+                assert_eq!(s.as_ptr(), registered.as_ptr(), "{path}");
+            }
+        }
+
+        for (path, default, msg) in [
+            ("/test.Svc", true, "grpc: malformed method name: /test.Svc"),
+            (
+                "test.Svc/Call",
+                true,
+                "grpc: malformed method name: test.Svc/Call",
+            ),
+            (
+                "é/test.Svc/Call",
+                true,
+                "grpc: malformed method name: %C3%A9/test.Svc/Call",
+            ),
+            ("/test.SvcY/Call", false, "grpc: unknown service test.SvcY"),
+            ("//Call", false, "grpc: unknown service "),
+        ] {
+            assert_eq!(route(&names, default, path).unwrap_err(), msg, "{path}");
         }
     }
 

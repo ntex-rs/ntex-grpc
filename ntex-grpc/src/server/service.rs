@@ -216,7 +216,7 @@ impl GrpcServer {
                     services,
                     max_size: self.max_message_size,
                     max_send_size: self.max_send_message_size,
-                    streams: RefCell::new(HashMap::default()),
+                    streams: RefCell::new(StreamMap::new()),
                 },
             ),
             None,
@@ -264,7 +264,7 @@ struct PublishService {
     services: Vec<BoxedService>,
     max_size: usize,
     max_send_size: usize,
-    streams: RefCell<HashMap<StreamId, Inflight>>,
+    streams: RefCell<StreamMap<StreamId, Inflight>>,
 }
 
 enum Inflight {
@@ -419,7 +419,7 @@ impl PublishService {
                     return Next::Done(Ok(()));
                 }
 
-                let _ = self.streams.borrow_mut().insert(
+                self.streams.borrow_mut().insert(
                     stream.id(),
                     Inflight::Unary(UnaryCall {
                         idx,
@@ -437,7 +437,7 @@ impl PublishService {
                     Some(Inflight::Unary(call)) => {
                         call.data.push(chunk, self.max_size);
                         if let Err((status, msg)) = self.check_request(call.data.as_slice()) {
-                            remove(&mut streams, &id);
+                            streams.remove(&id);
                             drop(streams);
                             send_error(&stream, status, msg);
                             // the client stops sending the rest of the request
@@ -448,7 +448,7 @@ impl PublishService {
                 }
             }
             h2::MessageKind::Eof(eof) => {
-                let inflight = remove(&mut self.streams.borrow_mut(), &id);
+                let inflight = self.streams.borrow_mut().remove(&id);
                 match inflight {
                     Some(Inflight::Stream(recv)) => {
                         let end = match eof {
@@ -482,7 +482,8 @@ impl PublishService {
                 }
             }
             h2::MessageKind::Disconnect(_) => {
-                if let Some(Inflight::Stream(recv)) = remove(&mut self.streams.borrow_mut(), &id) {
+                let inflight = self.streams.borrow_mut().remove(&id);
+                if let Some(Inflight::Stream(recv)) = inflight {
                     recv.push_end(Err(StreamError::Disconnected));
                 }
             }
@@ -663,8 +664,7 @@ impl PublishService {
 
             let recv = ServerRecv::new(call.eof);
             if !call.eof {
-                let _ = self
-                    .streams
+                self.streams
                     .borrow_mut()
                     .insert(stream.id(), Inflight::Stream(recv.clone()));
             }
@@ -744,7 +744,7 @@ impl PublishService {
                     }
                 }
             }
-            remove(&mut self.streams.borrow_mut(), &stream.id());
+            self.streams.borrow_mut().remove(&stream.id());
             Ok(())
         }
     }
@@ -832,15 +832,56 @@ fn error_trailers(err: ServerError) -> HeaderMap {
 /// Capacity of the streams map that is kept however few streams are open.
 const STREAMS_CAPACITY: usize = 64;
 
-/// Removes the stream `key`. The map gives back memory once fewer than a
-/// quarter of its capacity is used, so a burst of streams is not kept for the
-/// life of the connection.
-fn remove<K: Hash + Eq, V>(map: &mut HashMap<K, V>, key: &K) -> Option<V> {
-    let val = map.remove(key);
-    if map.capacity() > STREAMS_CAPACITY && map.len() < map.capacity() / 4 {
-        map.shrink_to(map.len() * 2);
+/// Removed streams between two checks of the capacity of the streams map.
+const SHRINK_REMOVES: usize = 256;
+
+/// The calls in flight on a connection, by stream.
+///
+/// A client opens streams in batches that drain to none, a shrink on the
+/// current length would free and regrow the map for every batch. The map gives
+/// back memory only once the most streams open over `SHRINK_REMOVES` removes
+/// used less than a quarter of its capacity, so a burst of streams is not kept
+/// while the connection serves fewer. A connection that goes idle after a
+/// burst keeps the capacity until it serves more requests.
+struct StreamMap<K, V> {
+    map: HashMap<K, V>,
+    /// The most streams open since the last check.
+    peak: usize,
+    /// Removed streams since the last check.
+    removes: usize,
+}
+
+impl<K: Hash + Eq, V> StreamMap<K, V> {
+    fn new() -> Self {
+        Self {
+            map: HashMap::default(),
+            peak: 0,
+            removes: 0,
+        }
     }
-    val
+
+    fn insert(&mut self, key: K, val: V) {
+        self.map.insert(key, val);
+        self.peak = self.peak.max(self.map.len());
+    }
+
+    fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.map.get_mut(key)
+    }
+
+    fn remove(&mut self, key: &K) -> Option<V> {
+        let val = self.map.remove(key)?;
+        self.removes += 1;
+        if self.removes == SHRINK_REMOVES {
+            let cap = self.map.capacity();
+            if cap > STREAMS_CAPACITY && self.peak < cap / 4 {
+                self.map.shrink_to(self.peak * 2);
+            }
+            self.peak = self.map.len();
+            self.removes = 0;
+        }
+        Some(val)
+    }
 }
 
 /// Routes a `/service/method` path. Returns the index of the service in
@@ -1168,46 +1209,90 @@ mod tests {
         assert!(size_of::<Inflight>() <= 128, "{}", size_of::<Inflight>());
     }
 
+    /// Removes the stream `id`, returns whether the map shrank. A removed
+    /// entry may leave a tombstone, which takes one off the capacity.
+    fn remove_stream(map: &mut StreamMap<u32, ()>, id: u32) -> bool {
+        let cap = map.map.capacity();
+        assert!(map.remove(&id).is_some(), "{id}");
+        map.map.capacity() + 1 < cap
+    }
+
+    /// STATEMENT: The streams map gives back the capacity of a burst at the
+    /// first check that sees fewer streams open than a quarter of it, keeps
+    /// half of the new capacity free, and keeps a map within
+    /// `STREAMS_CAPACITY`.
+    ///
+    /// HOW:
+    /// - Open 256 streams and close them, no remove shrinks the map, the check
+    ///   at the last remove counts the burst.
+    /// - Serve batches of 10 streams, the map shrinks only at the remove that
+    ///   completes `SHRINK_REMOVES`, to at most `STREAMS_CAPACITY` and at
+    ///   least twice the batch.
+    /// - Removing an unknown stream returns `None`.
+    /// - Open 50 streams in a new map, close them, serve single streams for
+    ///   `SHRINK_REMOVES` removes, no remove shrinks the map.
     #[test]
     fn streams_shrink() {
-        let mut map = HashMap::default();
+        let mut map = StreamMap::new();
         for id in 0..256 {
             map.insert(id, ());
         }
-        let mut shrinks = 0;
-        for id in 0..255 {
-            let cap = map.capacity();
-            assert!(remove(&mut map, &id).is_some());
-            // a removed entry may leave a tombstone, which takes one off the
-            // capacity
-            if map.capacity() + 1 < cap {
-                shrinks += 1;
-                assert!(map.len() < cap / 4, "{} {cap}", map.len());
-                // half of the capacity stays free, so the next streams do
-                // not grow the map right away
-                assert!(map.capacity() >= map.len() * 2, "{}", map.len());
-            }
-            assert!(
-                map.capacity() <= 64 || map.len() >= map.capacity() / 4,
-                "{} {}",
-                map.len(),
-                map.capacity()
-            );
+        for id in 0..256 {
+            assert!(!remove_stream(&mut map, id), "{id}");
         }
-        assert!(map.capacity() <= STREAMS_CAPACITY, "{}", map.capacity());
-        assert!(shrinks <= 4, "{shrinks}");
-        assert!(remove(&mut map, &1000).is_none());
-        assert!(remove(&mut map, &255).is_some());
+        assert!(map.map.capacity() > STREAMS_CAPACITY * 4);
 
-        // a small map is kept
-        let mut map = HashMap::default();
-        for id in 0..32 {
+        let mut removes = 0;
+        for batch in 0..30 {
+            let ids = (256 + batch * 10)..(266 + batch * 10);
+            for id in ids.clone() {
+                map.insert(id, ());
+            }
+            for id in ids {
+                removes += 1;
+                assert_eq!(
+                    remove_stream(&mut map, id),
+                    removes == SHRINK_REMOVES,
+                    "{removes}"
+                );
+            }
+        }
+        let cap = map.map.capacity();
+        assert!((20..=STREAMS_CAPACITY).contains(&cap), "{cap}");
+        assert!(map.remove(&1000).is_none());
+
+        let mut map = StreamMap::new();
+        for id in 0..50 {
             map.insert(id, ());
         }
-        for id in 0..32 {
-            let cap = map.capacity();
-            remove(&mut map, &id);
-            assert!(map.capacity() + 1 >= cap, "{} {cap}", map.capacity());
+        for id in 0..50 {
+            assert!(!remove_stream(&mut map, id), "{id}");
+        }
+        for id in 50..50 + SHRINK_REMOVES as u32 {
+            map.insert(id, ());
+            assert!(!remove_stream(&mut map, id), "{id}");
+        }
+    }
+
+    /// STATEMENT: Batches of streams that open together and drain to none
+    /// keep the capacity of the streams map instead of freeing and regrowing
+    /// it for every batch.
+    ///
+    /// HOW:
+    /// - Open 100 streams and close them in order, 50 times, over several
+    ///   capacity checks.
+    /// - Confirm no remove shrinks the map.
+    #[test]
+    fn streams_batches_keep_capacity() {
+        let mut map = StreamMap::new();
+        for batch in 0..50 {
+            let ids = (batch * 100)..(batch * 100 + 100);
+            for id in ids.clone() {
+                map.insert(id, ());
+            }
+            for id in ids {
+                assert!(!remove_stream(&mut map, id), "{batch} {id}");
+            }
         }
     }
 

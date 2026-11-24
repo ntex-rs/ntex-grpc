@@ -163,18 +163,21 @@ impl ServerResponse {
     /// `message.into()` for a message without extra trailers.
     pub fn from_message<T: Message>(res: Response<T>) -> ServerResponse {
         let mut payload = BytePages::default();
-        // fills the cached lengths of nested messages for `write_cached`
-        let len = res.message.encoded_len();
-        // an empty message is sent without a payload, the server fails one
-        // that does not fit the prefix
-        let prefixed = match u32::try_from(len) {
-            Ok(len) if len > 0 => {
-                crate::utils::put_prefix(&mut payload, false, len);
-                true
-            }
-            _ => false,
-        };
-        res.message.write_cached(&mut payload);
+        let prefixed = crate::types::with_encoded_lens(|lens| {
+            let len = res.message.encoded_len_with(lens);
+            // an empty message is sent without a payload, the server fails one
+            // that does not fit the prefix
+            let prefixed = match u32::try_from(len) {
+                Ok(len) if len > 0 => {
+                    crate::utils::put_prefix(&mut payload, false, len);
+                    true
+                }
+                _ => false,
+            };
+            lens.rewind();
+            res.message.write_with(lens, &mut payload);
+            prefixed
+        });
         ServerResponse {
             payload,
             headers: res.headers,

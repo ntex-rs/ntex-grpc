@@ -21,7 +21,7 @@ use self::path::PathMap;
 
 /// Version of the generated code, checked against `ntex_grpc::CODEGEN_VERSION`
 /// by every generated file. Bump both when generated code must be regenerated.
-pub(crate) const CODEGEN_VERSION: u32 = 1;
+pub(crate) const CODEGEN_VERSION: u32 = 2;
 
 /// A service generator takes a service descriptor and generates Rust code.
 ///

@@ -15,20 +15,18 @@ ntex-grpc-derive = { path = "./ntex-grpc-derive" }
 ntex-grpc-codegen = { path = "./ntex-grpc-codegen" }
 
 [workspace.dependencies]
-ntex-grpc = "4.2.1"
+ntex-grpc = "4.3.0"
 ntex-grpc-derive = "4.2.0"
-ntex-grpc-codegen = "1.2.0"
 
-ntex = "4.9"
-ntex-bytes = "1.15"
+ntex = "4.10"
+ntex-bytes = "1.16"
 ntex-error = "3.1"
 ntex-http = "2.1"
 ntex-h2 = "4.7.1"
 ntex-io = "4.8"
-ntex-net = "4.12"
-ntex-rt = "4.9"
+ntex-net = "4.13"
+ntex-rt = "4.10"
 ntex-util = "4.11"
-ntex-server = "4.6"
 ntex-service = "5.9"
 
 base64 = "0.22"

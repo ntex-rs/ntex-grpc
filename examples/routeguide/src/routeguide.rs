@@ -16,8 +16,8 @@
 //! DO NOT MODIFY. Auto-generated file
 
 const _: () = assert!(
-    ::ntex_grpc::CODEGEN_VERSION == 1,
-    "generated code does not match the ntex-grpc version (expects CODEGEN_VERSION 1), regenerate it with the matching ntex-grpc-codegen"
+    ::ntex_grpc::CODEGEN_VERSION == 2,
+    "generated code does not match the ntex-grpc version (expects CODEGEN_VERSION 2), regenerate it with the matching ntex-grpc-codegen"
 );
 
 ///  Points are represented as latitude-longitude pairs in the E7 representation
@@ -30,38 +30,32 @@ pub struct Point {
 
 ///  A latitude-longitude rectangle, represented as two diagonally opposite
 ///  points "lo" and "hi".
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Rectangle {
     ///  One corner of the rectangle.
     pub lo: Point,
     ///  The other corner of the rectangle.
     pub hi: Point,
-    #[doc(hidden)]
-    pub _cached_len: ::ntex_grpc::CachedLen,
 }
 
 ///  A feature names something at a given point.
 ///
 ///  If a feature could not be named, the name is empty.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Feature {
     ///  The name of the feature.
     pub name: ::ntex_grpc::ByteString,
     ///  The point where the feature is detected.
     pub location: Point,
-    #[doc(hidden)]
-    pub _cached_len: ::ntex_grpc::CachedLen,
 }
 
 ///  A RouteNote is a message sent while at a given point.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct RouteNote {
     ///  The location from which the message is sent.
     pub location: Point,
     ///  The message to be sent.
     pub message: ::ntex_grpc::ByteString,
-    #[doc(hidden)]
-    pub _cached_len: ::ntex_grpc::CachedLen,
 }
 
 ///  A RouteSummary is received in response to a RecordRoute rpc.
@@ -232,31 +226,33 @@ mod _priv_impl_route_guide {
     }
 
     impl ::ntex_grpc::Message for Rectangle {
+        const NESTED: bool = true;
+
         #[inline]
         fn write(&self, dst: &mut ::ntex_grpc::BytePages) {
-            ::ntex_grpc::Message::encoded_len(self);
-            ::ntex_grpc::Message::write_cached(self, dst);
+            ::ntex_grpc::types::write_nested(self, dst);
         }
 
         #[inline]
-        fn write_cached(&self, dst: &mut ::ntex_grpc::BytePages) {
-            ::ntex_grpc::NativeType::serialize_cached(
+        fn write_with(
+            &self,
+            lens: &mut ::ntex_grpc::EncodedLens,
+            dst: &mut ::ntex_grpc::BytePages,
+        ) {
+            ::ntex_grpc::NativeType::serialize_with(
                 &self.lo,
                 1,
                 ::ntex_grpc::types::DefaultValue::Default,
+                lens,
                 dst,
             );
-            ::ntex_grpc::NativeType::serialize_cached(
+            ::ntex_grpc::NativeType::serialize_with(
                 &self.hi,
                 2,
                 ::ntex_grpc::types::DefaultValue::Default,
+                lens,
                 dst,
             );
-        }
-
-        #[inline]
-        fn cached_len(&self) -> usize {
-            self._cached_len.get()
         }
 
         #[inline]
@@ -289,27 +285,30 @@ mod _priv_impl_route_guide {
 
         #[inline]
         fn encoded_len(&self) -> usize {
-            let len =
-                0 + ::ntex_grpc::NativeType::serialized_len(
-                    &self.lo,
-                    1,
-                    ::ntex_grpc::types::DefaultValue::Default,
-                ) + ::ntex_grpc::NativeType::serialized_len(
-                    &self.hi,
-                    2,
-                    ::ntex_grpc::types::DefaultValue::Default,
-                );
-            self._cached_len.set(len);
-            len
+            0 + ::ntex_grpc::NativeType::serialized_len(
+                &self.lo,
+                1,
+                ::ntex_grpc::types::DefaultValue::Default,
+            ) + ::ntex_grpc::NativeType::serialized_len(
+                &self.hi,
+                2,
+                ::ntex_grpc::types::DefaultValue::Default,
+            )
         }
-    }
 
-    impl ::std::fmt::Debug for Rectangle {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            f.debug_struct("Rectangle")
-                .field("lo", &self.lo)
-                .field("hi", &self.hi)
-                .finish()
+        #[inline]
+        fn encoded_len_with(&self, lens: &mut ::ntex_grpc::EncodedLens) -> usize {
+            0 + ::ntex_grpc::NativeType::serialized_len_with(
+                &self.lo,
+                1,
+                ::ntex_grpc::types::DefaultValue::Default,
+                lens,
+            ) + ::ntex_grpc::NativeType::serialized_len_with(
+                &self.hi,
+                2,
+                ::ntex_grpc::types::DefaultValue::Default,
+                lens,
+            )
         }
     }
 
@@ -319,37 +318,37 @@ mod _priv_impl_route_guide {
             Self {
                 lo: ::core::default::Default::default(),
                 hi: ::core::default::Default::default(),
-                _cached_len: ::core::default::Default::default(),
             }
         }
     }
 
     impl ::ntex_grpc::Message for Feature {
+        const NESTED: bool = true;
+
         #[inline]
         fn write(&self, dst: &mut ::ntex_grpc::BytePages) {
-            ::ntex_grpc::Message::encoded_len(self);
-            ::ntex_grpc::Message::write_cached(self, dst);
+            ::ntex_grpc::types::write_nested(self, dst);
         }
 
         #[inline]
-        fn write_cached(&self, dst: &mut ::ntex_grpc::BytePages) {
+        fn write_with(
+            &self,
+            lens: &mut ::ntex_grpc::EncodedLens,
+            dst: &mut ::ntex_grpc::BytePages,
+        ) {
             ::ntex_grpc::NativeType::serialize(
                 &self.name,
                 1,
                 ::ntex_grpc::types::DefaultValue::Default,
                 dst,
             );
-            ::ntex_grpc::NativeType::serialize_cached(
+            ::ntex_grpc::NativeType::serialize_with(
                 &self.location,
                 2,
                 ::ntex_grpc::types::DefaultValue::Default,
+                lens,
                 dst,
             );
-        }
-
-        #[inline]
-        fn cached_len(&self) -> usize {
-            self._cached_len.get()
         }
 
         #[inline]
@@ -387,27 +386,29 @@ mod _priv_impl_route_guide {
 
         #[inline]
         fn encoded_len(&self) -> usize {
-            let len =
-                0 + ::ntex_grpc::NativeType::serialized_len(
-                    &self.name,
-                    1,
-                    ::ntex_grpc::types::DefaultValue::Default,
-                ) + ::ntex_grpc::NativeType::serialized_len(
-                    &self.location,
-                    2,
-                    ::ntex_grpc::types::DefaultValue::Default,
-                );
-            self._cached_len.set(len);
-            len
+            0 + ::ntex_grpc::NativeType::serialized_len(
+                &self.name,
+                1,
+                ::ntex_grpc::types::DefaultValue::Default,
+            ) + ::ntex_grpc::NativeType::serialized_len(
+                &self.location,
+                2,
+                ::ntex_grpc::types::DefaultValue::Default,
+            )
         }
-    }
 
-    impl ::std::fmt::Debug for Feature {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            f.debug_struct("Feature")
-                .field("name", &self.name)
-                .field("location", &self.location)
-                .finish()
+        #[inline]
+        fn encoded_len_with(&self, lens: &mut ::ntex_grpc::EncodedLens) -> usize {
+            0 + ::ntex_grpc::NativeType::serialized_len(
+                &self.name,
+                1,
+                ::ntex_grpc::types::DefaultValue::Default,
+            ) + ::ntex_grpc::NativeType::serialized_len_with(
+                &self.location,
+                2,
+                ::ntex_grpc::types::DefaultValue::Default,
+                lens,
+            )
         }
     }
 
@@ -417,24 +418,29 @@ mod _priv_impl_route_guide {
             Self {
                 name: ::core::default::Default::default(),
                 location: ::core::default::Default::default(),
-                _cached_len: ::core::default::Default::default(),
             }
         }
     }
 
     impl ::ntex_grpc::Message for RouteNote {
+        const NESTED: bool = true;
+
         #[inline]
         fn write(&self, dst: &mut ::ntex_grpc::BytePages) {
-            ::ntex_grpc::Message::encoded_len(self);
-            ::ntex_grpc::Message::write_cached(self, dst);
+            ::ntex_grpc::types::write_nested(self, dst);
         }
 
         #[inline]
-        fn write_cached(&self, dst: &mut ::ntex_grpc::BytePages) {
-            ::ntex_grpc::NativeType::serialize_cached(
+        fn write_with(
+            &self,
+            lens: &mut ::ntex_grpc::EncodedLens,
+            dst: &mut ::ntex_grpc::BytePages,
+        ) {
+            ::ntex_grpc::NativeType::serialize_with(
                 &self.location,
                 1,
                 ::ntex_grpc::types::DefaultValue::Default,
+                lens,
                 dst,
             );
             ::ntex_grpc::NativeType::serialize(
@@ -443,11 +449,6 @@ mod _priv_impl_route_guide {
                 ::ntex_grpc::types::DefaultValue::Default,
                 dst,
             );
-        }
-
-        #[inline]
-        fn cached_len(&self) -> usize {
-            self._cached_len.get()
         }
 
         #[inline]
@@ -490,27 +491,29 @@ mod _priv_impl_route_guide {
 
         #[inline]
         fn encoded_len(&self) -> usize {
-            let len =
-                0 + ::ntex_grpc::NativeType::serialized_len(
-                    &self.location,
-                    1,
-                    ::ntex_grpc::types::DefaultValue::Default,
-                ) + ::ntex_grpc::NativeType::serialized_len(
-                    &self.message,
-                    2,
-                    ::ntex_grpc::types::DefaultValue::Default,
-                );
-            self._cached_len.set(len);
-            len
+            0 + ::ntex_grpc::NativeType::serialized_len(
+                &self.location,
+                1,
+                ::ntex_grpc::types::DefaultValue::Default,
+            ) + ::ntex_grpc::NativeType::serialized_len(
+                &self.message,
+                2,
+                ::ntex_grpc::types::DefaultValue::Default,
+            )
         }
-    }
 
-    impl ::std::fmt::Debug for RouteNote {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            f.debug_struct("RouteNote")
-                .field("location", &self.location)
-                .field("message", &self.message)
-                .finish()
+        #[inline]
+        fn encoded_len_with(&self, lens: &mut ::ntex_grpc::EncodedLens) -> usize {
+            0 + ::ntex_grpc::NativeType::serialized_len_with(
+                &self.location,
+                1,
+                ::ntex_grpc::types::DefaultValue::Default,
+                lens,
+            ) + ::ntex_grpc::NativeType::serialized_len(
+                &self.message,
+                2,
+                ::ntex_grpc::types::DefaultValue::Default,
+            )
         }
     }
 
@@ -520,7 +523,6 @@ mod _priv_impl_route_guide {
             Self {
                 location: ::core::default::Default::default(),
                 message: ::core::default::Default::default(),
-                _cached_len: ::core::default::Default::default(),
             }
         }
     }

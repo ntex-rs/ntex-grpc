@@ -16,8 +16,8 @@
 //! DO NOT MODIFY. Auto-generated file
 
 const _: () = assert!(
-    crate::CODEGEN_VERSION == 1,
-    "generated code does not match the ntex-grpc version (expects CODEGEN_VERSION 1), regenerate it with the matching ntex-grpc-codegen"
+    crate::CODEGEN_VERSION == 2,
+    "generated code does not match the ntex-grpc version (expects CODEGEN_VERSION 2), regenerate it with the matching ntex-grpc-codegen"
 );
 
 ///  A Timestamp represents a point in time independent of any time zone or local

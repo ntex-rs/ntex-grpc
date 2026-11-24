@@ -1,5 +1,12 @@
 # Changes
 
+## [1.3.0] - 2026-11-25
+
+* Messages no longer have the hidden `_cached_len` field, struct literals do
+  not need `..Default::default()` and messages derive `Debug` again. Messages
+  with message fields are written with the encoder's length table. Generated
+  code requires ntex-grpc with `CODEGEN_VERSION` 2
+
 ## [1.2.0] - 2026-11-17
 
 * Generated files assert `ntex_grpc::CODEGEN_VERSION` at compile time, a

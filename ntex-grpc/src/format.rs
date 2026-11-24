@@ -13,7 +13,7 @@ use ntex_bytes::{Buf, BufMut, BytePages, Bytes};
 use ntex_util::hash_map::HashMap as HashMapBase;
 
 use crate::encoding::{self, DecodeError, WireType};
-use crate::types::{DefaultValue, Message, NativeType};
+use crate::types::{DefaultValue, EncodedLens, Message, NativeType};
 
 /// Encoding of a protobuf field of type `T`.
 ///
@@ -27,18 +27,30 @@ pub trait FieldFormat<T> {
     fn serialized_len(value: &T, tag: u32, default: DefaultValue<&T>) -> usize;
 
     #[inline]
-    /// Serialize protobuf field with the message lengths cached by the
-    /// preceding [`serialized_len`](Self::serialized_len) call.
+    /// Serialize protobuf field with the nested message lengths recorded by
+    /// the preceding [`serialized_len_with`](Self::serialized_len_with) call.
     ///
-    /// See [`NativeType::serialize_cached`].
-    fn serialize_cached(value: &T, tag: u32, default: DefaultValue<&T>, dst: &mut BytePages) {
+    /// See [`NativeType::serialize_with`].
+    fn serialize_with(
+        value: &T,
+        tag: u32,
+        default: DefaultValue<&T>,
+        lens: &mut EncodedLens,
+        dst: &mut BytePages,
+    ) {
+        let _ = lens;
         Self::serialize(value, tag, default, dst);
     }
 
     #[inline]
-    /// Protobuf field length cached by the preceding
-    /// [`serialized_len`](Self::serialized_len) call.
-    fn cached_serialized_len(value: &T, tag: u32, default: DefaultValue<&T>) -> usize {
+    /// Protobuf field length, records the lengths of nested messages
+    fn serialized_len_with(
+        value: &T,
+        tag: u32,
+        default: DefaultValue<&T>,
+        lens: &mut EncodedLens,
+    ) -> usize {
+        let _ = lens;
         Self::serialized_len(value, tag, default)
     }
 
@@ -78,13 +90,24 @@ impl<T: NativeType> FieldFormat<T> for Native {
     }
 
     #[inline]
-    fn serialize_cached(value: &T, tag: u32, default: DefaultValue<&T>, dst: &mut BytePages) {
-        value.serialize_cached(tag, default, dst);
+    fn serialize_with(
+        value: &T,
+        tag: u32,
+        default: DefaultValue<&T>,
+        lens: &mut EncodedLens,
+        dst: &mut BytePages,
+    ) {
+        value.serialize_with(tag, default, lens, dst);
     }
 
     #[inline]
-    fn cached_serialized_len(value: &T, tag: u32, default: DefaultValue<&T>) -> usize {
-        value.cached_serialized_len(tag, default)
+    fn serialized_len_with(
+        value: &T,
+        tag: u32,
+        default: DefaultValue<&T>,
+        lens: &mut EncodedLens,
+    ) -> usize {
+        value.serialized_len_with(tag, default, lens)
     }
 
     #[inline]
@@ -389,19 +412,26 @@ where
 pub struct Group;
 
 impl Group {
-    /// Writes the group, `cached` uses the lengths cached by `len`
-    fn write<T: Message>(value: &T, tag: u32, cached: bool, dst: &mut BytePages) {
+    /// Writes the group
+    fn write<T: Message>(value: &T, tag: u32, dst: &mut BytePages) {
         encoding::encode_key(tag, WireType::StartGroup, dst);
-        if cached {
-            value.write_cached(dst);
-        } else {
-            value.write(dst);
-        }
+        value.write(dst);
+        encoding::encode_key(tag, WireType::EndGroup, dst);
+    }
+
+    /// Writes the group with the lengths recorded by `len_with`
+    fn write_with<T: Message>(value: &T, tag: u32, lens: &mut EncodedLens, dst: &mut BytePages) {
+        encoding::encode_key(tag, WireType::StartGroup, dst);
+        value.write_with(lens, dst);
         encoding::encode_key(tag, WireType::EndGroup, dst);
     }
 
     fn len<T: Message>(value: &T, tag: u32) -> usize {
         2 * encoding::key_len(tag) + value.encoded_len()
+    }
+
+    fn len_with<T: Message>(value: &T, tag: u32, lens: &mut EncodedLens) -> usize {
+        2 * encoding::key_len(tag) + value.encoded_len_with(lens)
     }
 
     fn merge<T: Message>(
@@ -419,12 +449,28 @@ impl Group {
 impl<T: Message> FieldFormat<T> for Group {
     #[inline]
     fn serialize(value: &T, tag: u32, _: DefaultValue<&T>, dst: &mut BytePages) {
-        Group::write(value, tag, false, dst);
+        Group::write(value, tag, dst);
     }
 
     #[inline]
-    fn serialize_cached(value: &T, tag: u32, _: DefaultValue<&T>, dst: &mut BytePages) {
-        Group::write(value, tag, true, dst);
+    fn serialize_with(
+        value: &T,
+        tag: u32,
+        _: DefaultValue<&T>,
+        lens: &mut EncodedLens,
+        dst: &mut BytePages,
+    ) {
+        Group::write_with(value, tag, lens, dst);
+    }
+
+    #[inline]
+    fn serialized_len_with(
+        value: &T,
+        tag: u32,
+        _: DefaultValue<&T>,
+        lens: &mut EncodedLens,
+    ) -> usize {
+        Group::len_with(value, tag, lens)
     }
 
     #[inline]
@@ -446,19 +492,31 @@ impl<T: Message> FieldFormat<T> for Group {
 impl<T: Message> FieldFormat<Option<T>> for Group {
     fn serialize(value: &Option<T>, tag: u32, _: DefaultValue<&Option<T>>, dst: &mut BytePages) {
         if let Some(value) = value {
-            Group::write(value, tag, false, dst);
+            Group::write(value, tag, dst);
         }
     }
 
-    fn serialize_cached(
+    fn serialize_with(
         value: &Option<T>,
         tag: u32,
         _: DefaultValue<&Option<T>>,
+        lens: &mut EncodedLens,
         dst: &mut BytePages,
     ) {
         if let Some(value) = value {
-            Group::write(value, tag, true, dst);
+            Group::write_with(value, tag, lens, dst);
         }
+    }
+
+    fn serialized_len_with(
+        value: &Option<T>,
+        tag: u32,
+        _: DefaultValue<&Option<T>>,
+        lens: &mut EncodedLens,
+    ) -> usize {
+        value
+            .as_ref()
+            .map_or(0, |value| Group::len_with(value, tag, lens))
     }
 
     fn serialized_len(value: &Option<T>, tag: u32, _: DefaultValue<&Option<T>>) -> usize {
@@ -478,14 +536,32 @@ impl<T: Message> FieldFormat<Option<T>> for Group {
 impl<T: Message> FieldFormat<Vec<T>> for Group {
     fn serialize(value: &Vec<T>, tag: u32, _: DefaultValue<&Vec<T>>, dst: &mut BytePages) {
         for item in value {
-            Group::write(item, tag, false, dst);
+            Group::write(item, tag, dst);
         }
     }
 
-    fn serialize_cached(value: &Vec<T>, tag: u32, _: DefaultValue<&Vec<T>>, dst: &mut BytePages) {
+    fn serialize_with(
+        value: &Vec<T>,
+        tag: u32,
+        _: DefaultValue<&Vec<T>>,
+        lens: &mut EncodedLens,
+        dst: &mut BytePages,
+    ) {
         for item in value {
-            Group::write(item, tag, true, dst);
+            Group::write_with(item, tag, lens, dst);
         }
+    }
+
+    fn serialized_len_with(
+        value: &Vec<T>,
+        tag: u32,
+        _: DefaultValue<&Vec<T>>,
+        lens: &mut EncodedLens,
+    ) -> usize {
+        value
+            .iter()
+            .map(|item| Group::len_with(item, tag, lens))
+            .sum()
     }
 
     fn serialized_len(value: &Vec<T>, tag: u32, _: DefaultValue<&Vec<T>>) -> usize {
@@ -565,34 +641,6 @@ impl<K: Default + Ord, V: Default> MapType for BTreeMap<K, V> {
 #[derive(Copy, Clone, Debug)]
 pub struct Map<KF, VF>(PhantomData<(KF, VF)>);
 
-impl<KF, VF> Map<KF, VF> {
-    /// Writes the map entries, `cached` uses the value lengths cached by
-    /// `serialized_len`
-    fn write<M>(value: &M, tag: u32, cached: bool, dst: &mut BytePages)
-    where
-        M: MapType,
-        KF: FieldFormat<M::Key>,
-        VF: FieldFormat<M::Value>,
-    {
-        value.for_each_entry(|key, val| {
-            let val_len = if cached {
-                VF::cached_serialized_len(val, 2, DefaultValue::Default)
-            } else {
-                VF::serialized_len(val, 2, DefaultValue::Default)
-            };
-            let len = KF::serialized_len(key, 1, DefaultValue::Default) + val_len;
-            encoding::encode_key(tag, WireType::LengthDelimited, dst);
-            encoding::encode_varint(len as u64, dst);
-            KF::serialize(key, 1, DefaultValue::Default, dst);
-            if cached {
-                VF::serialize_cached(val, 2, DefaultValue::Default, dst);
-            } else {
-                VF::serialize(val, 2, DefaultValue::Default, dst);
-            }
-        });
-    }
-}
-
 impl<M, KF, VF> FieldFormat<M> for Map<KF, VF>
 where
     M: MapType,
@@ -600,11 +648,46 @@ where
     VF: FieldFormat<M::Value>,
 {
     fn serialize(value: &M, tag: u32, _: DefaultValue<&M>, dst: &mut BytePages) {
-        Self::write(value, tag, false, dst);
+        value.for_each_entry(|key, val| {
+            let len = KF::serialized_len(key, 1, DefaultValue::Default)
+                + VF::serialized_len(val, 2, DefaultValue::Default);
+            encoding::encode_key(tag, WireType::LengthDelimited, dst);
+            encoding::encode_varint(len as u64, dst);
+            KF::serialize(key, 1, DefaultValue::Default, dst);
+            VF::serialize(val, 2, DefaultValue::Default, dst);
+        });
     }
 
-    fn serialize_cached(value: &M, tag: u32, _: DefaultValue<&M>, dst: &mut BytePages) {
-        Self::write(value, tag, true, dst);
+    fn serialize_with(
+        value: &M,
+        tag: u32,
+        _: DefaultValue<&M>,
+        lens: &mut EncodedLens,
+        dst: &mut BytePages,
+    ) {
+        value.for_each_entry(|key, val| {
+            encoding::encode_key(tag, WireType::LengthDelimited, dst);
+            encoding::encode_varint(lens.next_len() as u64, dst);
+            KF::serialize(key, 1, DefaultValue::Default, dst);
+            VF::serialize_with(val, 2, DefaultValue::Default, lens, dst);
+        });
+    }
+
+    fn serialized_len_with(
+        value: &M,
+        tag: u32,
+        _: DefaultValue<&M>,
+        lens: &mut EncodedLens,
+    ) -> usize {
+        let mut total = 0;
+        value.for_each_entry(|key, val| {
+            let slot = lens.reserve();
+            let len = KF::serialized_len(key, 1, DefaultValue::Default)
+                + VF::serialized_len_with(val, 2, DefaultValue::Default, lens);
+            lens.set(slot, len);
+            total += encoding::key_len(tag) + encoding::encoded_len_varint(len as u64) + len;
+        });
+        total
     }
 
     fn serialized_len(value: &M, tag: u32, _: DefaultValue<&M>) -> usize {
@@ -1138,5 +1221,101 @@ mod tests {
         assert!(read::<Group, Msg>(&[0x0b, 0x08, 0x05]).is_err());
         assert!(read::<Group, Option<Msg>>(&[0x0b]).is_err());
         assert!(read::<Group, Vec<Msg>>(&[0x0b]).is_err());
+    }
+
+    type Children = Map<Native, Native>;
+
+    /// Message with a map of messages, a group and a leaf message, written
+    /// with a length table like the generated code
+    #[derive(Default, Debug, PartialEq)]
+    struct Node {
+        children: BTreeMap<u32, Node>,
+        group: Option<Box<Node>>,
+        msg: Msg,
+    }
+
+    impl Node {
+        fn tree(depth: u32) -> Node {
+            let mut node = Node {
+                msg: Msg { a: depth, b: 300 },
+                ..Default::default()
+            };
+            if depth > 0 {
+                node.children.insert(1, Node::tree(depth - 1));
+                node.children.insert(2, Node::default());
+                node.group = Some(Box::new(Node::tree(depth - 1)));
+            }
+            node
+        }
+
+        fn write_plain(&self, dst: &mut BytePages) {
+            Children::serialize(&self.children, 1, DefaultValue::Default, dst);
+            Group::serialize(&self.group, 2, DefaultValue::Default, dst);
+            self.msg.serialize(3, DefaultValue::Default, dst);
+        }
+    }
+
+    impl Message for Node {
+        const NESTED: bool = true;
+
+        fn read(src: &mut Bytes) -> Result<Self, DecodeError> {
+            let mut msg = Self::default();
+            while !src.is_empty() {
+                let (tag, wtype) = encoding::decode_key(src)?;
+                match tag {
+                    1 => Children::deserialize(&mut msg.children, tag, wtype, src)?,
+                    2 => Group::deserialize(&mut msg.group, tag, wtype, src)?,
+                    3 => msg.msg.deserialize(tag, wtype, src)?,
+                    _ => encoding::skip_field(wtype, tag, src)?,
+                }
+            }
+            Ok(msg)
+        }
+
+        fn write(&self, dst: &mut BytePages) {
+            crate::types::write_nested(self, dst);
+        }
+
+        fn write_with(&self, lens: &mut EncodedLens, dst: &mut BytePages) {
+            Children::serialize_with(&self.children, 1, DefaultValue::Default, lens, dst);
+            Group::serialize_with(&self.group, 2, DefaultValue::Default, lens, dst);
+            self.msg.serialize_with(3, DefaultValue::Default, lens, dst);
+        }
+
+        fn encoded_len(&self) -> usize {
+            Children::serialized_len(&self.children, 1, DefaultValue::Default)
+                + Group::serialized_len(&self.group, 2, DefaultValue::Default)
+                + self.msg.serialized_len(3, DefaultValue::Default)
+        }
+
+        fn encoded_len_with(&self, lens: &mut EncodedLens) -> usize {
+            Children::serialized_len_with(&self.children, 1, DefaultValue::Default, lens)
+                + Group::serialized_len_with(&self.group, 2, DefaultValue::Default, lens)
+                + self.msg.serialized_len_with(3, DefaultValue::Default, lens)
+        }
+    }
+
+    /// STATEMENT: Map entries with message values and groups written with a
+    /// length table produce the plain encoding.
+    ///
+    /// HOW:
+    /// - Build a 3 levels deep `Node` with a map of `Node` values, a boxed
+    ///   `Node` group and a leaf `Msg` field.
+    /// - Write it with `write`, which records the lengths of the map entries
+    ///   and of the nested messages in a table, and with the plain field
+    ///   writers of the root.
+    /// - Compare the bytes and `encoded_len`, then decode the bytes back.
+    #[test]
+    fn map_and_group_with_length_table() {
+        let node = Node::tree(3);
+        let mut buf = BytePages::default();
+        node.write(&mut buf);
+        let bytes = buf.freeze();
+
+        let mut plain = BytePages::default();
+        node.write_plain(&mut plain);
+        assert_eq!(bytes, plain.freeze());
+        assert_eq!(Message::encoded_len(&node), bytes.len());
+        assert_eq!(Node::read(&mut bytes.clone()).unwrap(), node);
     }
 }

@@ -49,7 +49,6 @@ async fn list_features(client: &RouteGuide) -> Result<(), Box<dyn Error>> {
     let rect = Rectangle {
         lo: point(400_000_000, -750_000_000),
         hi: point(420_000_000, -730_000_000),
-        ..Default::default()
     };
     let mut rx = client.list_features(&rect).open().await?;
     while let Some(feature) = rx.recv().await {
@@ -133,6 +132,5 @@ fn note(latitude: i32, longitude: i32, message: &str) -> RouteNote {
     RouteNote {
         location: point(latitude, longitude),
         message: message.into(),
-        ..Default::default()
     }
 }

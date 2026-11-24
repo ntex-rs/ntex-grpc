@@ -534,30 +534,39 @@ pub(crate) async fn encode_message<M: Message, St>(
     ctx: &RequestContext<'_, St>,
 ) -> Result<BytePages, ClientError> {
     let max_size = ctx.get_max_send_message_size();
-    // fills the cached lengths of nested messages for `write_cached`
-    let len = val.encoded_len();
+    #[cfg(feature = "compression")]
+    let enc = ctx.get_compression();
+    let mut buf = BytePages::default();
+    // a message to compress is written without the prefix
+    let compress = crate::types::with_encoded_lens(|lens| {
+        let len = val.encoded_len_with(lens);
+        #[cfg(feature = "compression")]
+        let compress = len >= crate::compression::MIN_SIZE && enc.is_some();
+        #[cfg(not(feature = "compression"))]
+        let compress = false;
+        if compress {
+            // the uncompressed message must fit the length prefix too
+            send_size(len, usize::MAX)?;
+        } else {
+            let len = send_size(len, max_size)?;
+            buf.put_u8(0);
+            buf.put_u32(len);
+        }
+        lens.rewind();
+        val.write_with(lens, &mut buf);
+        Ok::<_, ClientError>(compress)
+    })?;
 
     #[cfg(feature = "compression")]
-    if len >= crate::compression::MIN_SIZE
-        && let Some(enc) = ctx.get_compression()
-    {
-        // the uncompressed message must fit the length prefix too
-        send_size(len, usize::MAX)?;
-        let mut msg = BytePages::default();
-        val.write_cached(&mut msg);
-        let compressed = enc.compress(&mut msg).await.map_err(|(status, msg)| {
+    if compress && let Some(enc) = enc {
+        let compressed = enc.compress(&mut buf).await.map_err(|(status, msg)| {
             ClientError::InvalidRequest(CallFailure::new(status, text(&msg)))
         })?;
-        let len = send_size(msg.len(), max_size)?;
-        utils::prepend_prefix(&mut msg, compressed, len);
-        return Ok(msg);
+        let len = send_size(buf.len(), max_size)?;
+        utils::prepend_prefix(&mut buf, compressed, len);
     }
-
-    let len = send_size(len, max_size)?;
-    let mut buf = BytePages::default();
-    buf.put_u8(0);
-    buf.put_u32(len);
-    val.write_cached(&mut buf);
+    #[cfg(not(feature = "compression"))]
+    let _ = compress;
     Ok(buf)
 }
 

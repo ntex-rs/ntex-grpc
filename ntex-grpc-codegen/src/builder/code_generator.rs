@@ -31,19 +31,21 @@ struct MessageCode {
     write: String,
     read: String,
     encoded_len: String,
+    /// `encoded_len_with` body, records the nested message lengths
+    encoded_len_with: String,
     default: String,
-    debug: String,
     accessors: String,
     required: String,
     required_num: usize,
-    /// The message has message fields and caches its encoded length
+    /// The message has message fields, it is written with a length table
     nested: bool,
 }
 
 struct OneofCode {
     write: String,
-    /// `serialize_cached` match arms, for oneofs with message variants
-    write_cached: Option<String>,
+    /// `serialize_with` and `serialized_len_with` match arms, for oneofs
+    /// with message variants
+    with: Option<(String, String)>,
     read: String,
     encoded_len: String,
 }
@@ -185,39 +187,42 @@ fn push_indent(buf: &mut String, depth: u8) {
     }
 }
 
-/// `write` and `encoded_len` methods of the `Message` impl.
+/// Encoding methods of the `Message` impl.
 ///
-/// Messages with message fields cache the encoded length, `write` computes the
-/// lengths of the whole tree once and `write_cached` uses the cached lengths.
+/// Messages with message fields record the lengths of the nested messages in
+/// a table with `encoded_len_with`, `write_with` reads them back. Their `write`
+/// fills a table and writes with it, `encoded_len` does not record lengths.
 fn message_encode_fns(code: &MessageCode) -> (String, String) {
     let MessageCode {
-        write, encoded_len, ..
+        write,
+        encoded_len,
+        encoded_len_with,
+        ..
     } = code;
     if code.nested {
         (
             format!(
-                "#[inline]
+                "const NESTED: bool = true;
+
+                 #[inline]
                   fn write(&self, dst: &mut ::ntex_grpc::BytePages) {{
-                    ::ntex_grpc::Message::encoded_len(self);
-                    ::ntex_grpc::Message::write_cached(self, dst);
+                    ::ntex_grpc::types::write_nested(self, dst);
                  }}
 
                  #[inline]
-                 fn write_cached(&self, dst: &mut ::ntex_grpc::BytePages) {{
+                 fn write_with(&self, lens: &mut ::ntex_grpc::EncodedLens, dst: &mut ::ntex_grpc::BytePages) {{
                     {write}
-                 }}
-
-                 #[inline]
-                 fn cached_len(&self) -> usize {{
-                     self._cached_len.get()
                  }}\n\n"
             ),
             format!(
                 "#[inline]
                  fn encoded_len(&self) -> usize {{
-                     let len = 0 {encoded_len};
-                     self._cached_len.set(len);
-                     len
+                     0 {encoded_len}
+                 }}
+
+                 #[inline]
+                 fn encoded_len_with(&self, lens: &mut ::ntex_grpc::EncodedLens) -> usize {{
+                     0 {encoded_len_with}
                  }}\n\n"
             ),
         )
@@ -409,12 +414,7 @@ impl CodeGenerator<'_> {
 
         self.append_doc();
         self.push_indent();
-        if nested {
-            // `Debug` is implemented without the length cache
-            self.buf.push_str("#[derive(Clone, PartialEq)]\n");
-        } else {
-            self.buf.push_str("#[derive(Clone, PartialEq, Debug)]\n");
-        }
+        self.buf.push_str("#[derive(Clone, PartialEq, Debug)]\n");
         self.push_indent();
         self.buf.push_str("pub struct ");
         self.buf.push_str(&to_upper_camel(&message_name));
@@ -428,15 +428,6 @@ impl CodeGenerator<'_> {
         self.depth += 1;
         self.append_message_fields(&fq_message_name, &fields, &map_types, &mut code);
         self.append_message_oneofs(&message_name, &message.oneof_decl, &oneof_fields, &mut code);
-        if nested {
-            self.push_indent();
-            self.buf.push_str("#[doc(hidden)]\n");
-            self.push_indent();
-            self.buf
-                .push_str("pub _cached_len: ::ntex_grpc::CachedLen,\n");
-            code.default
-                .push_str("_cached_len: ::core::default::Default::default(),\n");
-        }
         self.depth -= 1;
         self.push_indent();
         self.buf.push_str("}\n\n");
@@ -527,15 +518,23 @@ impl CodeGenerator<'_> {
             };
             let value = value.unwrap_or_else(|| "::core::default::Default::default()".to_string());
 
-            // nested messages are written with the lengths of `encoded_len`
-            let serialize = if is_message_field(field, map_types) {
-                "serialize_cached"
+            // nested messages are written with the lengths of `encoded_len_with`
+            let message = is_message_field(field, map_types);
+            if message {
+                write!(code.write,
+                    "{ops}serialize_with(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::{skip}, lens, dst);",
+                ).unwrap();
+                write!(code.encoded_len_with,
+                    " + {ops}serialized_len_with(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::{skip}, lens)",
+                ).unwrap();
             } else {
-                "serialize"
-            };
-            write!(code.write,
-                "{ops}{serialize}(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::{skip}, dst);",
-            ).unwrap();
+                write!(code.write,
+                    "{ops}serialize(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::{skip}, dst);",
+                ).unwrap();
+                write!(code.encoded_len_with,
+                    " + {ops}serialized_len(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::{skip})",
+                ).unwrap();
+            }
             if field.label() == Label::Required {
                 // a required field missing from the input fails decoding
                 let idx = code.required_num;
@@ -569,12 +568,6 @@ impl CodeGenerator<'_> {
                 " + {ops}serialized_len(&self.{field_name}, {field_no}, ::ntex_grpc::types::DefaultValue::{skip})",
             ).unwrap();
             writeln!(code.default, "{field_name}: {value},").unwrap();
-            writeln!(
-                code.debug,
-                ".field(\"{}\", &self.{field_name})",
-                field_name.trim_start_matches("r#")
-            )
-            .unwrap();
 
             self.enum_accessors(fq_message_name, field, map_entry, &mut code.accessors);
             match map_entry {
@@ -603,14 +596,21 @@ impl CodeGenerator<'_> {
             };
 
             let oneof_name = to_snake(oneof.name());
-            let serialize = if fields.iter().any(|(field, _)| is_message(field)) {
-                "serialize_cached"
+            if fields.iter().any(|(field, _)| is_message(field)) {
+                write!(code.write,
+                    "::ntex_grpc::NativeType::serialize_with(&self.{oneof_name}, 0, ::ntex_grpc::types::DefaultValue::Default, lens, dst);",
+                ).unwrap();
+                write!(code.encoded_len_with,
+                    " + ::ntex_grpc::NativeType::serialized_len_with(&self.{oneof_name}, 0, ::ntex_grpc::types::DefaultValue::Default, lens)",
+                ).unwrap();
             } else {
-                "serialize"
-            };
-            write!(code.write,
-                "::ntex_grpc::NativeType::{serialize}(&self.{oneof_name}, 0, ::ntex_grpc::types::DefaultValue::Default, dst);",
-            ).unwrap();
+                write!(code.write,
+                    "::ntex_grpc::NativeType::serialize(&self.{oneof_name}, 0, ::ntex_grpc::types::DefaultValue::Default, dst);",
+                ).unwrap();
+                write!(code.encoded_len_with,
+                    " + ::ntex_grpc::NativeType::serialized_len(&self.{oneof_name}, 0, ::ntex_grpc::types::DefaultValue::Default)",
+                ).unwrap();
+            }
             write!(
                 code.read,
                 "
@@ -627,12 +627,6 @@ impl CodeGenerator<'_> {
                 "{oneof_name}: ::core::default::Default::default(),",
             )
             .unwrap();
-            writeln!(
-                code.debug,
-                ".field(\"{}\", &self.{oneof_name})",
-                oneof_name.trim_start_matches("r#")
-            )
-            .unwrap();
 
             self.path.push(idx);
             self.append_oneof_field(message_name, oneof);
@@ -645,10 +639,8 @@ impl CodeGenerator<'_> {
         let MessageCode {
             read,
             default,
-            debug,
             required,
             required_num,
-            nested,
             ..
         } = code;
         let (write_fns, encoded_len_fn) = message_encode_fns(code);
@@ -707,20 +699,6 @@ impl CodeGenerator<'_> {
         ).unwrap();
         self.priv_buf.push_str(&encoded_len_fn);
         self.priv_buf.push_str("}\n\n");
-
-        if *nested {
-            write!(
-                self.priv_buf,
-                "impl ::std::fmt::Debug for {type_path} {{
-                     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {{
-                         f.debug_struct(\"{}\")
-                             {debug}.finish()
-                     }}
-                 }}\n\n",
-                to_upper_camel(message_name)
-            )
-            .unwrap();
-        }
 
         // default
         write!(
@@ -840,7 +818,8 @@ impl CodeGenerator<'_> {
         self.buf.push_str(" {\n");
 
         let mut write = String::new();
-        let mut write_cached = String::new();
+        let mut write_with = String::new();
+        let mut len_with = String::new();
         let mut read = String::new();
         let mut encoded_len = String::new();
 
@@ -855,14 +834,21 @@ impl CodeGenerator<'_> {
             write!(write,
                 "{name}::{field_name}(ref value) => {ops}serialize(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown, dst),",
             ).unwrap();
-            let serialize = if is_message(field) {
-                "serialize_cached"
+            if is_message(field) {
+                write!(write_with,
+                    "{name}::{field_name}(ref value) => {ops}serialize_with(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown, lens, dst),",
+                ).unwrap();
+                write!(len_with,
+                    "{name}::{field_name}(ref value) => {ops}serialized_len_with(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown, lens),",
+                ).unwrap();
             } else {
-                "serialize"
-            };
-            write!(write_cached,
-                "{name}::{field_name}(ref value) => {ops}{serialize}(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown, dst),",
-            ).unwrap();
+                write!(write_with,
+                    "{name}::{field_name}(ref value) => {ops}serialize(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown, dst),",
+                ).unwrap();
+                write!(len_with,
+                    "{name}::{field_name}(ref value) => {ops}serialized_len(value, {field_no}, ::ntex_grpc::types::DefaultValue::Unknown),",
+                ).unwrap();
+            }
             if fields.len() == 1 {
                 // single variant oneof, pattern is irrefutable
                 write!(
@@ -909,10 +895,10 @@ impl CodeGenerator<'_> {
             &to_upper_camel(fields[0].0.name()),
             &OneofCode {
                 write,
-                write_cached: fields
+                with: fields
                     .iter()
                     .any(|(field, _)| is_message(field))
-                    .then_some(write_cached),
+                    .then_some((write_with, len_with)),
                 read,
                 encoded_len,
             },
@@ -928,7 +914,7 @@ impl CodeGenerator<'_> {
     ) {
         let OneofCode {
             write,
-            write_cached,
+            with,
             read,
             encoded_len,
         } = code;
@@ -954,12 +940,17 @@ impl CodeGenerator<'_> {
                 match *self {{ {write} }}
             }}\n",
         ).unwrap();
-        if let Some(write_cached) = write_cached {
+        if let Some((write_with, len_with)) = with {
             write!(self.priv_buf,
                 "
             #[inline]
-            fn serialize_cached(&self, _: u32, _: ::ntex_grpc::types::DefaultValue<&Self>, dst: &mut ::ntex_grpc::BytePages) {{
-                match *self {{ {write_cached} }}
+            fn serialize_with(&self, _: u32, _: ::ntex_grpc::types::DefaultValue<&Self>, lens: &mut ::ntex_grpc::EncodedLens, dst: &mut ::ntex_grpc::BytePages) {{
+                match *self {{ {write_with} }}
+            }}
+
+            #[inline]
+            fn serialized_len_with(&self, _: u32, _: ::ntex_grpc::types::DefaultValue<&Self>, lens: &mut ::ntex_grpc::EncodedLens) -> usize {{
+                match *self {{ {len_with} }}
             }}\n",
             ).unwrap();
         }
@@ -2237,22 +2228,22 @@ mod tests {
         assert!(code.contains("outer::inner::Choice::X(ref value)"));
     }
 
-    /// STATEMENT: Messages with message fields cache their encoded length and
-    /// write the nested messages with the cached lengths, leaf messages are
-    /// generated without the cache.
+    /// STATEMENT: Messages with message fields write the nested messages with
+    /// a length table, leaf messages and plain structs are generated without
+    /// it.
     ///
     /// HOW:
     /// - Generate `Leaf { int32 a }` and
     ///   `Node { Leaf leaf; oneof kind { Leaf l; int32 n } }`.
-    /// - Confirm `Node` gets the hidden `_cached_len` field, a manual `Debug`
-    ///   without it, `write_cached` and `cached_len`, that `write` refreshes
-    ///   the lengths with `encoded_len` before `write_cached`, and that it
-    ///   writes `leaf`, the oneof and its message variant with
-    ///   `serialize_cached`.
-    /// - Confirm `Leaf` keeps the derived `Debug` and is the only message
-    ///   without the cache methods.
+    /// - Confirm both derive `Debug` and no struct has a hidden field.
+    /// - Confirm only `Node` sets `NESTED`, writes through `write_nested` and
+    ///   has `write_with` and `encoded_len_with`, which handle `leaf` and the
+    ///   oneof with `serialize_with` and `serialized_len_with`, while its
+    ///   `encoded_len` uses `serialized_len`.
+    /// - Confirm the oneof gets `serialize_with` and `serialized_len_with`
+    ///   that pass the table to the message variant only.
     #[test]
-    fn test_nested_cached_len() {
+    fn test_nested_encoded_lens() {
         let mut a = FieldDescriptorProto {
             name: Some("a".to_string()),
             number: Some(1),
@@ -2312,52 +2303,61 @@ mod tests {
         );
 
         assert!(code.contains("#[derive(Clone, PartialEq, Debug)]\npub struct Leaf {"));
-        assert!(code.contains("#[derive(Clone, PartialEq)]\npub struct Node {"));
-        assert_eq!(
-            code.matches("pub _cached_len: ::ntex_grpc::CachedLen,")
-                .count(),
-            1
-        );
-        assert!(code.contains("_cached_len: ::core::default::Default::default(),"));
+        assert!(code.contains("#[derive(Clone, PartialEq, Debug)]\npub struct Node {"));
+        assert!(!code.contains("_cached_len"));
+        assert!(!code.contains("impl ::std::fmt::Debug for"));
 
-        assert!(code.contains("impl ::std::fmt::Debug for Node {"));
-        assert!(
-            code.contains(".field(\"leaf\", &self.leaf)\n.field(\"kind\", &self.kind)\n.finish()")
-        );
-        assert_eq!(code.matches("impl ::std::fmt::Debug for").count(), 1);
-
-        assert_eq!(code.matches("fn write_cached(").count(), 1);
-        assert_eq!(code.matches("fn cached_len(").count(), 1);
-        assert!(code.contains("self._cached_len.set(len);"));
+        assert_eq!(code.matches("const NESTED: bool = true;").count(), 1);
+        assert_eq!(code.matches("fn write_with(").count(), 1);
+        assert_eq!(code.matches("fn encoded_len_with(").count(), 1);
         let compact = code.split_whitespace().collect::<String>();
         assert!(compact.contains(
-            "fnwrite(&self,dst:&mut::ntex_grpc::BytePages){::ntex_grpc::Message::encoded_len(self);::ntex_grpc::Message::write_cached(self,dst);}"
+            "fnwrite(&self,dst:&mut::ntex_grpc::BytePages){::ntex_grpc::types::write_nested(self,dst);}"
         ));
-        assert!(code.contains("::ntex_grpc::NativeType::serialize_cached(&self.leaf, 1,"));
-        assert!(code.contains("::ntex_grpc::NativeType::serialize_cached(&self.kind, 0,"));
-
-        // the oneof writes the message variant with its cached length
-        assert_eq!(code.matches("fn serialize_cached(").count(), 1);
         assert!(code.contains(
-            "node::Kind::L(ref value) => ::ntex_grpc::NativeType::serialize_cached(value, 2,"
+            "::ntex_grpc::NativeType::serialize_with(&self.leaf, 1, ::ntex_grpc::types::DefaultValue::Default, lens, dst);"
         ));
-        assert!(
-            code.contains(
-                "node::Kind::L(ref value) => ::ntex_grpc::NativeType::serialize(value, 2,"
-            )
-        );
+        assert!(code.contains(
+            "::ntex_grpc::NativeType::serialize_with(&self.kind, 0, ::ntex_grpc::types::DefaultValue::Default, lens, dst);"
+        ));
+        assert!(code.contains(
+            "+ ::ntex_grpc::NativeType::serialized_len_with(&self.leaf, 1, ::ntex_grpc::types::DefaultValue::Default, lens)"
+        ));
+        assert!(code.contains(
+            "+ ::ntex_grpc::NativeType::serialized_len_with(&self.kind, 0, ::ntex_grpc::types::DefaultValue::Default, lens)"
+        ));
+        assert!(code.contains(
+            "+ ::ntex_grpc::NativeType::serialized_len(&self.leaf, 1, ::ntex_grpc::types::DefaultValue::Default)"
+        ));
+
+        // the oneof passes the table to its message variant only
+        assert_eq!(code.matches("fn serialize_with(").count(), 1);
+        assert_eq!(code.matches("fn serialized_len_with(").count(), 1);
+        assert!(code.contains(
+            "node::Kind::L(ref value) => ::ntex_grpc::NativeType::serialize_with(value, 2, ::ntex_grpc::types::DefaultValue::Unknown, lens, dst),"
+        ));
+        assert!(code.contains(
+            "node::Kind::L(ref value) => ::ntex_grpc::NativeType::serialized_len_with(value, 2, ::ntex_grpc::types::DefaultValue::Unknown, lens),"
+        ));
+        assert!(code.contains(
+            "node::Kind::N(ref value) => ::ntex_grpc::NativeType::serialize(value, 3, ::ntex_grpc::types::DefaultValue::Unknown, dst),"
+        ));
+        assert!(code.contains(
+            "node::Kind::N(ref value) => ::ntex_grpc::NativeType::serialized_len(value, 3, ::ntex_grpc::types::DefaultValue::Unknown),"
+        ));
     }
 
-    /// STATEMENT: A message whose message values are only in a map caches its
-    /// encoded length, a message with a map of scalars does not.
+    /// STATEMENT: A message whose message values are only in a map writes it
+    /// with a length table, a message with a map of scalars does not.
     ///
     /// HOW:
     /// - Generate `Leaf { int32 a }`, `Bag { map<string, Leaf> m }` and
     ///   `Ints { map<int32, int32> s }`.
-    /// - Confirm only `Bag` gets the `_cached_len` field and writes its map
-    ///   with `serialize_cached`, and `Ints` writes its map with `serialize`.
+    /// - Confirm only `Bag` sets `NESTED` and writes and measures its map
+    ///   with `serialize_with` and `serialized_len_with`, and `Ints` writes
+    ///   its map with `serialize`.
     #[test]
-    fn test_map_cached_len() {
+    fn test_map_encoded_lens() {
         fn scalar(name: &str, number: i32, ty: Type) -> FieldDescriptorProto {
             let mut f = FieldDescriptorProto {
                 name: Some(name.to_string()),
@@ -2434,14 +2434,20 @@ mod tests {
             &mut code,
         );
 
-        assert!(code.contains("#[derive(Clone, PartialEq)]\npub struct Bag {"));
+        assert!(code.contains("#[derive(Clone, PartialEq, Debug)]\npub struct Bag {"));
         assert!(code.contains("#[derive(Clone, PartialEq, Debug)]\npub struct Ints {"));
-        assert_eq!(
-            code.matches("pub _cached_len: ::ntex_grpc::CachedLen,")
-                .count(),
-            1
+        assert_eq!(code.matches("const NESTED: bool = true;").count(), 1);
+        assert!(code.contains(
+            "serialize_with(&self.m, 1, ::ntex_grpc::types::DefaultValue::Default, lens, dst);"
+        ));
+        assert!(code.contains(
+            "serialized_len_with(&self.m, 1, ::ntex_grpc::types::DefaultValue::Default, lens)"
+        ));
+        assert!(
+            code.contains(
+                "serialize(&self.s, 1, ::ntex_grpc::types::DefaultValue::Default, dst);"
+            )
         );
-        assert!(code.contains("serialize_cached(&self.m, 1,"));
-        assert!(code.contains("serialize(&self.s, 1,"));
+        assert!(!code.contains("serialize_with(&self.s,"));
     }
 }

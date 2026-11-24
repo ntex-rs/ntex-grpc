@@ -160,23 +160,27 @@ pub(crate) async fn encode_framed<T: Message>(
     max_size: usize,
     enc: Option<Enc>,
 ) -> Result<BytePages, (GrpcStatus, HeaderValue)> {
-    // fills the cached lengths of nested messages for `write_cached`
-    let len = msg.encoded_len();
     let mut buf = BytePages::default();
-
+    let len = crate::types::with_encoded_lens(|lens| {
+        let len = msg.encoded_len_with(lens);
+        #[cfg(feature = "compression")]
+        if len >= crate::compression::MIN_SIZE && enc.is_some() {
+            lens.rewind();
+            msg.write_with(lens, &mut buf);
+            return Ok(None);
+        }
+        let len = send_size(len, max_size).map_err(|m| (GrpcStatus::ResourceExhausted, m))?;
+        put_prefix(&mut buf, false, len);
+        lens.rewind();
+        msg.write_with(lens, &mut buf);
+        Ok(Some(len))
+    })?;
     #[cfg(feature = "compression")]
-    if len >= crate::compression::MIN_SIZE
-        && let Some(enc) = enc
-    {
-        msg.write_cached(&mut buf);
-        return frame_message(buf, max_size, Some(enc)).await;
+    if len.is_none() {
+        return frame_message(buf, max_size, enc).await;
     }
     #[cfg(not(feature = "compression"))]
-    let _ = enc;
-
-    let len = send_size(len, max_size).map_err(|m| (GrpcStatus::ResourceExhausted, m))?;
-    put_prefix(&mut buf, false, len);
-    msg.write_cached(&mut buf);
+    let _ = (enc, len);
     Ok(buf)
 }
 

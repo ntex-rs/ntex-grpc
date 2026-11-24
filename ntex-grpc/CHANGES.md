@@ -1,5 +1,22 @@
 # Changes
 
+## [4.3.0] - 2026-11-25
+
+* Generated messages no longer cache their encoded length. The encoder records
+  the lengths of nested messages in a per-thread length table while sizing a
+  message and reads them back while writing it. Adds `EncodedLens`,
+  `Message::NESTED`, `Message::encoded_len_with()`, `Message::write_with()`,
+  `NativeType::serialize_with()`, `NativeType::serialized_len_with()` and the
+  matching `FieldFormat` methods
+
+* Remove `CachedLen`, `Message::cached_len()`, `Message::write_cached()`,
+  `NativeType::serialize_cached()`, `NativeType::cached_serialized_len()` and
+  the matching `FieldFormat` methods
+
+* `CODEGEN_VERSION` is 2, code generated for version 1 must be regenerated
+
+* The client sizes a request message once when compression is enabled
+
 ## [4.2.1] - 2026-11-23
 
 * The server routes a call with a single pass over the request path, and takes

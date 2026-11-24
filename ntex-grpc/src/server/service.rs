@@ -1225,7 +1225,8 @@ mod tests {
     /// `STREAMS_CAPACITY`.
     ///
     /// HOW:
-    /// - Open 256 streams and close them, no remove shrinks the map, the check
+    /// - Open 256 streams, the map holds more than four times
+    ///   `STREAMS_CAPACITY`. Close them, no remove shrinks the map, the check
     ///   at the last remove counts the burst.
     /// - Serve batches of 10 streams, the map shrinks only at the remove that
     ///   completes `SHRINK_REMOVES`, to at most `STREAMS_CAPACITY` and at
@@ -1233,18 +1234,23 @@ mod tests {
     /// - Removing an unknown stream returns `None`.
     /// - Open 50 streams in a new map, close them, serve single streams for
     ///   `SHRINK_REMOVES` removes, no remove shrinks the map.
+    ///
+    /// Capacities are read after inserts and after the shrink, before removes
+    /// leave tombstones. A tombstone takes one off the capacity until the map
+    /// is rehashed, and how many removes leave one depends on the hash seed.
     #[test]
     fn streams_shrink() {
         let mut map = StreamMap::new();
         for id in 0..256 {
             map.insert(id, ());
         }
+        assert!(map.map.capacity() > STREAMS_CAPACITY * 4);
         for id in 0..256 {
             assert!(!remove_stream(&mut map, id), "{id}");
         }
-        assert!(map.map.capacity() > STREAMS_CAPACITY * 4);
 
         let mut removes = 0;
+        let mut shrunk_cap = None;
         for batch in 0..30 {
             let ids = (256 + batch * 10)..(266 + batch * 10);
             for id in ids.clone() {
@@ -1252,14 +1258,14 @@ mod tests {
             }
             for id in ids {
                 removes += 1;
-                assert_eq!(
-                    remove_stream(&mut map, id),
-                    removes == SHRINK_REMOVES,
-                    "{removes}"
-                );
+                let shrink = remove_stream(&mut map, id);
+                assert_eq!(shrink, removes == SHRINK_REMOVES, "{removes}");
+                if shrink {
+                    shrunk_cap = Some(map.map.capacity());
+                }
             }
         }
-        let cap = map.map.capacity();
+        let cap = shrunk_cap.unwrap();
         assert!((20..=STREAMS_CAPACITY).contains(&cap), "{cap}");
         assert!(map.remove(&1000).is_none());
 

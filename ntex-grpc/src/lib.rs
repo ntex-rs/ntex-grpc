@@ -56,7 +56,7 @@ pub use crate::status::GrpcStatus;
 #[doc(hidden)]
 pub use crate::stream::CallStreams;
 pub use crate::stream::{RecvStream, SendStream, StreamError};
-pub use crate::types::{CachedLen, Message, NativeType};
+pub use crate::types::{EncodedLens, Message, NativeType};
 pub use crate::utils::{
     decode_binary_header, decode_binary_header_values, encode_binary_header, encode_grpc_message,
 };
@@ -66,7 +66,7 @@ pub use crate::utils::{
 /// Every generated file asserts at compile time that this value matches the
 /// version it was generated for. A mismatch fails the build, and the file has
 /// to be regenerated with a matching `ntex-grpc-codegen`.
-pub const CODEGEN_VERSION: u32 = 1;
+pub const CODEGEN_VERSION: u32 = 2;
 
 /// Protobuf well-known types.
 ///
